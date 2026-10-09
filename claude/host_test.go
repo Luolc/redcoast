@@ -30,7 +30,7 @@ func TestHostGuard(t *testing.T) {
 		{"own_origin", "gateway-a:7805", "http://gateway-a:7805", false, http.StatusOK},
 		{"rebound_name", "rebind.example.test:7805", "", false, http.StatusForbidden},
 		{"rebound_name_own_origin", "rebind.example.test:7805", "http://rebind.example.test:7805", false, http.StatusForbidden},
-		{"other_ip", "100.64.0.2:7805", "", false, http.StatusForbidden},
+		{"other_ip", "192.0.2.1:7805", "", false, http.StatusForbidden},
 		{"suffix_of_a_name", "x.gateway-a:7805", "", false, http.StatusForbidden},
 		{"no_host", "", "", false, http.StatusForbidden},
 		{"foreign_origin", "gateway-a:7805", "http://site.example.test", false, http.StatusForbidden},

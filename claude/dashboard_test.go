@@ -16,28 +16,18 @@ import (
 	"github.com/Luolc/redcoast/session"
 )
 
-// releaseTree builds a release directory and an inventory link the way the deploy
-// scripts lay them out, and returns the executable's and the link's paths.
-func releaseTree(t *testing.T, binaryCommit, inventoryCommit string) (binary, inventory string) {
+// inventoryTree builds an inventory link the way the deploy scripts lay it out and
+// returns the link's path.
+func inventoryTree(t *testing.T, inventoryCommit string) string {
 	t.Helper()
 	root := t.TempDir()
-	release := filepath.Join(root, "releases", binaryCommit)
-	if err := os.MkdirAll(release, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(release, "redcoast"), nil, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(release, filepath.Join(root, "current")); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(filepath.Join(root, "inventories", inventoryCommit), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join("inventories", inventoryCommit), filepath.Join(root, "inventory")); err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Join(root, "current", "redcoast"), filepath.Join(root, "inventory")
+	return filepath.Join(root, "inventory")
 }
 
 // TestDashboardJSON reads the dashboard over a store with one matching and one
@@ -60,9 +50,8 @@ func TestDashboardJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	binaryCommit, inventoryCommit := strings.Repeat("a", 40), strings.Repeat("b", 40)
-	binary, inventory := releaseTree(t, binaryCommit, inventoryCommit)
-	d := NewDashboard(e, DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Binary: binary, Inventory: inventory,
+	inventoryCommit := strings.Repeat("b", 40)
+	d := NewDashboard(e, DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Version: "1.2.3", Inventory: inventoryTree(t, inventoryCommit),
 		Started: h.clock.Add(-time.Hour), Tunnels: func() (int, int) { return 3, 256 }})
 
 	recorder := httptest.NewRecorder()
@@ -96,7 +85,7 @@ func TestDashboardJSON(t *testing.T) {
 		t.Fatalf("health = %+v", view.Health)
 	}
 	g := view.Gateway
-	if g.BinaryCommit != binaryCommit || g.InventoryCommit != inventoryCommit || g.OpenTunnels != 3 || g.TunnelLimit != 256 || g.Backup != nil {
+	if g.Version != "1.2.3" || g.InventoryCommit != inventoryCommit || g.OpenTunnels != 3 || g.TunnelLimit != 256 || g.Backup != nil {
 		t.Fatalf("gateway = %+v", g)
 	}
 	if len(view.Accounts) != 2 {
@@ -119,19 +108,14 @@ func TestDashboardJSON(t *testing.T) {
 	}
 }
 
-// TestCommitOf reads the commit from a release tree and nothing from a path that names
-// none, such as a binary run from a build directory.
+// TestCommitOf reads the commit from an inventory link and nothing from a directory
+// whose name is not one, such as an inventory checked out by hand.
 func TestCommitOf(t *testing.T) {
 	commit := strings.Repeat("c", 40)
-	binary, inventory := releaseTree(t, commit, commit)
-	if commitOf(binary, true) != commit || commitOf(inventory, false) != commit {
-		t.Fatal("commit not read from the release tree")
+	if got := commitOf(inventoryTree(t, commit)); got != commit {
+		t.Fatalf("commit %q read from the inventory link", got)
 	}
-	build := filepath.Join(t.TempDir(), "redcoast")
-	if err := os.WriteFile(build, nil, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got := commitOf(build, true); got != "" {
+	if got := commitOf(t.TempDir()); got != "" {
 		t.Fatalf("commit %q read from a path without one", got)
 	}
 }

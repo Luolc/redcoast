@@ -16,3 +16,12 @@ it("refuses a shape that drifted", () => {
   };
   expect(() => parseDashboard(JSON.stringify(drifted))).toThrow();
 });
+
+it("accepts a gateway that reports no version", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const older = {
+    ...sample,
+    gateway: { ...sample.gateway, version: undefined, binary_commit: "" },
+  };
+  expect(parseDashboard(JSON.stringify(older)).gateway.version).toBeUndefined();
+});

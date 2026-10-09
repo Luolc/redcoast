@@ -1,13 +1,13 @@
 ---
 name: redcoast-pr-review
-description: What a review in the redcoast repo checks on top of a general PR review: the tailnet address range, security-sensitive code and the design document. Use when reviewing any PR here, and as the author before asking for review.
+description: "What a review in the redcoast repo checks on top of a general PR review: the tailnet address range, security-sensitive code and the design document. Use when reviewing any PR here, and as the author before asking for review."
 ---
 
 # redcoast PR review
 
 ## Tailnet addresses
 
-Inside 100.64.0.0/10, only the prefix itself and its first address 100.64.0.1 may appear, as synthetic boundary values for listen and destination policy tests; any other address in this range is P0. `git grep -nE '100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'` lists every such literal; everything it prints must be `100.64.0.0/10` or `100.64.0.1`.
+Inside 100.64.0.0/10, only the prefix itself and its first address 100.64.0.1 may appear, as synthetic boundary values for listen and destination policy tests; any other address in this range is P0. `.github/scripts/check-tailnet-literals.sh` lists every other such literal and fails on it; CI runs it.
 
 ## Security-sensitive code
 

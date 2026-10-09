@@ -11,7 +11,7 @@ import (
 	"github.com/Luolc/redcoast/session"
 )
 
-// commitName matches a full commit hash, the name of a release or inventory directory.
+// commitName matches a full commit hash, the name of an inventory directory.
 var commitName = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // DashboardConfig is what the dashboard reads besides the accounts and the egress
@@ -20,7 +20,7 @@ type DashboardConfig struct {
 	Reader    *session.Reader // the store over a read-only connection
 	Store     *session.Store  // only for its last retention run, kept in memory
 	DBPath    string          // the store's file, whose -wal file is measured
-	Binary    string          // the running executable's path
+	Version   string          // the running executable's release
 	Inventory string          // the --inventory link
 	Started   time.Time       // when the gateway started
 	Tunnels   func() (open, limit int)
@@ -54,7 +54,7 @@ type dashboardView struct {
 // gatewayView is the overview. Retention, backup, egress and in-flight figures are this
 // process's memory: they cover the time since it started.
 type gatewayView struct {
-	BinaryCommit    string               `json:"binary_commit"`    // empty when the executable is not under a release directory
+	Version         string               `json:"version"`          // the release this binary was built from
 	InventoryCommit string               `json:"inventory_commit"` // the link's target now; empty when it names no commit
 	Started         time.Time            `json:"started"`
 	WALBytes        int64                `json:"wal_bytes"`
@@ -119,8 +119,8 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 	}
 	view.Health = d.egress.judge(statuses, nil)
 	view.Gateway = gatewayView{
-		BinaryCommit:    commitOf(d.cfg.Binary, true),
-		InventoryCommit: commitOf(d.cfg.Inventory, false),
+		Version:         d.cfg.Version,
+		InventoryCommit: commitOf(d.cfg.Inventory),
 		Started:         d.cfg.Started.UTC(),
 		Retention:       d.cfg.Store.LastRetention(),
 	}
@@ -164,16 +164,12 @@ func page(dir string) http.Handler {
 	})
 }
 
-// commitOf returns the commit that path's resolved location names: its directory's
-// name for an executable under releases/<commit>/, its own name for an inventory link
-// to inventories/<commit>. It is empty when the location names no commit.
-func commitOf(path string, inDirectory bool) string {
+// commitOf returns the commit that an inventory link to inventories/<commit> names. It
+// is empty when the link's target names no commit.
+func commitOf(path string) string {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return ""
-	}
-	if inDirectory {
-		resolved = filepath.Dir(resolved)
 	}
 	if name := filepath.Base(resolved); commitName.MatchString(name) {
 		return name
