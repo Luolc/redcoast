@@ -1,0 +1,62 @@
+# Example configuration of redcoast, started as
+#   redcoast claude serve --config <path>
+# The four paths marked required must be set; credentials and backup are
+# examples; every other key shows its default. Unknown keys are refused.
+# Credentials appear only as references: op://vault/item/field (1Password),
+# env://NAME or file:///absolute/path.
+
+upstream: https://api.anthropic.com
+
+listen:
+  # One IP literal and port each, all different. Loopback and private
+  # addresses (RFC 1918, 100.64.0.0/10, IPv6 ULA) are accepted; a public IP
+  # needs allow_public: true.
+  reverse: 127.0.0.1:8789
+  forward: 127.0.0.1:8791
+  health: 127.0.0.1:7804
+  dashboard: 127.0.0.1:7805
+  session: "" # TCP session interface for other machines; empty for none
+  allow_public: false
+  # TLS on every listener above, with one certificate read at start and on a
+  # handoff. Sessions are handed https://<server_name>:<port>, so the
+  # certificate must cover server_name; on a public address use one a public
+  # CA signed. Without this section the listeners are plain HTTP.
+  # tls:
+  #   cert_file: /etc/redcoast/tls/fullchain.pem
+  #   key_file: /etc/redcoast/tls/privkey.pem
+  #   server_name: gateway.example.test
+
+session_socket: /run/redcoast/session.sock # required
+admin_socket: /run/redcoast/admin.sock # required
+session_db: /var/lib/redcoast/sessions.db # required
+inventory: /etc/redcoast/inventory # required
+dashboard_dir: "" # built dashboard frontend; empty serves only /dashboard.json
+capture_dir: ""
+
+egress_interval: 15m
+
+limits:
+  idle_timeout: 5m
+  max_request_duration: 1h
+  max_tunnel_duration: 6h
+  max_tunnels: 256
+  account_concurrency: 32
+
+retention:
+  traffic_days: 180
+  session_days: 365
+
+credentials:
+  # env:// or file:// reference of a 1Password service account token; without
+  # it, op:// references are refused.
+  onepassword_token: file:///run/credentials/redcoast.service/op-sa-token
+
+# Hourly backups to an S3-compatible bucket, addressed path-style. Leave the
+# section out to take none.
+backup:
+  endpoint: https://s3.us-east-1.amazonaws.com
+  bucket: example-gateway-backup
+  region: us-east-1
+  prefix: redcoast
+  access_key_id: op://example-vault/backup-writer/access key id
+  secret_access_key: op://example-vault/backup-writer/secret access key

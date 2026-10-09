@@ -1,0 +1,63 @@
+#!/bin/sh
+# Installed as `claude` next to redcoast-client on a machine where every
+# start must go through the gateway: this script never starts the real
+# claude, so any fault stops the start. Arguments pass through as given,
+# after redcoast-client's own `claude`. Installing it is described in
+# cmd/redcoast-client/README.md.
+#
+# ~/.config/redcoast-client/shim.env is read like redcoast-client-shim reads
+# it: key=value lines, read as data; a value may start with $HOME, nothing
+# else is expanded:
+#   address=host:port       the gateway's session address; https://host:port with TLS
+#   credential_file=path    this machine's credential
+#   claude=path             the real claude, absolute
+# A prefix= line is accepted and ignored. The working directory decides
+# nothing here; redcoast-client refuses to start without one.
+set -u
+
+fail() {
+  echo "claude (redcoast-client full shim): $*; not starting claude" >&2
+  exit 3
+}
+
+self=$(readlink -f -- "$0")
+config=${HOME:-}/.config/redcoast-client/shim.env
+for name in $(env | sed -n 's/^\(REDCOAST_CLIENT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "$name"
+done
+
+{ [ -f "$config" ] && [ -r "$config" ]; } || fail "cannot read $config"
+address='' credential_file='' claude='' bad=''
+while IFS= read -r line || [ -n "$line" ]; do
+  case $line in
+    '' | '#'*) continue ;;
+    *=*) ;;
+    *)
+      bad="$bad '$line'"
+      continue
+      ;;
+  esac
+  key=${line%%=*} value=${line#*=}
+  # shellcheck disable=SC2016 # the literal text $HOME
+  case $value in
+    '$HOME' | '$HOME/'*) value=${HOME:-}${value#\$HOME} ;;
+  esac
+  case $key=$value in
+    *'$'*) bad="$bad '$line'" ;;
+    address=*) address=$value ;;
+    credential_file=*) credential_file=$value ;;
+    claude=*) claude=$value ;;
+    prefix=*) ;;
+    *) bad="$bad '$line'" ;;
+  esac
+done <"$config"
+
+[ -z "$bad" ] || fail "cannot parse$bad in $config"
+[ -n "$claude" ] || fail "$config sets no claude"
+[ "$(readlink -f -- "$claude")" != "$self" ] || fail "claude in $config is this shim"
+[ -n "$address" ] || fail "$config sets no address"
+[ -r "$credential_file" ] || fail "cannot read the machine credential '$credential_file'"
+gw=${self%/*}/redcoast-client
+[ -x "$gw" ] || fail "$gw is missing or not executable"
+export REDCOAST_CLIENT_ADDRESS="$address" REDCOAST_CLIENT_CREDENTIAL_FILE="$credential_file" REDCOAST_CLIENT_CLAUDE="$claude"
+exec "$gw" claude "$@"

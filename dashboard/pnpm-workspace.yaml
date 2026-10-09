@@ -1,0 +1,11 @@
+# pnpm 11 defaults to 1440; wait two days for a new release instead.
+minimumReleaseAge: 2880
+trustPolicy: no-downgrade
+allowBuilds: {}
+trustPolicyExclude:
+  # The 6.x line never had provenance. Pulled in by eslint-plugin-react-hooks
+  # via @babel/core.
+  - "semver@6.3.1"
+# Install fails on any Node other than package.json's engines, so the build
+# is the one the release pins.
+engineStrict: true

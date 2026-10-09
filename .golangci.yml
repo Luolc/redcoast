@@ -1,0 +1,24 @@
+version: "2"
+run:
+  concurrency: 1
+  timeout: 2m
+  tests: true
+linters:
+  default: standard
+  enable:
+    - gocognit
+    - revive
+  settings:
+    gocognit:
+      min-complexity: 20
+    revive:
+      enable-default-rules: false
+      rules:
+        - name: exported
+        - name: package-comments
+  exclusions:
+    presets: []
+    rules:
+      - path: _test\.go
+        linters:
+          - gocognit

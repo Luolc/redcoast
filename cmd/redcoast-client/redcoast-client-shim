@@ -1,0 +1,95 @@
+#!/bin/sh
+# Installed as `claude` next to redcoast-client, in a directory placed early
+# in PATH, so whatever starts `claude` reaches the gateway unchanged. Under
+# the configured prefix it execs redcoast-client with the gateway's
+# variables; elsewhere it execs the real claude. Arguments pass through as
+# given, after redcoast-client's own `claude`. Installing it is described in
+# cmd/redcoast-client/README.md.
+#
+# ~/.config/redcoast-client/shim.env holds key=value lines, read as data; a
+# value may start with $HOME, nothing else is expanded:
+#   address=host:port       the gateway's session address; https://host:port with TLS
+#   credential_file=path    this machine's credential
+#   claude=path             the real claude, absolute
+#   prefix=path             physical directory whose subtree goes through the
+#                           gateway; empty sends every directory through it
+# Every claude on this machine starts here, so only a start known to be in
+# scope may fail. Whatever leaves the scope undecided (no readable file, no
+# valid prefix, no working directory) counts as out of scope.
+set -u
+
+fail() {
+  echo "claude (redcoast-client shim): $*; not starting claude" >&2
+  exit 3
+}
+
+self=$(readlink -f -- "$0")
+config=${HOME:-}/.config/redcoast-client/shim.env
+for name in $(env | sed -n 's/^\(REDCOAST_CLIENT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "$name"
+done
+
+# The configured claude when it is usable, else the first claude in PATH that
+# is not this script.
+direct() {
+  if [ -x "$claude" ] && [ "$(readlink -f -- "$claude")" != "$self" ]; then
+    exec "$claude" "$@"
+  fi
+  IFS=:
+  for dir in $PATH; do
+    if [ -x "$dir/claude" ] && [ "$(readlink -f -- "$dir/claude")" != "$self" ]; then
+      exec "$dir/claude" "$@"
+    fi
+  done
+  fail "no claude in PATH besides this shim"
+}
+
+address='' credential_file='' claude='' prefix='' has_prefix='' bad=''
+if [ -f "$config" ] && [ -r "$config" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      '' | '#'*) continue ;;
+      *=*) ;;
+      *)
+        bad="$bad '$line'"
+        continue
+        ;;
+    esac
+    key=${line%%=*} value=${line#*=}
+    # shellcheck disable=SC2016 # the literal text $HOME
+    case $value in
+      '$HOME' | '$HOME/'*) value=${HOME:-}${value#\$HOME} ;;
+    esac
+    case $key=$value in
+      *'$'*) bad="$bad '$line'" ;;
+      address=*) address=$value ;;
+      credential_file=*) credential_file=$value ;;
+      claude=*) claude=$value ;;
+      prefix=*) prefix=$value has_prefix=1 ;;
+      *) bad="$bad '$line'" ;;
+    esac
+  done <"$config"
+fi
+
+# dash prints nothing and succeeds when the directory has been deleted.
+cwd=$(pwd -P 2>/dev/null)
+[ -n "$cwd" ] || direct "$@"
+[ -n "$has_prefix" ] || direct "$@"
+case $prefix in
+  '' | /*) ;;
+  *) direct "$@" ;;
+esac
+case "$cwd/" in
+  "${prefix%/}"/*) ;;
+  *) direct "$@" ;;
+esac
+
+[ -z "$bad" ] || fail "cannot parse$bad in $config"
+[ -n "$claude" ] || fail "$config sets no claude"
+[ "$(readlink -f -- "$claude")" != "$self" ] || fail "claude in $config is this shim"
+[ -n "$address" ] || fail "$config sets no address"
+[ -r "$credential_file" ] || fail "cannot read the machine credential '$credential_file'"
+gw=${self%/*}/redcoast-client
+[ -x "$gw" ] || fail "$gw is missing"
+export REDCOAST_CLIENT_ADDRESS="$address" REDCOAST_CLIENT_CREDENTIAL_FILE="$credential_file" REDCOAST_CLIENT_CLAUDE="$claude"
+exec "$gw" claude "$@"

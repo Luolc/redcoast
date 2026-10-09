@@ -1,0 +1,12 @@
+# A made-up account for synthetic runs of hi.py: nothing here is resolved or
+# reached, the fake exit listens on the port.
+email: example-a@example.test
+access: gateway
+status: active
+oauth_token: op://example-vault/example-a/token
+proxy:
+  host: proxy.example.test
+  port: 8001
+  expected_egress_ip: 192.0.2.10
+  username_ref: op://example-vault/example-proxy/username
+  password_ref: op://example-vault/example-proxy/password

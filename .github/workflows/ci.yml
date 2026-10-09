@@ -1,0 +1,162 @@
+# Two jobs. `check` is the required status check on main: full-history
+# secret scan, the Go checks, the unit tests, the release tag guard's test
+# and the dashboard frontend (see AGENTS.md, "Checks"). `e2e` runs the
+# Docker rehearsals on every pull request and push but is not required: a red
+# run does not block a merge, it asks for a look (AGENTS.md, "Checks"). No
+# step uses a credential: the rehearsals run on made-up accounts, a fake
+# upstream and a fake exit; only the hi rehearsal runs the real Claude CLI.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the scan below reads commits, and a shallow clone
+          # would hide everything but the latest one.
+          fetch-depth: 0
+
+      # Pinned by version and SHA-256: the step downloads an executable and
+      # runs it over the repo, so a moved tag must not change what runs.
+      - name: Secret scan (gitleaks, full history)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          bindir="$(mktemp -d)"
+          tarball="${bindir}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" -C "$bindir" gitleaks
+          # --redact is required: without it a hit prints the secret into
+          # the Actions log.
+          "${bindir}/gitleaks" git --redact --no-banner --verbose .
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            tools/golangci-lint.sum
+
+      - name: Go format
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf 'gofmt differs:\n%s\n' "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        run: go tool -modfile=tools/golangci-lint.mod golangci-lint run ./...
+
+      - name: Go tests
+        run: go test -race ./...
+
+      - uses: astral-sh/setup-uv@v6
+
+      # hi.py and its tests need Python 3.14 and PyYAML; the two programs
+      # it mounts into python:3.13-slim containers run there in the e2e job.
+      - name: Experiments unit tests
+        working-directory: experiments
+        run: uv run --no-project --python 3.14 --with pytest==9.1.1 --with pyyaml==6.0.3 python -m pytest -q tests
+
+      - name: Release tag guard test
+        run: .github/scripts/release-tag-guard.test.sh
+
+      - uses: pnpm/action-setup@v6
+        with:
+          # Reads the pnpm version from packageManager.
+          package_json_file: dashboard/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: dashboard/.node-version
+          package-manager-cache: false
+
+      - name: Dashboard frontend
+        working-directory: dashboard
+        run: |
+          set -eu
+          pnpm install --frozen-lockfile
+          # Fails on an unmet peer range, such as a TypeScript newer than
+          # typescript-eslint supports.
+          pnpm peers check
+          pnpm run format:check
+          pnpm run lint
+          pnpm run test
+          pnpm run knip
+          pnpm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Static binaries
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/bin"
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/bin/redcoast" ./cmd/redcoast
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/bin/redcoast-client" ./cmd/redcoast-client
+
+      # Gateway and client containers on the runner's Docker; see
+      # e2e/README.md.
+      - name: Sessions across machines (fake claude)
+        run: >-
+          python3 e2e/xmachine.py
+          --gateway-binary "$RUNNER_TEMP/bin/redcoast"
+          --launcher-binary "$RUNNER_TEMP/bin/redcoast-client"
+          --out "$RUNNER_TEMP/xmachine"
+
+      - uses: astral-sh/setup-uv@v6
+
+      # The hi rehearsal with the real Claude CLI at a pinned version against
+      # a fake API and a fake exit; see experiments/README.md.
+      - name: hi rehearsal, synthetic cases
+        run: >-
+          experiments/ci-cases.sh
+          "$RUNNER_TEMP/bin/redcoast"
+          "$RUNNER_TEMP/bin/redcoast-client"
+          "$RUNNER_TEMP/hi"
+
+  # Known vulnerabilities in the dependencies and the standard library. Not
+  # required: a new advisory can turn it red without any change here.
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: tools/govulncheck.sum
+      - run: go tool -modfile=tools/govulncheck.mod govulncheck ./...
