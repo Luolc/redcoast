@@ -1,6 +1,6 @@
 ---
 name: redcoast-pr-review
-description: What a review in the redcoast repo checks on top of a general PR review: the tailnet address range, security-sensitive code and the design document. Use when reviewing any PR here, and as the author before asking for review.
+description: "What a review in the redcoast repo checks on top of a general PR review: the tailnet address range, security-sensitive code and the design document. Use when reviewing any PR here, and as the author before asking for review."
 ---
 
 # redcoast PR review
