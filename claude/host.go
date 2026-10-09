@@ -22,7 +22,7 @@ func HostGuard(hosts []string, next http.Handler) http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "unknown host"})
 			return
 		}
-		if origin, ok := r.Header["Origin"]; ok && !sameOrigin(origin, r.Host) {
+		if origin, ok := r.Header["Origin"]; ok && !sameOrigin(origin, r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request"})
 			return
 		}
@@ -43,13 +43,17 @@ func requestHost(host string) string {
 	return strings.ToLower(host)
 }
 
-// sameOrigin reports whether the Origin header names an http or https page at host,
-// which the browser writes from the same URL as the Host header. "null" and every
-// other value are foreign.
-func sameOrigin(origin []string, host string) bool {
+// sameOrigin reports whether the Origin header names the page r was sent to: https
+// over TLS, http otherwise, at r's Host, which the browser writes from the same URL.
+// "null" and every other value are foreign.
+func sameOrigin(origin []string, r *http.Request) bool {
 	if len(origin) != 1 {
 		return false
 	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
 	u, err := url.Parse(origin[0])
-	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && strings.EqualFold(u.Host, host)
+	return err == nil && u.Scheme == scheme && strings.EqualFold(u.Host, r.Host)
 }
