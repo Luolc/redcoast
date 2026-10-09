@@ -2,11 +2,18 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Luolc/redcoast/internal/testtls"
 )
 
 // TestHealthAndEgressConfiguration checks the health endpoint's and the dashboard's
@@ -44,6 +51,59 @@ func TestHealthAndEgressConfiguration(t *testing.T) {
 				t.Fatalf("configuration refused or changed: %+v %v", cfg, err)
 			}
 		})
+	}
+}
+
+// TestReadOnlyHosts checks which Host names /health and the dashboard answer, through
+// a real HTTP server: the IPs of their listen addresses, the TLS server name and
+// listen.host_names, and no other name (DNS rebinding) or listener's IP. Entries of
+// listen.host_names that are not lower-case DNS names without a port are refused.
+func TestReadOnlyHosts(t *testing.T) {
+	cert, key := writeTLSFiles(t, testtls.New(t))
+	tailnet := "listen: {health: '100.64.0.1:7804', dashboard: '[fd00::7]:7805', reverse: '100.64.0.2:7802', host_names: [gateway-a]}\n"
+	withTLS := "listen:\n  tls: {cert_file: '" + cert + "', key_file: '" + key + "', server_name: '" + testtls.ServerName + "'}\n"
+	for _, arm := range []struct {
+		name, yaml string
+		allowed    []string
+		refused    []string
+	}{
+		{"defaults", "", []string{"127.0.0.1:7804", "127.0.0.1:7805"}, []string{"gateway-a:7804", "localhost:7804"}},
+		{"tailnet", tailnet, []string{"100.64.0.1:7804", "[fd00::7]:7805", "gateway-a:7805"}, []string{"100.64.0.2:7804", "127.0.0.1:7804", "rebind.example.test:7805"}},
+		{"tls", withTLS, []string{testtls.ServerName + ":7804", "127.0.0.1:7805"}, []string{"gateway-a:7804"}},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			cfg, err := parseConfig([]byte(baseConfig + arm.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(cfg.readOnly(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("guarded"))
+			})))
+			defer server.Close()
+			for _, host := range append(arm.allowed, arm.refused...) {
+				request, err := http.NewRequest(http.MethodGet, server.URL+"/health", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Host = host
+				response, err := server.Client().Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, _ := io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				answered := response.StatusCode == http.StatusOK && string(body) == "guarded"
+				if want := !slices.Contains(arm.refused, host); answered != want || !want && response.StatusCode != http.StatusForbidden {
+					t.Errorf("Host %s: status %d, body %q; want answered %v", host, response.StatusCode, body, want)
+				}
+			}
+		})
+	}
+	for _, name := range []string{"Gateway-A", "gateway-a:7805", "*.example.test", "", "-gateway"} {
+		_, err := parseConfig([]byte(baseConfig + "listen: {host_names: ['" + name + "']}\n"))
+		if err == nil || !strings.Contains(err.Error(), "config: listen.host_names: ") {
+			t.Errorf("host name %q: %v; want refused, naming listen.host_names", name, err)
+		}
 	}
 }
 
