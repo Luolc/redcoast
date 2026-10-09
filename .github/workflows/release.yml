@@ -1,9 +1,10 @@
 # Publishes static linux/amd64 builds of redcoast and redcoast-client, the
-# two client shims and SHA256SUMS over all four to a GitHub Release when a v*
-# tag is pushed (cmd/redcoast-client/README.md says how they are installed).
-# Pushing the tag is the release itself, so only the maintainer does it. The
-# builds are reproducible: the same commit and Go toolchain give the same
-# SHA-256.
+# two client shims, the dashboard page and SHA256SUMS over all five to a
+# GitHub Release when a v* tag is pushed (cmd/redcoast/README.md and
+# cmd/redcoast-client/README.md say how they are installed). Pushing the tag
+# is the release itself, so only the maintainer does it. The builds are
+# reproducible: the same commit, Go toolchain and Node and pnpm versions give
+# the same SHA-256.
 
 name: Release
 
@@ -29,6 +30,27 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - uses: pnpm/action-setup@v6
+        with:
+          # Reads the pnpm version from packageManager.
+          package_json_file: dashboard/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: dashboard/.node-version
+          package-manager-cache: false
+
+      # One self-contained index.html in dashboard/dist; the page shows the
+      # commit it was built from.
+      - name: Dashboard page
+        working-directory: dashboard
+        env:
+          DASHBOARD_COMMIT: ${{ github.sha }}
+        run: |
+          set -eu
+          pnpm install --frozen-lockfile
+          pnpm run build
+
       - name: Static builds
         env:
           CGO_ENABLED: "0"
@@ -42,7 +64,8 @@ jobs:
             go build -trimpath -buildvcs=false -o "dist/${cmd}-linux-amd64" "./cmd/${cmd}"
           done
           install -m 0755 cmd/redcoast-client/redcoast-client-shim cmd/redcoast-client/redcoast-client-shim-full dist/
-          (cd dist && sha256sum redcoast-linux-amd64 redcoast-client-linux-amd64 redcoast-client-shim redcoast-client-shim-full >SHA256SUMS)
+          install -m 0644 dashboard/dist/index.html dist/redcoast-dashboard.html
+          (cd dist && sha256sum redcoast-linux-amd64 redcoast-client-linux-amd64 redcoast-client-shim redcoast-client-shim-full redcoast-dashboard.html >SHA256SUMS)
           cat dist/SHA256SUMS
 
       - name: Publish
@@ -50,6 +73,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "Static linux/amd64 builds of redcoast and redcoast-client, and the client shims (installed as claude, see cmd/redcoast-client/README.md). Check them with sha256sum -c SHA256SUMS." \
+            --notes "Static linux/amd64 builds of redcoast and redcoast-client, the client shims (installed as claude, see cmd/redcoast-client/README.md) and the dashboard page (installed as index.html in dashboard_dir, see cmd/redcoast/README.md). Check them with sha256sum -c SHA256SUMS." \
             dist/redcoast-linux-amd64 dist/redcoast-client-linux-amd64 \
-            dist/redcoast-client-shim dist/redcoast-client-shim-full dist/SHA256SUMS
+            dist/redcoast-client-shim dist/redcoast-client-shim-full \
+            dist/redcoast-dashboard.html dist/SHA256SUMS
