@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -114,8 +115,12 @@ func main() {
 	// in progress, and the store is closed after them, before the failure is reported.
 	servers := []func(context.Context) error{
 		func(ctx context.Context) error { return egress.Run(ctx, cfg.egressInterval) },
-		func(ctx context.Context) error { return claude.Serve(ctx, l.health, egress.HealthHandler()) },
-		func(ctx context.Context) error { return claude.Serve(ctx, l.dashboard, dashboard.Handler()) },
+		func(ctx context.Context) error {
+			return claude.Serve(ctx, l.health, cfg.readOnly(egress.HealthHandler()))
+		},
+		func(ctx context.Context) error {
+			return claude.Serve(ctx, l.dashboard, cfg.readOnly(dashboard.Handler()))
+		},
 		func(ctx context.Context) error { return claude.Serve(ctx, l.reverse, entrypoint.Reverse) },
 		func(ctx context.Context) error { return claude.Serve(ctx, l.forward, entrypoint.Forward) },
 		func(ctx context.Context) error { return session.ServeUnixListener(ctx, l.session, sessions.Handler()) },
@@ -153,6 +158,12 @@ func entrypoints(cfg config) session.Entrypoints {
 	_, reverse, _ := net.SplitHostPort(cfg.listen)
 	_, forward, _ := net.SplitHostPort(cfg.forwardListen)
 	return session.Entrypoints{ReverseProxy: "https://" + net.JoinHostPort(cfg.serverName, reverse), ForwardProxy: net.JoinHostPort(cfg.serverName, forward)}
+}
+
+// readOnly is how /health and the dashboard are served: only to requests that name the
+// gateway by one of cfg.hostNames.
+func (cfg config) readOnly(handler http.Handler) http.Handler {
+	return claude.HostGuard(cfg.hostNames, handler)
 }
 
 // openStore opens the session database and refuses a file that fails quick_check: the

@@ -26,6 +26,8 @@ The gateway reads one YAML file, given by `--config`. [`redcoast.example.yaml`](
 
 Listen addresses are IP literals. Loopback and private addresses (RFC 1918, 100.64.0.0/10, IPv6 ULA) are accepted; a public one needs `listen.allow_public: true` and, in practice, `listen.tls`.
 
+`/health` and the dashboard answer only requests whose `Host` names the gateway: the IP of `listen.health` or `listen.dashboard`, `listen.tls.server_name`, or a name in `listen.host_names`, at any port. A request with any other `Host`, or with an `Origin` other than the page's own, gets 403. This stops a web page from reading them through a name of its own that resolves to the gateway (DNS rebinding). When people or monitors reach the gateway by a host name, such as its name on a private network, add that name to `listen.host_names`; otherwise they get 403 while the IP still works.
+
 ### The inventory
 
 `inventory` names a directory with one file per account, `<alias>.yaml`, where the alias matches `^[a-z0-9][a-z0-9_-]{0,63}$`. The gateway serves the accounts with `status: active` and `access: gateway`; other keys are ignored, so the directory can hold more facts than the gateway reads. An example with made-up values:

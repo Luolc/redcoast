@@ -16,6 +16,10 @@ listen:
   health: 127.0.0.1:7804
   dashboard: 127.0.0.1:7805
   session: "" # TCP session interface for other machines; empty for none
+  # health and dashboard answer only requests whose Host is the IP of their
+  # listen address, tls.server_name or one of these lower-case DNS names (any
+  # port); any other Host, or another page's Origin, gets 403.
+  host_names: []
   allow_public: false
   # TLS on every listener above, with one certificate read at start and on a
   # handoff. Sessions are handed https://<server_name>:<port>, so the

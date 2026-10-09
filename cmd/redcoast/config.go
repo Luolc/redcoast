@@ -24,14 +24,15 @@ import (
 
 // config holds the validated settings of the configuration file.
 type config struct {
-	listen             string // reverse proxy (inference)
-	forwardListen      string // forward proxy (side traffic)
-	socket             string // unix socket of the session interface
-	sessionListen      string // TCP address of the session interface for other machines; empty for none
-	adminSocket        string // unix socket of the management interface
-	healthListen       string // health endpoint
-	dashboardListen    string // read-only dashboard
-	dashboardDir       string // the dashboard frontend's built files; empty for none
+	listen             string   // reverse proxy (inference)
+	forwardListen      string   // forward proxy (side traffic)
+	socket             string   // unix socket of the session interface
+	sessionListen      string   // TCP address of the session interface for other machines; empty for none
+	adminSocket        string   // unix socket of the management interface
+	healthListen       string   // health endpoint
+	dashboardListen    string   // read-only dashboard
+	dashboardDir       string   // the dashboard frontend's built files; empty for none
+	hostNames          []string // the Host names /health and the dashboard answer
 	egressInterval     time.Duration
 	limits             claude.Limits
 	accountConcurrency int
@@ -77,6 +78,7 @@ type fileConfig struct {
 		Health      string   `yaml:"health"`
 		Dashboard   string   `yaml:"dashboard"`
 		Session     string   `yaml:"session"`
+		HostNames   []string `yaml:"host_names"`
 		AllowPublic bool     `yaml:"allow_public"`
 		TLS         *tlsFile `yaml:"tls"`
 	} `yaml:"listen"`
@@ -120,6 +122,10 @@ var (
 	regionName   = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 	backupPrefix = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
 )
+
+// hostLabel matches a DNS name: dot-separated labels of lower-case letters, digits and
+// inner hyphens.
+var hostLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
 
 // accountAlias matches the inventory's account IDs, which are not secret.
 var accountAlias = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -230,15 +236,41 @@ func parseConfig(data []byte) (config, error) {
 	} else if len(public) > 0 {
 		warning = "listen: " + strings.Join(public, ", ") + " on a public IP without listen.tls; session credentials cross the network in plain text"
 	}
+	hostNames := readOnlyHosts(report, f.Listen.Health, f.Listen.Dashboard, serverName, f.Listen.HostNames)
 	if len(errs) > 0 {
 		return config{}, errors.Join(errs...)
 	}
 	return config{tls: serverTLS, serverName: serverName, warning: warning, listen: f.Listen.Reverse, forwardListen: f.Listen.Forward, socket: f.SessionSocket, sessionListen: f.Listen.Session, adminSocket: f.AdminSocket,
-		healthListen: f.Listen.Health, dashboardListen: f.Listen.Dashboard, dashboardDir: f.DashboardDir, egressInterval: f.EgressInterval, limits: limits,
+		healthListen: f.Listen.Health, dashboardListen: f.Listen.Dashboard, dashboardDir: f.DashboardDir, hostNames: hostNames, egressInterval: f.EgressInterval, limits: limits,
 		accountConcurrency: f.Limits.AccountConcurrency, upstream: target, sessionDB: f.SessionDB, captureDir: f.CaptureDir, inventory: f.Inventory,
 		tokenRef: token, credentialsStdin: f.Credentials.StdinTestEntry,
 		retention: session.Retention{Traffic: time.Duration(f.Retention.TrafficDays) * 24 * time.Hour, Sessions: time.Duration(f.Retention.SessionDays) * 24 * time.Hour},
 		backup:    f.Backup}, nil
+}
+
+// readOnlyHosts returns the Host names /health and the dashboard answer: the IPs of
+// their listen addresses, the TLS server name and listen.host_names, which must be DNS
+// names without a port.
+func readOnlyHosts(report func(key, problem string), health, dashboard, serverName string, extra []string) []string {
+	var hosts []string
+	for _, address := range []string{health, dashboard} {
+		// Checked by checkListeners; a refused address adds nothing.
+		host, _, _ := net.SplitHostPort(address)
+		if ip, err := netip.ParseAddr(host); err == nil {
+			hosts = append(hosts, ip.Unmap().String())
+		}
+	}
+	if serverName != "" {
+		hosts = append(hosts, strings.ToLower(serverName))
+	}
+	for _, name := range extra {
+		if len(name) > 253 || !hostLabel.MatchString(name) {
+			report("listen.host_names", fmt.Sprintf("%q is not a lower-case DNS name without a port", name))
+			continue
+		}
+		hosts = append(hosts, name)
+	}
+	return hosts
 }
 
 // checkBackup checks that every backup key is set and has a plausible shape: an origin
