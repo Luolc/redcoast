@@ -51,8 +51,12 @@ export function Overview({ data, now }: { data: Dashboard; now: Date }) {
             </ul>
           )}
         </Row>
-        <Row label="二进制 commit">
-          <Commit hash={g.binary_commit} />
+        <Row label="网关版本">
+          {g.version === undefined ? (
+            <span className="text-muted-foreground">不明</span>
+          ) : (
+            <code className="font-mono">v{g.version}</code>
+          )}
         </Row>
         <Row label="页面 commit">
           <Commit hash={__DASHBOARD_COMMIT__} />

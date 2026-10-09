@@ -20,7 +20,7 @@ export function sampleDashboard(now: Date): Dashboard {
       reasons: ["sample-ac: paused (upstream_429)"],
     },
     gateway: {
-      binary_commit: "0123456789abcdef0123456789abcdef01234567",
+      version: "0.1.0",
       inventory_commit: "fedcba9876543210fedcba9876543210fedcba98",
       started: at(-26 * 60),
       wal_bytes: 4_194_304,
