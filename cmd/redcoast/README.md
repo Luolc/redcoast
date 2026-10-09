@@ -4,15 +4,18 @@
 
 ## Install
 
-Download `redcoast-linux-amd64` and `SHA256SUMS` from a release, check the file and put it where the service runs it:
+Download `redcoast-linux-amd64`, `redcoast-dashboard.html` and `SHA256SUMS` from a release, check the files and put them where the service reads them:
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
 sudo install -D -m 0755 redcoast-linux-amd64 /opt/redcoast/releases/<version>/redcoast
+sudo install -D -m 0644 redcoast-dashboard.html /opt/redcoast/releases/<version>/dashboard/index.html
 sudo ln -sfn /opt/redcoast/releases/<version> /opt/redcoast/current
 ```
 
 Or build it from source with the Go version in `go.mod`: `CGO_ENABLED=0 go build -trimpath -o redcoast ./cmd/redcoast`. The release build adds `-buildvcs=false` and is reproducible.
+
+The page is the dashboard's frontend; set `dashboard_dir: /opt/redcoast/current/dashboard` to serve it, or the gateway serves only `/dashboard.json`. To build it from source, run `pnpm install --frozen-lockfile && pnpm run build` in `dashboard/` with the Node and pnpm versions it pins; the page is `dashboard/dist/index.html`.
 
 A handoff (below) starts the program at the path the service started, so an upgrade installs the new release, moves the `current` link and hands off.
 

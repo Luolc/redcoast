@@ -43,4 +43,4 @@ No CI step uses a credential or reaches a real account: the rehearsals use made-
 
 ## Releases
 
-A release is pushing a `v*` tag, and only the maintainer does it. The tag must be `v` plus the constant in `cmd/redcoast/version.go` (`.github/scripts/release-tag-guard.sh`), so the release PR bumps that constant first. `.github/workflows/release.yml` then publishes static linux/amd64 builds of `redcoast` and `redcoast-client`, the two client shims and `SHA256SUMS` over all four.
+A release is pushing a `v*` tag, and only the maintainer does it. The tag must be `v` plus the constant in `cmd/redcoast/version.go` (`.github/scripts/release-tag-guard.sh`), so the release PR bumps that constant first. `.github/workflows/release.yml` then publishes static linux/amd64 builds of `redcoast` and `redcoast-client`, the two client shims, the dashboard page (`redcoast-dashboard.html`) and `SHA256SUMS` over all five.
