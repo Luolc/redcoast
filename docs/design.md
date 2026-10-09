@@ -92,8 +92,9 @@ Operations:
 24. A reload either swaps the whole account set after migrating sessions in one transaction, or changes nothing; no binding straddles the swap. [`claude/reload_test.go`](../claude/reload_test.go): `TestReloadWaitsForBindingSection`, `TestReloadMigrationFailure`, `TestReloadValidationFailure`, `TestReloadSerializesReloads`.
 25. A handoff whose new process fails or is late leaves the old one serving; otherwise the old one drains streams and tunnels, then exits. [`cmd/redcoast/handoff_test.go`](../cmd/redcoast/handoff_test.go): `TestHandoff`; [`claude/handoff_test.go`](../claude/handoff_test.go): `TestHandoffDrainsInferenceStreams`, `TestHandoffDrainsTunnels`.
 26. A store that fails `quick_check` stops startup; the dashboard reads through a connection that cannot write. [`cmd/redcoast/main_test.go`](../cmd/redcoast/main_test.go): `TestOpenStoreRefusesCorruptFile`; [`session/dashboard_test.go`](../session/dashboard_test.go): `TestReaderCannotWrite`.
-27. Backups only create objects (`If-None-Match: *`), signed with SigV4; the local snapshot is deleted only after every upload succeeded, and a snapshot restores. [`backup/backup_test.go`](../backup/backup_test.go): `TestSignatureVector`, `TestOnceUploads`, `TestOnceFailureKeepsSnapshot`, `TestRestoreDrill`.
-28. A release tag is `v` plus the constant in `cmd/redcoast/version.go`. [`release-tag-guard.test.sh`](../.github/scripts/release-tag-guard.test.sh).
+27. `/health` and the dashboard answer only a `Host` that is the IP of their listen address, `listen.tls.server_name` or a name in `listen.host_names`, at any port, and only requests that carry no `Origin` or the page's own; anything else gets 403 and none of the answer, so a page reached through a rebound name reads nothing. [`claude/host_test.go`](../claude/host_test.go): `TestHostGuard`; [`cmd/redcoast/health_test.go`](../cmd/redcoast/health_test.go): `TestReadOnlyHosts`.
+28. Backups only create objects (`If-None-Match: *`), signed with SigV4; the local snapshot is deleted only after every upload succeeded, and a snapshot restores. [`backup/backup_test.go`](../backup/backup_test.go): `TestSignatureVector`, `TestOnceUploads`, `TestOnceFailureKeepsSnapshot`, `TestRestoreDrill`.
+29. A release tag is `v` plus the constant in `cmd/redcoast/version.go`. [`release-tag-guard.test.sh`](../.github/scripts/release-tag-guard.test.sh).
 
 ## 4. Interfaces
 
@@ -108,7 +109,7 @@ Operations:
 - On the account route, host names are resolved by the exit, so the gateway cannot stop a name that resolves to a private address on the exit's side.
 - The gateway trusts the TCP peer address. A proxy or TLS terminator in front of it breaks source binding and the per-source caps.
 - A public listener without TLS only logs a warning; it should become fatal. The client trusts only the system CAs.
-- `/health` and the dashboard have no authentication and rely on network access control. The dashboard shows each account's email and expected exit IP.
+- `/health` and the dashboard have no authentication. The `Host` and `Origin` checks stop a web page from reading them through DNS rebinding, but anyone who can reach the listener reads both; the dashboard shows each account's email and expected exit IP, so access rests on network access control.
 - An upstream 401 whose error body is neither plain nor gzip is not recognized as a refused token, so the account is not paused.
 - A launcher killed with SIGKILL leaves its session live, holding a machine slot, until the 7-day idle expiry.
 - Backups lose up to an hour; sessions issued after the restored snapshot are unknown and their clients must relaunch. Backups pause for up to 30 minutes after a handoff.
