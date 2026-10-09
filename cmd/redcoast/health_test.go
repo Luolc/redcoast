@@ -60,7 +60,7 @@ func TestHealthAndEgressConfiguration(t *testing.T) {
 // listen.host_names that are not lower-case DNS names without a port are refused.
 func TestReadOnlyHosts(t *testing.T) {
 	cert, key := writeTLSFiles(t, testtls.New(t))
-	tailnet := "listen: {health: '100.64.0.1:7804', dashboard: '[fd00::7]:7805', reverse: '100.64.0.2:7802', host_names: [gateway-a]}\n"
+	tailnet := "listen: {health: '100.64.0.1:7804', dashboard: '[fd00::7]:7805', reverse: '10.0.0.2:7802', host_names: [gateway-a]}\n"
 	withTLS := "listen:\n  tls: {cert_file: '" + cert + "', key_file: '" + key + "', server_name: '" + testtls.ServerName + "'}\n"
 	for _, arm := range []struct {
 		name, yaml string
@@ -68,7 +68,7 @@ func TestReadOnlyHosts(t *testing.T) {
 		refused    []string
 	}{
 		{"defaults", "", []string{"127.0.0.1:7804", "127.0.0.1:7805"}, []string{"gateway-a:7804", "localhost:7804"}},
-		{"tailnet", tailnet, []string{"100.64.0.1:7804", "[fd00::7]:7805", "gateway-a:7805"}, []string{"100.64.0.2:7804", "127.0.0.1:7804", "rebind.example.test:7805"}},
+		{"tailnet", tailnet, []string{"100.64.0.1:7804", "[fd00::7]:7805", "gateway-a:7805"}, []string{"10.0.0.2:7804", "127.0.0.1:7804", "rebind.example.test:7805"}},
 		{"tls", withTLS, []string{testtls.ServerName + ":7804", "127.0.0.1:7805"}, []string{"gateway-a:7804"}},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
