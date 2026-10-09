@@ -84,6 +84,9 @@ jobs:
         working-directory: experiments
         run: uv run --no-project --python 3.14 --with pytest==9.1.1 --with pyyaml==6.0.3 python -m pytest -q tests
 
+      - name: Skill frontmatter
+        run: uv run --no-project --python 3.14 --with pyyaml==6.0.3 python .github/scripts/check-skill-frontmatter.py .agents/skills/*/SKILL.md
+
       - name: Release tag guard test
         run: .github/scripts/release-tag-guard.test.sh
 
