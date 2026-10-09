@@ -35,6 +35,7 @@ it("renders every section of the sample", () => {
     "泄漏 (确认)",
     "暂停",
     "已运行 1d 2h",
+    "v0.1.0",
   ]) {
     expect(html).toContain(text);
   }

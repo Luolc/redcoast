@@ -27,7 +27,7 @@ interface RetentionRun {
 }
 
 interface Gateway {
-  binary_commit: string; // empty when unknown
+  version?: string | undefined; // absent from a gateway older than this page
   inventory_commit: string;
   started: string;
   wal_bytes: number;
@@ -165,7 +165,7 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
     reasons: optional(arrayOf(isString)),
   }),
   gateway: object<Gateway>({
-    binary_commit: isString,
+    version: optional(isString),
     inventory_commit: isString,
     started: isString,
     wal_bytes: isNumber,
