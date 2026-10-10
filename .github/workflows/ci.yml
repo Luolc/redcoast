@@ -1,10 +1,11 @@
-# Two jobs. `check` is the required status check on main: full-history
-# secret scan, the Go checks, the unit tests, the release tag guard's test
-# and the dashboard frontend (see AGENTS.md, "Checks"). `e2e` runs the
-# Docker rehearsals on every pull request and push but is not required: a red
-# run does not block a merge, it asks for a look (AGENTS.md, "Checks"). No
-# step uses a credential: the rehearsals run on made-up accounts, a fake
-# upstream and a fake exit; only the hi rehearsal runs the real Claude CLI.
+# `changes` decides which path groups a change touches; `lint` always runs;
+# `go`, `experiments` and `dashboard` run when their group changed, in
+# parallel. `check` is the required status check on main: it passes only when
+# every job it needs passed, or was skipped because its group need not run
+# (see AGENTS.md, "Checks"). `e2e` and `govulncheck` also run only when their
+# paths changed, and are not required: `check` does not need them. No step
+# uses a credential: the rehearsals run on made-up accounts, a fake upstream
+# and a fake exit; only the hi rehearsal runs the real Claude CLI.
 
 name: CI
 
@@ -12,45 +13,93 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Weekly run of everything, including a secret scan of the whole history
+  # (gitleaks-action scans all commits on schedule and workflow_dispatch).
   schedule:
     - cron: "23 7 * * 1"
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Every main commit needs a result of its own, so each one gets its own
+  # group: a shared group would cancel a pending run when a newer one
+  # arrives. On a PR branch, a newer push cancels the older run.
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
 
 jobs:
-  check:
+  changes:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # find the last green run of this workflow on main
+    outputs:
+      groups: ${{ steps.changes.outputs.groups }}
     steps:
       - uses: actions/checkout@v7
         with:
-          # Full history: the scan below reads commits, and a shallow clone
-          # would hide everything but the latest one.
+          fetch-depth: 0
+      # A changed file in no group runs every group.
+      - id: changes
+        uses: Luolc/ci-actions/changes@ad865a7a9c01b617b1becb685995ea590252d698 # main, 2026-10-10
+        with:
+          groups: |
+            go: cmd/** claude/** session/** credential/** backup/** internal/** go.mod go.sum redcoast.example.yaml
+            experiments: experiments/**
+            dashboard: dashboard/**
+            e2e: cmd/** claude/** session/** credential/** backup/** internal/** go.mod go.sum e2e/** experiments/**
+            docs: docs/** **/*.md LICENSE .agents/** .claude/**
+          run-all-on: .github/** tools/** .golangci.yml
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # gitleaks-action lists the commits of the PR
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The scan reads commits, and a shallow clone would hide all but
+          # the latest one.
           fetch-depth: 0
 
-      # Pinned by version and SHA-256: the step downloads an executable and
-      # runs it over the repo, so a moved tag must not change what runs.
-      - name: Secret scan (gitleaks, full history)
+      # Scans the commits of this PR or push; on schedule and
+      # workflow_dispatch, the whole history.
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           GITLEAKS_VERSION: 8.30.1
-          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          # Commenting on the PR would need pull-requests: write; the job
+          # log and summary show the finding.
+          GITLEAKS_ENABLE_COMMENTS: false
+
+      - name: Tailnet address literals
+        run: .github/scripts/check-tailnet-literals.sh
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Skill frontmatter
+        run: uv run --no-project --python 3.14 --with pyyaml==6.0.3 python .github/scripts/check-skill-frontmatter.py .agents/skills/*/SKILL.md
+
+      - name: Release guard tests
         run: |
-          set -euo pipefail
-          bindir="$(mktemp -d)"
-          tarball="${bindir}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -fsSL -o "$tarball" \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
-          tar -xzf "$tarball" -C "$bindir" gitleaks
-          # --redact is required: without it a hit prints the secret into
-          # the Actions log.
-          "${bindir}/gitleaks" git --redact --no-banner --verbose .
+          set -eu
+          .github/scripts/release-tag-guard.test.sh
+          .github/scripts/release-on-main.test.sh
+          .github/scripts/release-ci-green.test.sh
+
+  go:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.groups).go
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
@@ -76,6 +125,14 @@ jobs:
       - name: Go tests
         run: go test -race ./...
 
+  experiments:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.groups).experiments
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
       - uses: astral-sh/setup-uv@v6
 
       # hi.py and its tests need Python 3.14 and PyYAML; the two programs
@@ -84,14 +141,13 @@ jobs:
         working-directory: experiments
         run: uv run --no-project --python 3.14 --with pytest==9.1.1 --with pyyaml==6.0.3 python -m pytest -q tests
 
-      - name: Tailnet address literals
-        run: .github/scripts/check-tailnet-literals.sh
-
-      - name: Skill frontmatter
-        run: uv run --no-project --python 3.14 --with pyyaml==6.0.3 python .github/scripts/check-skill-frontmatter.py .agents/skills/*/SKILL.md
-
-      - name: Release tag guard test
-        run: .github/scripts/release-tag-guard.test.sh
+  dashboard:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.groups).dashboard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v6
         with:
@@ -117,7 +173,23 @@ jobs:
           pnpm run knip
           pnpm run build
 
+  check:
+    needs: [changes, lint, go, experiments, dashboard]
+    # Without always(), a failed job would skip this one, and a skipped
+    # required check counts as passed.
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: Luolc/ci-actions/all-green@ad865a7a9c01b617b1becb685995ea590252d698 # main, 2026-10-10
+        with:
+          needs: ${{ toJSON(needs) }}
+
+  # Not required: a red run does not block a merge, it asks for a look
+  # (AGENTS.md, "Checks").
   e2e:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.groups).e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -155,8 +227,11 @@ jobs:
           "$RUNNER_TEMP/hi"
 
   # Known vulnerabilities in the dependencies and the standard library. Not
-  # required: a new advisory can turn it red without any change here.
+  # required: a new advisory can turn it red without any change here. The
+  # weekly run checks it whatever changed.
   govulncheck:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.groups).go
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

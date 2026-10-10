@@ -4,7 +4,7 @@
 # cmd/redcoast-client/README.md say how they are installed). Pushing the tag
 # is the release itself, so only the maintainer does it. The builds are
 # reproducible: the same commit, Go toolchain and Node and pnpm versions give
-# the same SHA-256.
+# the same SHA-256. Only a commit on main whose CI passed there is released.
 
 name: Release
 
@@ -13,17 +13,51 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  # Nothing is published unless all three hold. A failed guard leaves the
+  # tag in place; deleting it is up to whoever pushed it.
+  guard:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # The CI run of the commit may still be running; release-ci-green.sh
+    # waits up to 30 minutes for it.
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read # read the CI runs of the commit
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The guard below compares against origin/main, which a shallow
+          # clone does not have.
+          fetch-depth: 0
 
       - name: Tag matches the version
         run: .github/scripts/release-tag-guard.sh "$GITHUB_REF_NAME"
+
+      # The commit, not the object of an annotated tag.
+      - name: Tagged commit
+        run: |
+          commit=$(git rev-parse --verify "$GITHUB_REF^{commit}")
+          echo "TAG_COMMIT=$commit" >>"$GITHUB_ENV"
+
+      - name: Commit is on main
+        run: .github/scripts/release-on-main.sh "$TAG_COMMIT" origin/main
+
+      - name: CI passed on main, first attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/release-ci-green.sh "$TAG_COMMIT"
+
+  release:
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
