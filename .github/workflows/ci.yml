@@ -95,7 +95,7 @@ jobs:
 
   go:
     needs: changes
-    if: false
+    if: fromJSON(needs.changes.outputs.groups).go
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
