@@ -19,7 +19,7 @@ redcoast is a self-hosted gateway for coding-agent subscriptions, today for Clau
 
 CI (`.github/workflows/ci.yml`) runs on every pull request, every push to `main`, and once a week. Its `changes` job decides from the changed paths which groups of jobs run; the groups are listed in `ci.yml`. A pull request is compared with its base branch, and a push to `main` with the last commit of `main` whose run passed, so a commit after a red one still runs what went red. A path in no group, or under `.github/`, `tools/` or `.golangci.yml`, runs everything, and so does the weekly run. Runs on `main` are never cancelled, so every commit of `main` gets a result of its own.
 
-`check` is the required status check. It passes when every job it needs passed or was skipped because its group did not change: `lint` always runs, and `go`, `experiments` and `dashboard` run when their group changed. Their steps, run from the repository root:
+`check` passes when every job it needs passed or was skipped because its group did not change: `lint` always runs, and `go`, `experiments` and `dashboard` run when their group changed. Their steps, run from the repository root:
 
 ```sh
 # lint
@@ -38,14 +38,14 @@ go test -race ./...
 
 and `dashboard`, in `dashboard/` with the Node and pnpm versions it pins (`.node-version`, `packageManager`): `pnpm install --frozen-lockfile`, `pnpm peers check`, `pnpm run format:check`, `pnpm run lint`, `pnpm run test`, `pnpm run knip`, `pnpm run build`. `lint` also scans for secrets with gitleaks: the commits of the pull request or push, and the whole history on the weekly run.
 
-Before a push, run `gitleaks git --redact .` (always with `--redact`, so a hit does not print the secret) and the checks of the groups the change touches. The full set runs only in CI; on a pull request, the result that counts is the pull request's run of `check`.
+Before a push, run `gitleaks git --redact .` (always with `--redact`, so a hit does not print the secret) and the checks of the groups the change touches. The full set runs only in CI; on a pull request, the result that counts is the pull request's run of `check`. Every pull request runs it, but it is not a required status check on `main`: a merge does not wait for it. A pull request whose CI is already red at the approved head is not merged.
 
-`e2e` runs the end-to-end rehearsals in Docker: [`e2e/README.md`](e2e/README.md) and the synthetic cases of the hi rehearsal ([`experiments/README.md`](experiments/README.md)). It runs when the Go code, `e2e/` or `experiments/` changed. It is not required, so a red run does not block a merge; it does ask for a look:
+`e2e` runs the end-to-end rehearsals in Docker: [`e2e/README.md`](e2e/README.md) and the synthetic cases of the hi rehearsal ([`experiments/README.md`](experiments/README.md)). It runs when the Go code, `e2e/` or `experiments/` changed. `check` does not need it, so a red run leaves `check` green; it does ask for a look:
 
 - Before merging, the maintainer reads the `e2e` result of the head being merged, if `e2e` ran.
 - When it is red, find the cause first. Merge only once it is clear the failure has nothing to do with the PR, and say so in the PR: the failing run and the cause.
 
-No CI step uses a credential or reaches a real account: the rehearsals use made-up accounts, a fake upstream and a fake exit, and the hi rehearsal's authenticated mode never runs in CI. Keep it that way. `govulncheck` runs in a job of its own when the `go` group changed and on the weekly run; it is not required. Tool versions are pinned in `tools/*.mod`, `go.mod` and the workflows; bump them in a PR of their own.
+No CI step uses a credential or reaches a real account: the rehearsals use made-up accounts, a fake upstream and a fake exit, and the hi rehearsal's authenticated mode never runs in CI. Keep it that way. `govulncheck` runs in a job of its own when the `go` group changed and on the weekly run; `check` does not need it. Tool versions are pinned in `tools/*.mod`, `go.mod` and the workflows; bump them in a PR of their own.
 
 ## Releases
 
