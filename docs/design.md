@@ -50,7 +50,7 @@ Not in scope:
 
 ## 3. Invariants
 
-Each one links to the test that guards it. Go tests are named after the file and run in the `go` job, which the required `check` needs; `e2e/xmachine.py` is the Docker rehearsal (fake upstream, fake exit, fake `claude`), which runs in the `e2e` job when the Go code, `e2e/` or `experiments/` changed, and does not block a merge.
+Each one links to the test that guards it. Go tests are named after the file and run in the `go` job, which `check` needs; `e2e/xmachine.py` is the Docker rehearsal (fake upstream, fake exit, fake `claude`), which runs in the `e2e` job when the Go code, `e2e/` or `experiments/` changed, and which `check` does not need.
 
 Credentials and sessions:
 
