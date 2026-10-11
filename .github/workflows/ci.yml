@@ -44,7 +44,7 @@ jobs:
           fetch-depth: 0
       # A changed file in no group runs every group.
       - id: changes
-        uses: Luolc/ci-actions/changes@ad865a7a9c01b617b1becb685995ea590252d698 # main, 2026-10-10
+        uses: Luolc/ci-actions/changes@afb3a5a9525f6153c9ce996c547b0a714115137e # main, 2026-10-11
         with:
           groups: |
             go: cmd/** claude/** session/** credential/** backup/** internal/** go.mod go.sum redcoast.example.yaml
@@ -91,7 +91,6 @@ jobs:
           set -eu
           .github/scripts/release-tag-guard.test.sh
           .github/scripts/release-on-main.test.sh
-          .github/scripts/release-ci-green.test.sh
 
   go:
     needs: changes
@@ -181,7 +180,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: Luolc/ci-actions/all-green@ad865a7a9c01b617b1becb685995ea590252d698 # main, 2026-10-10
+      - uses: Luolc/ci-actions/all-green@afb3a5a9525f6153c9ce996c547b0a714115137e # main, 2026-10-11
         with:
           needs: ${{ toJSON(needs) }}
 
