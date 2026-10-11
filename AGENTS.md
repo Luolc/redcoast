@@ -17,30 +17,37 @@ redcoast is a self-hosted gateway for coding-agent subscriptions, today for Clau
 
 ## Checks
 
-CI (`.github/workflows/ci.yml`) runs two jobs on every pull request and every push to `main`.
+CI (`.github/workflows/ci.yml`) runs on every pull request, every push to `main`, and once a week. Its `changes` job decides from the changed paths which groups of jobs run; the groups are listed in `ci.yml`. A pull request is compared with its base branch, and a push to `main` with the last commit of `main` whose run passed, so a commit after a red one still runs what went red. A path in no group, or under `.github/`, `tools/` or `.golangci.yml`, runs everything, and so does the weekly run. Runs on `main` are never cancelled, so every commit of `main` gets a result of its own.
 
-`check` is required. Its steps, run from the repository root:
+`check` is the required status check. It passes when every job it needs passed or was skipped because its group did not change: `lint` always runs, and `go`, `experiments` and `dashboard` run when their group changed. Their steps, run from the repository root:
 
 ```sh
+# lint
+.github/scripts/check-tailnet-literals.sh
+uv run --no-project --python 3.14 --with pyyaml==6.0.3 python .github/scripts/check-skill-frontmatter.py .agents/skills/*/SKILL.md
+.github/scripts/release-tag-guard.test.sh
+.github/scripts/release-on-main.test.sh
+.github/scripts/release-ci-green.test.sh
+# go
 gofmt -l .                      # must print nothing
 go vet ./...
 go tool -modfile=tools/golangci-lint.mod golangci-lint run ./...
 go test -race ./...
-.github/scripts/release-tag-guard.test.sh
-.github/scripts/check-tailnet-literals.sh
-uv run --no-project --python 3.14 --with pyyaml==6.0.3 python .github/scripts/check-skill-frontmatter.py .agents/skills/*/SKILL.md
+# experiments
 (cd experiments && uv run --no-project --python 3.14 --with pytest==9.1.1 --with pyyaml==6.0.3 python -m pytest -q tests)
 ```
 
-and, in `dashboard/` with the Node and pnpm versions it pins (`.node-version`, `packageManager`): `pnpm install --frozen-lockfile`, `pnpm peers check`, `pnpm run format:check`, `pnpm run lint`, `pnpm run test`, `pnpm run knip`, `pnpm run build`. CI also scans the full history with gitleaks; locally, `gitleaks git --redact .` does the same (always with `--redact`, so a hit does not print the secret).
+and `dashboard`, in `dashboard/` with the Node and pnpm versions it pins (`.node-version`, `packageManager`): `pnpm install --frozen-lockfile`, `pnpm peers check`, `pnpm run format:check`, `pnpm run lint`, `pnpm run test`, `pnpm run knip`, `pnpm run build`. `lint` also scans for secrets with gitleaks: the commits of the pull request or push, and the whole history on the weekly run.
 
-`e2e` runs the end-to-end rehearsals in Docker: [`e2e/README.md`](e2e/README.md) and the synthetic cases of the hi rehearsal ([`experiments/README.md`](experiments/README.md)). It is not required, so a red run does not block a merge; it does ask for a look:
+Before a push, run `gitleaks git --redact .` (always with `--redact`, so a hit does not print the secret) and the checks of the groups the change touches. The full set runs only in CI; on a pull request, the result that counts is the pull request's run of `check`.
 
-- Before merging, the maintainer reads the `e2e` result of the head being merged.
+`e2e` runs the end-to-end rehearsals in Docker: [`e2e/README.md`](e2e/README.md) and the synthetic cases of the hi rehearsal ([`experiments/README.md`](experiments/README.md)). It runs when the Go code, `e2e/` or `experiments/` changed. It is not required, so a red run does not block a merge; it does ask for a look:
+
+- Before merging, the maintainer reads the `e2e` result of the head being merged, if `e2e` ran.
 - When it is red, find the cause first. Merge only once it is clear the failure has nothing to do with the PR, and say so in the PR: the failing run and the cause.
 
-No CI step uses a credential or reaches a real account: the rehearsals use made-up accounts, a fake upstream and a fake exit, and the hi rehearsal's authenticated mode never runs in CI. Keep it that way. `govulncheck` runs as a third job that is not required. Tool versions are pinned in `tools/*.mod`, `go.mod` and the workflows; bump them in a PR of their own.
+No CI step uses a credential or reaches a real account: the rehearsals use made-up accounts, a fake upstream and a fake exit, and the hi rehearsal's authenticated mode never runs in CI. Keep it that way. `govulncheck` runs in a job of its own when the `go` group changed and on the weekly run; it is not required. Tool versions are pinned in `tools/*.mod`, `go.mod` and the workflows; bump them in a PR of their own.
 
 ## Releases
 
-A release is pushing a `v*` tag, and only the maintainer does it. The tag must be `v` plus the constant in `cmd/redcoast/version.go` (`.github/scripts/release-tag-guard.sh`), so the release PR bumps that constant first. `.github/workflows/release.yml` then publishes static linux/amd64 builds of `redcoast` and `redcoast-client`, the two client shims, the dashboard page (`redcoast-dashboard.html`) and `SHA256SUMS` over all five.
+A release is pushing a `v*` tag, and only the maintainer does it. The tag must be `v` plus the constant in `cmd/redcoast/version.go` (`.github/scripts/release-tag-guard.sh`), so the release PR bumps that constant first. The tagged commit must also be on `main` (`.github/scripts/release-on-main.sh`), and its push run of `ci.yml` on `main` must have passed on the first attempt (`.github/scripts/release-ci-green.sh`); CI is not run again. That check reads the conclusion of the whole run, so a red `e2e` or `govulncheck` on `main` blocks a release even though neither blocks a merge. Tag only a commit that meets all three. `.github/workflows/release.yml` then publishes static linux/amd64 builds of `redcoast` and `redcoast-client`, the two client shims, the dashboard page (`redcoast-dashboard.html`) and `SHA256SUMS` over all five.
