@@ -1,0 +1,32 @@
+# Temporary, do not merge: proves the release-ci-green step as the release
+# workflow calls it. Publishes nothing.
+
+name: release-ci-green arms
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # The PR head has no push run on main: this job must fail with exit 1.
+  negative:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: CI passed on main, first attempt
+        uses: Luolc/ci-actions/release-ci-green@afb3a5a9525f6153c9ce996c547b0a714115137e # main, 2026-10-11
+        with:
+          sha: ${{ github.event.pull_request.head.sha }}
+
+  # 96b388e's push run on main succeeded at run_attempt 1: this job must pass.
+  positive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: CI passed on main, first attempt
+        uses: Luolc/ci-actions/release-ci-green@afb3a5a9525f6153c9ce996c547b0a714115137e # main, 2026-10-11
+        with:
+          sha: 96b388e0ed11e222cdd6f7af43c7cb6d884d52b8
