@@ -50,7 +50,7 @@ Not in scope:
 
 ## 3. Invariants
 
-Each one links to the test that guards it. Go tests are named after the file and run in the required `check` job; `e2e/xmachine.py` is the Docker rehearsal (fake upstream, fake exit, fake `claude`), which runs in the `e2e` job and does not block a merge.
+Each one links to the test that guards it. Go tests are named after the file and run in the `go` job, which the required `check` needs; `e2e/xmachine.py` is the Docker rehearsal (fake upstream, fake exit, fake `claude`), which runs in the `e2e` job when the Go code, `e2e/` or `experiments/` changed, and does not block a merge.
 
 Credentials and sessions:
 
@@ -94,7 +94,7 @@ Operations:
 26. A store that fails `quick_check` stops startup; the dashboard reads through a connection that cannot write. [`cmd/redcoast/main_test.go`](../cmd/redcoast/main_test.go): `TestOpenStoreRefusesCorruptFile`; [`session/dashboard_test.go`](../session/dashboard_test.go): `TestReaderCannotWrite`.
 27. `/health` and the dashboard answer only a `Host` that is the IP of `listen.health` or `listen.dashboard` (both accept either), `listen.tls.server_name` or a name in `listen.host_names`, at any port, and only requests that carry no `Origin` or the page's own; anything else gets 403 and none of the answer, so a page reached through a rebound name reads nothing. [`claude/host_test.go`](../claude/host_test.go): `TestHostGuard`; [`cmd/redcoast/health_test.go`](../cmd/redcoast/health_test.go): `TestReadOnlyHosts`.
 28. Backups only create objects (`If-None-Match: *`), signed with SigV4; the local snapshot is deleted only after every upload succeeded, and a snapshot restores. [`backup/backup_test.go`](../backup/backup_test.go): `TestSignatureVector`, `TestOnceUploads`, `TestOnceFailureKeepsSnapshot`, `TestRestoreDrill`.
-29. A release tag is `v` plus the constant in `cmd/redcoast/version.go`. [`release-tag-guard.test.sh`](../.github/scripts/release-tag-guard.test.sh).
+29. A release is published only when its tag is `v` plus the constant in `cmd/redcoast/version.go`, the tagged commit is on `main`, and that commit's push run of `ci.yml` on `main` passed on the first attempt. [`release-tag-guard.test.sh`](../.github/scripts/release-tag-guard.test.sh), [`release-on-main.test.sh`](../.github/scripts/release-on-main.test.sh), [`release-ci-green.test.sh`](../.github/scripts/release-ci-green.test.sh).
 
 ## 4. Interfaces
 
