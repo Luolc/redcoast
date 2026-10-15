@@ -23,7 +23,7 @@ type Reading struct {
 	Utilization float64   // fraction of the window's quota used, 1 at the quota; above 1 when used past it
 	Status      string    // allowed, allowed_warning or rejected; empty when absent
 	ResetAt     time.Time // when the window resets; zero when absent
-	Source      string    // response or 429
+	Source      string    // response, 429 or refresh
 }
 
 // Quota is the stored latest reading of one window.

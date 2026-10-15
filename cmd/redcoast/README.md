@@ -107,10 +107,11 @@ Every command below talks to the running gateway over `--admin-socket` (the `adm
 | `redcoast claude reload` | re-read the inventory; all or nothing |
 | `redcoast claude handoff` | start the program at the service's path with the listeners inherited; the old process drains for up to 30 minutes, and keeps serving if the new one fails |
 | `redcoast claude pause <alias> [--reason] [--until]`, `resume <alias>` | take an account out of selection, or put it back (also after an exit IP mismatch) |
+| `redcoast claude refresh <alias>` | read the account's quota again: one request through its exit (`/v1/messages`, one output token of the small model), its readings saved; a pause after an upstream 429 ends when they are under the hard threshold, other pauses stay |
 | `redcoast claude machine add <name> <sha256> [--max-sessions n]` | register a client machine's credential hash |
 | `redcoast claude machine revoke <name>`, `machine limit <name> <n>`, `machine list` | end a machine's sessions and refuse it, change its limit, list machines |
 
-`redcoast claude plan --session-db <path> …` writes subscription plans straight into the database and does not need the gateway to run.
+`redcoast claude plan --session-db <path> …` writes subscription plans straight into the database and does not need the gateway to run. The gateway only reads the quota from upstream responses, so an account over its hard threshold keeps its old reading until the window resets, even after its plan was upgraded upstream. With `--admin-socket <path>`, `plan` therefore has the gateway refresh each account whose quota unit is higher now than before the change (a new or bigger plan, or a bigger unit of its plan), once; a unit that stays or goes down, or a period that starts later, sends nothing. Without the socket it prints which accounts to refresh. Upgrade upstream first: the refresh reads what the upstream reports, not what the database says.
 
 ## Add a client machine
 

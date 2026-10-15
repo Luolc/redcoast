@@ -20,6 +20,7 @@ type Entrypoint struct {
 	Reverse http.Handler // the inference entrypoint
 	Forward http.Handler // the side-traffic entrypoint
 	forward *forwardProxy
+	router  *router
 	records *RecordStore // nil without capture
 }
 
@@ -57,7 +58,7 @@ func NewHandler(upstream *url.URL, captureDir string, store *session.Store, acco
 		router, forward := newRouter(store, accounts, upstream, accountTransport{}), newForwardProxy(store, accounts, nil)
 		router.limits = limits
 		forward.setLimits(limits)
-		return &Entrypoint{Reverse: router, Forward: forward, forward: forward}, nil
+		return &Entrypoint{Reverse: router, Forward: forward, forward: forward, router: router}, nil
 	}
 	info, err := os.Stat(captureDir)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
@@ -69,7 +70,7 @@ func NewHandler(upstream *url.URL, captureDir string, store *session.Store, acco
 	forward := newForwardProxy(store, accounts, records.writeConnect)
 	router.limits = limits
 	forward.setLimits(limits)
-	return &Entrypoint{Reverse: newCapturedProxy(router, records.write), Forward: forward, forward: forward, records: records}, nil
+	return &Entrypoint{Reverse: newCapturedProxy(router, records.write), Forward: forward, forward: forward, router: router, records: records}, nil
 }
 
 // Run serves the entrypoints with servers until ctx is canceled or one of them fails,

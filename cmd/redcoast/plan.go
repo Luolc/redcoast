@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,16 +16,19 @@ import (
 // planCommand is a parsed `redcoast claude plan ...` invocation: one plan unit period or
 // one account plan period to write.
 type planCommand struct {
-	sessionDB string
-	unit      *session.PlanUnit
-	period    *session.PlanPeriod
+	sessionDB   string
+	adminSocket string // the running gateway's, to refresh the accounts whose quota unit went up
+	unit        *session.PlanUnit
+	period      *session.PlanPeriod
 }
 
 // errPlanUsage is returned when the plan subcommand is misused.
 var errPlanUsage = errors.New(`usage:
-  redcoast claude plan --session-db <path> unit <plan> <quota-unit> <monthly-usd> <from> [<to>]
-  redcoast claude plan --session-db <path> schedule <alias> <plan> <from> [<to>] [--note <text>]
-times are RFC 3339 (for example 2026-10-29T00:00:00Z); an omitted <to> is open-ended`)
+  redcoast claude plan --session-db <path> [--admin-socket <path>] unit <plan> <quota-unit> <monthly-usd> <from> [<to>]
+  redcoast claude plan --session-db <path> [--admin-socket <path>] schedule <alias> <plan> <from> [<to>] [--note <text>]
+times are RFC 3339 (for example 2026-10-29T00:00:00Z); an omitted <to> is open-ended;
+with --admin-socket, every account whose quota unit is higher now than before the
+change has its quota read again by the gateway (as with refresh)`)
 
 // parsePlanCommand parses the arguments after "plan".
 func parsePlanCommand(arguments []string) (planCommand, error) {
@@ -32,11 +36,12 @@ func parsePlanCommand(arguments []string) (planCommand, error) {
 	flags.SetOutput(io.Discard)
 	sessionDB := flags.String("session-db", "", "SQLite file of the gateway")
 	note := flags.String("note", "", "Note saved with an account plan period")
+	adminSocket := flags.String("admin-socket", "", "Unix socket of the running gateway's management interface")
 	flagArguments, rest := splitFlags(arguments)
 	if err := flags.Parse(flagArguments); err != nil || flags.NArg() != 0 || *sessionDB == "" || len(rest) == 0 {
 		return planCommand{}, errPlanUsage
 	}
-	cmd := planCommand{sessionDB: *sessionDB}
+	cmd := planCommand{sessionDB: *sessionDB, adminSocket: *adminSocket}
 	var err error
 	switch rest[0] {
 	case "unit":
@@ -130,15 +135,59 @@ func parsePeriod(texts []string) (from, to time.Time, err error) {
 	return from.UTC(), to.UTC(), nil
 }
 
-// runPlan writes the parsed period to the store.
-func runPlan(ctx context.Context, cmd planCommand) error {
-	store, err := session.Open(ctx, cmd.sessionDB, session.Config{})
-	if err != nil {
+// runPlan writes the parsed period to the store. The accounts whose quota unit at this
+// moment is higher after the write than before it are refreshed over the admin socket
+// when one is given; otherwise one line says how to refresh them. A unit that stays
+// the same or goes down sends nothing, and neither does a period that starts later.
+func runPlan(ctx context.Context, cmd planCommand, out io.Writer) error {
+	raised, err := writePlan(ctx, cmd)
+	if err != nil || len(raised) == 0 {
 		return err
 	}
-	defer func() { _ = store.Close() }()
-	if cmd.unit != nil {
-		return store.SetPlanUnit(ctx, *cmd.unit)
+	if cmd.adminSocket == "" {
+		_, err := fmt.Fprintf(out, "quota unit raised for %s; read the quota again with: redcoast claude refresh <alias> --admin-socket <path>\n", strings.Join(raised, " "))
+		return err
 	}
-	return store.SetPlanSchedule(ctx, *cmd.period)
+	var errs []error
+	for _, alias := range raised {
+		if err := runAdmin(ctx, refreshCommand(cmd.adminSocket, alias), out); err != nil {
+			errs = append(errs, fmt.Errorf("plan written; %s: %v", alias, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// writePlan writes the period and returns, sorted, the accounts whose quota unit now is
+// higher after the write than before it.
+func writePlan(ctx context.Context, cmd planCommand) ([]string, error) {
+	store, err := session.Open(ctx, cmd.sessionDB, session.Config{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = store.Close() }()
+	now := time.Now()
+	before, err := store.QuotaUnits(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	if cmd.unit != nil {
+		err = store.SetPlanUnit(ctx, *cmd.unit)
+	} else {
+		err = store.SetPlanSchedule(ctx, *cmd.period)
+	}
+	if err != nil {
+		return nil, err
+	}
+	after, err := store.QuotaUnits(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	var raised []string
+	for alias, unit := range after {
+		if unit > before[alias] {
+			raised = append(raised, alias)
+		}
+	}
+	slices.Sort(raised)
+	return raised, nil
 }

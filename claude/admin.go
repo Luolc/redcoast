@@ -12,7 +12,7 @@ import (
 )
 
 // Admin is the management interface the operator reaches over the management unix
-// socket: reload, status, pause and resume, machines and the session list. Only the service user can open the socket;
+// socket: reload, status, pause, resume and quota refresh, machines and the session list. Only the service user can open the socket;
 // there is no authentication beyond that.
 type Admin struct {
 	accounts *Accounts
@@ -21,6 +21,8 @@ type Admin struct {
 	// Handoff starts the new process on the current binary and returns once it is
 	// ready, or why it is not; nil refuses every handoff.
 	Handoff func() error
+	// Refresh reads an account's quota again from the upstream; nil refuses every refresh.
+	Refresh func(ctx context.Context, alias string) (Refreshed, error)
 }
 
 // NewAdmin returns the management interface over accounts and store; reload runs one
@@ -47,6 +49,7 @@ func (a *Admin) Handler() http.Handler {
 	mux.HandleFunc("GET /status", a.serveStatus)
 	mux.HandleFunc("POST /accounts/{alias}/pause", a.servePause)
 	mux.HandleFunc("POST /accounts/{alias}/resume", a.serveResume)
+	mux.HandleFunc("POST /accounts/{alias}/refresh", a.serveRefresh)
 	mux.HandleFunc("GET /sessions", a.serveSessions)
 	mux.HandleFunc("GET /machines", a.serveMachines)
 	mux.HandleFunc("POST /machines", a.serveAddMachine)
@@ -249,6 +252,28 @@ func (a *Admin) serveResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"alias": alias})
+}
+
+// serveRefresh reads an account's quota again and answers with the outcome; 502 when
+// the upstream was not reached.
+func (a *Admin) serveRefresh(w http.ResponseWriter, r *http.Request) {
+	alias, ok := a.knownAlias(w, r)
+	if !ok {
+		return
+	}
+	if a.Refresh == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "this gateway cannot refresh"})
+		return
+	}
+	refreshed, err := a.Refresh(r.Context(), alias)
+	switch {
+	case errors.Is(err, errNoSuchAccount):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	case err != nil:
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+	default:
+		writeJSON(w, http.StatusOK, refreshed)
+	}
 }
 
 // knownAlias reads the alias path value and checks it is in the current set.
