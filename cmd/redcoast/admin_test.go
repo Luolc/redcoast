@@ -29,6 +29,9 @@ func TestAdminCommandParsing(t *testing.T) {
 		{"resume", []string{"resume", "sample-a", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/resume", ""},
 		{"refresh", []string{"refresh", "sample-a", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/refresh", ""},
 		{"refresh_without_alias", []string{"refresh", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"refresh_all", []string{"refresh", "--all", "--admin-socket", "admin.sock"}, "POST", "/refresh", ""},
+		{"refresh_all_with_alias", []string{"refresh", "sample-a", "--all", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"all_outside_refresh", []string{"status", "--all", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"no_socket", []string{"reload"}, "", "", ""},
 		{"reload_with_alias", []string{"reload", "sample-a", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"pause_without_alias", []string{"pause", "--admin-socket", "admin.sock"}, "", "", ""},
@@ -117,5 +120,46 @@ func TestRunAdmin(t *testing.T) {
 	cmd.socket = filepath.Join(t.TempDir(), "missing.sock")
 	if err := runAdmin(t.Context(), cmd, &out); err == nil || !strings.Contains(err.Error(), "management socket") {
 		t.Fatalf("missing socket: %v", err)
+	}
+}
+
+// TestRefreshAllCommand checks refresh --all against a fake management socket: one line
+// per account, an error naming the accounts whose refresh failed, and none when the
+// only accounts not refreshed were skipped.
+func TestRefreshAllCommand(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "a.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := `[{"alias":"sample-a","upstream_status":200,"quota":{},"pause_ended":false},{"alias":"sample-b","skipped":"account paused: upstream_401"},{"alias":"sample-c","error":"upstream not reached through the account's exit"}]`
+	var received []string
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = append(received, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, answer+"\n")
+	}))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	cmd, err := parseAdminCommand([]string{"refresh", "--all", "--admin-socket", socket})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	want := `{"alias":"sample-a","upstream_status":200,"quota":{},"pause_ended":false}
+{"alias":"sample-b","skipped":"account paused: upstream_401"}
+{"alias":"sample-c","error":"upstream not reached through the account's exit"}
+`
+	if err := runAdmin(t.Context(), cmd, &out); err == nil || err.Error() != "refresh failed for sample-c" || out.String() != want {
+		t.Fatalf("with a failure: %v output %q", err, out.String())
+	}
+	answer = `[{"alias":"sample-a","upstream_status":200,"quota":{},"pause_ended":false},{"alias":"sample-b","skipped":"account paused: upstream_401"}]`
+	out.Reset()
+	if err := runAdmin(t.Context(), cmd, &out); err != nil || strings.Count(out.String(), "\n") != 2 {
+		t.Fatalf("with a skip only: %v output %q", err, out.String())
+	}
+	if len(received) != 2 || received[0] != "POST /refresh" {
+		t.Fatalf("socket received %q", received)
 	}
 }
