@@ -26,6 +26,26 @@ type refreshExit struct {
 	utilization string // empty sends no readings
 	received    []*http.Request
 	bodies      []string
+	shared      *overlap // when set, each request is held a moment and counted in it
+}
+
+// overlap counts the requests that a set of exits serve at the same time.
+type overlap struct {
+	mu        sync.Mutex
+	now, most int
+}
+
+func (o *overlap) enter() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.now++
+	o.most = max(o.most, o.now)
+}
+
+func (o *overlap) leave() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.now--
 }
 
 // startRefreshExit starts the exit; readings reset an hour after clock.
@@ -36,8 +56,13 @@ func startRefreshExit(t *testing.T, clock time.Time) *refreshExit {
 		body, _ := io.ReadAll(r.Body)
 		e.mu.Lock()
 		e.received, e.bodies = append(e.received, r), append(e.bodies, string(body))
-		status, utilization := e.status, e.utilization
+		status, utilization, shared := e.status, e.utilization, e.shared
 		e.mu.Unlock()
+		if shared != nil {
+			shared.enter()
+			defer shared.leave()
+			time.Sleep(50 * time.Millisecond)
+		}
 		if utilization != "" {
 			for _, window := range []string{"5h", "7d"} {
 				w.Header().Set("Anthropic-Ratelimit-Unified-"+window+"-Utilization", utilization)
@@ -174,15 +199,18 @@ func TestRefreshMakesAccountSelectableAgain(t *testing.T) {
 // TestRefreshAll checks POST /refresh over accounts that each have their own exit: one
 // request through the exit of each account that is not paused or is paused for quota,
 // with that account's token, and nothing through the exit of an account paused for
-// another reason, which the answer lists as skipped. An account whose exit cannot be
+// another reason, which the answer lists as skipped. The refreshes go out one after
+// another: no two exits serve at the same time. An account whose exit cannot be
 // reached fails without stopping the accounts after it.
 func TestRefreshAll(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
 	exits := map[string]*refreshExit{}
+	shared := &overlap{}
 	for _, alias := range []string{"sample-a", "sample-b", "sample-c", "sample-d", "sample-e"} {
 		exit := startRefreshExit(t, h.clock)
 		exit.answer(200, "0.1")
+		exit.shared = shared
 		exitURL, err := url.Parse(exit.server.URL)
 		if err != nil {
 			t.Fatal(err)
@@ -240,6 +268,9 @@ func TestRefreshAll(t *testing.T) {
 				t.Fatalf("exit of %s received another account's token", alias)
 			}
 		}
+	}
+	if shared.most != 1 {
+		t.Fatalf("exits served up to %d refreshes at the same time, want 1", shared.most)
 	}
 	if paused := h.paused(); len(paused) != 2 || paused["sample-d"] != "upstream_401" || paused["sample-e"] != EgressMismatchReason {
 		t.Fatalf("paused %v", paused)
