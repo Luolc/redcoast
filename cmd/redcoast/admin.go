@@ -28,6 +28,8 @@ type adminCommand struct {
 	path    string
 	body    any           // nil sends no body
 	timeout time.Duration // how long the command waits for the gateway's answer
+	// write writes a success answer to out; nil writes it indented.
+	write func(answer []byte, out io.Writer) error
 }
 
 // errAdminUsage is returned when a management subcommand is misused.
@@ -40,6 +42,7 @@ var errAdminUsage = errors.New(`usage:
   redcoast claude pause <alias> --admin-socket <path> [--reason <text>] [--until <RFC 3339>]
   redcoast claude resume <alias> --admin-socket <path>
   redcoast claude refresh <alias> --admin-socket <path>
+  redcoast claude refresh --all --admin-socket <path>
   redcoast claude machine add <name> <sha256-of-credential> --admin-socket <path> [--max-sessions <n>]
   redcoast claude machine revoke <name> --admin-socket <path>
   redcoast claude machine limit <name> <n> --admin-socket <path>
@@ -50,8 +53,10 @@ from (the current release) on the gateway's sockets, and the old process drains 
 the new one is ready and keeps serving when it is not; pause without --until lasts
 until resume; refresh sends the account one small request through its exit to read its
 quota again, and ends its pause after an upstream 429 when the reading is under the
-hard threshold; sessions lists the sessions started in [since, until), by default the last
-day, newest first and at most 500, only the ended ones unless --state all; machine add takes the SHA-256 the client machine printed, never the credential itself`)
+hard threshold; refresh --all does that for every account, one after another, prints
+one line per account and fails when any of them failed (an account skipped for a pause
+other than quota is not a failure); sessions lists the sessions started in [since,
+until), by default the last day, newest first and at most 500, only the ended ones unless --state all; machine add takes the SHA-256 the client machine printed, never the credential itself`)
 
 // handoffCommandTimeout bounds a handoff command: the new process's startup, bounded
 // by handoffTimeout, and the answer.
@@ -65,6 +70,11 @@ const reloadTimeout = 90 * time.Second
 // refresh and the answer.
 const refreshCommandTimeout = claude.RefreshTimeout + 10*time.Second
 
+// refreshAllCommandTimeout bounds a refresh --all command. The gateway refreshes one
+// account after another, each bounded by claude.RefreshTimeout; this covers twenty
+// accounts that all run to that bound.
+const refreshAllCommandTimeout = 20*claude.RefreshTimeout + 10*time.Second
+
 // parseAdminCommand parses "<subcommand> [args]".
 func parseAdminCommand(arguments []string) (adminCommand, error) {
 	flags := flag.NewFlagSet("redcoast claude "+arguments[0], flag.ContinueOnError)
@@ -73,9 +83,10 @@ func parseAdminCommand(arguments []string) (adminCommand, error) {
 	reason := flags.String("reason", "manual", "Reason saved with a pause")
 	until := flags.String("until", "", "End of a pause, RFC 3339; omitted pauses until resume")
 	maxSessions := flags.Int("max-sessions", 0, "Session limit of a machine being added; 0 takes the default")
+	all := flags.Bool("all", false, "Refresh every account")
 	listing := sessionFilters(flags, arguments[0])
-	flagArguments, rest := splitFlags(arguments[1:])
-	if err := flags.Parse(flagArguments); err != nil || flags.NArg() != 0 || *socket == "" {
+	flagArguments, rest := splitFlags(flags, arguments[1:])
+	if err := flags.Parse(flagArguments); err != nil || flags.NArg() != 0 || *socket == "" || *all && arguments[0] != "refresh" {
 		return adminCommand{}, errAdminUsage
 	}
 	if arguments[0] == "sessions" {
@@ -83,6 +94,12 @@ func parseAdminCommand(arguments []string) (adminCommand, error) {
 	}
 	if arguments[0] != "pause" && *until != "" || arguments[0] != "machine" && *maxSessions != 0 {
 		return adminCommand{}, errAdminUsage
+	}
+	if *all {
+		if len(rest) != 0 {
+			return adminCommand{}, errAdminUsage
+		}
+		return adminCommand{socket: *socket, method: http.MethodPost, path: "/refresh", timeout: refreshAllCommandTimeout, write: writeRefreshAll}, nil
 	}
 	cmd := adminCommand{socket: *socket, method: http.MethodPost, timeout: 10 * time.Second}
 	switch arguments[0] {
@@ -202,6 +219,32 @@ func refreshCommand(socket, alias string) adminCommand {
 	return adminCommand{socket: socket, method: http.MethodPost, path: "/accounts/" + alias + "/refresh", timeout: refreshCommandTimeout}
 }
 
+// writeRefreshAll writes the answer to POST /refresh, one line per account, and fails
+// when the refresh of any account failed; a skipped account is not a failure.
+func writeRefreshAll(answer []byte, out io.Writer) error {
+	var results []json.RawMessage
+	if err := json.Unmarshal(answer, &results); err != nil {
+		return fmt.Errorf("management socket: %v", err)
+	}
+	var failed []string
+	for _, result := range results {
+		if _, err := fmt.Fprintf(out, "%s\n", result); err != nil {
+			return err
+		}
+		var outcome struct {
+			Alias string `json:"alias"`
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(result, &outcome) == nil && outcome.Error != "" {
+			failed = append(failed, outcome.Alias)
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("refresh failed for %s", strings.Join(failed, " "))
+	}
+	return nil
+}
+
 // pauseBody builds the body of a pause: the reason and, when given, the end.
 func pauseBody(reason, until string) (map[string]any, error) {
 	body := map[string]any{"reason": reason}
@@ -270,6 +313,9 @@ func runAdmin(ctx context.Context, cmd adminCommand, out io.Writer) error {
 			refused.message = failure.Error
 		}
 		return refused
+	}
+	if cmd.write != nil {
+		return cmd.write(answer, out)
 	}
 	var pretty bytes.Buffer
 	if json.Indent(&pretty, bytes.TrimSpace(answer), "", "  ") != nil {

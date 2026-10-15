@@ -50,6 +50,7 @@ func (a *Admin) Handler() http.Handler {
 	mux.HandleFunc("POST /accounts/{alias}/pause", a.servePause)
 	mux.HandleFunc("POST /accounts/{alias}/resume", a.serveResume)
 	mux.HandleFunc("POST /accounts/{alias}/refresh", a.serveRefresh)
+	mux.HandleFunc("POST /refresh", a.serveRefreshAll)
 	mux.HandleFunc("GET /sessions", a.serveSessions)
 	mux.HandleFunc("GET /machines", a.serveMachines)
 	mux.HandleFunc("POST /machines", a.serveAddMachine)
@@ -278,6 +279,32 @@ func (a *Admin) serveRefresh(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusOK, refreshed)
 	}
+}
+
+// serveRefreshAll refreshes every account of the current set, one after another, and
+// answers with one result per account in alias order: the outcome of its refresh, or
+// {"alias", "skipped"} for an account paused for a reason other than quota (nothing is
+// sent, as with the 409 of a single refresh), or {"alias", "error"}. A failed account
+// does not stop the ones after it.
+func (a *Admin) serveRefreshAll(w http.ResponseWriter, r *http.Request) {
+	if a.Refresh == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "this gateway cannot refresh"})
+		return
+	}
+	results := []any{}
+	for _, alias := range a.accounts.Candidates() {
+		refreshed, err := a.Refresh(r.Context(), alias)
+		var paused pausedError
+		switch {
+		case errors.As(err, &paused):
+			results = append(results, map[string]string{"alias": alias, "skipped": err.Error()})
+		case err != nil:
+			results = append(results, map[string]string{"alias": alias, "error": err.Error()})
+		default:
+			results = append(results, refreshed)
+		}
+	}
+	writeJSON(w, http.StatusOK, results)
 }
 
 // knownAlias reads the alias path value and checks it is in the current set.

@@ -38,7 +38,7 @@ func parsePlanCommand(arguments []string) (planCommand, error) {
 	sessionDB := flags.String("session-db", "", "SQLite file of the gateway")
 	note := flags.String("note", "", "Note saved with an account plan period")
 	adminSocket := flags.String("admin-socket", "", "Unix socket of the running gateway's management interface")
-	flagArguments, rest := splitFlags(arguments)
+	flagArguments, rest := splitFlags(flags, arguments)
 	if err := flags.Parse(flagArguments); err != nil || flags.NArg() != 0 || *sessionDB == "" || len(rest) == 0 {
 		return planCommand{}, errPlanUsage
 	}
@@ -59,14 +59,15 @@ func parsePlanCommand(arguments []string) (planCommand, error) {
 }
 
 // splitFlags separates interleaved flags from positional arguments: every "-name value"
-// pair (or "-name=value") is a flag, the rest are positional.
-func splitFlags(arguments []string) (flagArguments, rest []string) {
+// pair (or "-name=value", or a boolean flag of flags alone) is a flag, the rest are
+// positional.
+func splitFlags(flags *flag.FlagSet, arguments []string) (flagArguments, rest []string) {
 	for i := 0; i < len(arguments); i++ {
 		argument := arguments[i]
 		switch {
 		case !strings.HasPrefix(argument, "-") || argument == "-":
 			rest = append(rest, argument)
-		case strings.Contains(argument, "=") || i+1 == len(arguments):
+		case strings.Contains(argument, "=") || i+1 == len(arguments) || isBoolFlag(flags, argument):
 			flagArguments = append(flagArguments, argument)
 		default:
 			flagArguments = append(flagArguments, argument, arguments[i+1])
@@ -74,6 +75,17 @@ func splitFlags(arguments []string) (flagArguments, rest []string) {
 		}
 	}
 	return flagArguments, rest
+}
+
+// isBoolFlag reports whether argument names a boolean flag of flags, which takes no
+// value.
+func isBoolFlag(flags *flag.FlagSet, argument string) bool {
+	f := flags.Lookup(strings.TrimLeft(argument, "-"))
+	if f == nil {
+		return false
+	}
+	b, ok := f.Value.(interface{ IsBoolFlag() bool })
+	return ok && b.IsBoolFlag()
 }
 
 // parseUnit parses "<plan> <quota-unit> <monthly-usd> <from> [<to>]".

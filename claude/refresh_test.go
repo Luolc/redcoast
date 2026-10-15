@@ -3,10 +3,12 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -166,5 +168,80 @@ func TestRefreshMakesAccountSelectableAgain(t *testing.T) {
 		if err := h.store.Resume(ctx, "sample-a"); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestRefreshAll checks POST /refresh over accounts that each have their own exit: one
+// request through the exit of each account that is not paused or is paused for quota,
+// with that account's token, and nothing through the exit of an account paused for
+// another reason, which the answer lists as skipped. An account whose exit cannot be
+// reached fails without stopping the accounts after it.
+func TestRefreshAll(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	exits := map[string]*refreshExit{}
+	for _, alias := range []string{"sample-a", "sample-b", "sample-c", "sample-d", "sample-e"} {
+		exit := startRefreshExit(t, h.clock)
+		exit.answer(200, "0.1")
+		exitURL, err := url.Parse(exit.server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.addWithExit(alias, "sk-ant-oat01-synthetic-token-"+alias, exitURL)
+		exits[alias] = exit
+	}
+	exits["sample-a"].server.Close()
+	for alias, reason := range map[string]string{"sample-c": session.QuotaPauseReason, "sample-d": "upstream_401", "sample-e": EgressMismatchReason} {
+		if err := h.store.Pause(ctx, alias, h.clock.Add(time.Hour), reason); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admin := NewAdmin(h.accounts, h.store, nil)
+	admin.Refresh = h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{}).refresh
+	server := httptest.NewServer(admin.Handler())
+	t.Cleanup(server.Close)
+
+	res, err := server.Client().Post(server.URL+"/refresh", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	var results []map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&results); err != nil || res.StatusCode != 200 {
+		t.Fatalf("status=%d err=%v", res.StatusCode, err)
+	}
+	want := []string{
+		"sample-a error=upstream not reached through the account's exit",
+		"sample-b upstream_status=200 pause_ended=false",
+		"sample-c upstream_status=200 pause_ended=true",
+		"sample-d skipped=account paused: upstream_401",
+		"sample-e skipped=account paused: " + EgressMismatchReason,
+	}
+	var got []string
+	for _, result := range results {
+		switch {
+		case result["error"] != nil:
+			got = append(got, fmt.Sprintf("%v error=%v", result["alias"], result["error"]))
+		case result["skipped"] != nil:
+			got = append(got, fmt.Sprintf("%v skipped=%v", result["alias"], result["skipped"]))
+		default:
+			got = append(got, fmt.Sprintf("%v upstream_status=%v pause_ended=%v", result["alias"], result["upstream_status"], result["pause_ended"]))
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("results %q, want %q", got, want)
+	}
+	for alias, sent := range map[string]int{"sample-b": 1, "sample-c": 1, "sample-d": 0, "sample-e": 0} {
+		if exits[alias].requests() != sent {
+			t.Fatalf("exit of %s received %d requests, want %d", alias, exits[alias].requests(), sent)
+		}
+		if sent == 1 {
+			if req, _ := exits[alias].request(0); req.Header.Get("Authorization") != "Bearer sk-ant-oat01-synthetic-token-"+alias {
+				t.Fatalf("exit of %s received another account's token", alias)
+			}
+		}
+	}
+	if paused := h.paused(); len(paused) != 2 || paused["sample-d"] != "upstream_401" || paused["sample-e"] != EgressMismatchReason {
+		t.Fatalf("paused %v", paused)
 	}
 }
