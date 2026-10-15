@@ -101,23 +101,8 @@ func parseAdminCommand(arguments []string) (adminCommand, error) {
 		case "handoff":
 			cmd.timeout = handoffCommandTimeout
 		}
-	case "refresh":
-		if len(rest) != 1 || !accountAlias.MatchString(rest[0]) {
-			return adminCommand{}, errAdminUsage
-		}
-		return refreshCommand(*socket, rest[0]), nil
-	case "pause", "resume":
-		if len(rest) != 1 || !accountAlias.MatchString(rest[0]) {
-			return adminCommand{}, errAdminUsage
-		}
-		cmd.path = "/accounts/" + rest[0] + "/" + arguments[0]
-		if arguments[0] == "pause" {
-			body, err := pauseBody(*reason, *until)
-			if err != nil {
-				return adminCommand{}, err
-			}
-			cmd.body = body
-		}
+	case "pause", "resume", "refresh":
+		return accountCommand(cmd, arguments[0], rest, *reason, *until)
 	default:
 		return adminCommand{}, errAdminUsage
 	}
@@ -190,6 +175,25 @@ func machineCommand(cmd adminCommand, rest []string, maxSessions int) (adminComm
 	default:
 		return adminCommand{}, errAdminUsage
 	}
+	return cmd, nil
+}
+
+// accountCommand builds the pause, resume or refresh of the one alias in rest.
+func accountCommand(cmd adminCommand, verb string, rest []string, reason, until string) (adminCommand, error) {
+	if len(rest) != 1 || !accountAlias.MatchString(rest[0]) {
+		return adminCommand{}, errAdminUsage
+	}
+	switch verb {
+	case "refresh":
+		return refreshCommand(cmd.socket, rest[0]), nil
+	case "pause":
+		body, err := pauseBody(reason, until)
+		if err != nil {
+			return adminCommand{}, err
+		}
+		cmd.body = body
+	}
+	cmd.path = "/accounts/" + rest[0] + "/" + verb
 	return cmd, nil
 }
 
