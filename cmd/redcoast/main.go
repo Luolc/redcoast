@@ -38,7 +38,7 @@ const credentialsInputTimeout = 5 * time.Second
 var errUsage = errors.New(`usage:
   redcoast claude serve --config <path>
   redcoast claude plan --session-db <path> ...
-  redcoast claude reload|handoff|status|sessions|pause|resume|machine ... --admin-socket <path>
+  redcoast claude reload|handoff|status|sessions|pause|resume|refresh|machine ... --admin-socket <path>
 a command given without its arguments prints its own usage`)
 
 // main runs "redcoast claude serve" until SIGINT or SIGTERM, then waits for capture
@@ -101,6 +101,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	admin.Refresh = entrypoint.Refresh
 	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started)
 	if err != nil {
 		log.Fatal(err)
@@ -270,7 +271,7 @@ func runSubcommand(ctx context.Context, arguments []string) error {
 		if err != nil {
 			return err
 		}
-		return runPlan(ctx, cmd)
+		return runPlan(ctx, cmd, os.Stdout)
 	}
 	cmd, err := parseAdminCommand(arguments)
 	if err != nil {

@@ -27,6 +27,8 @@ func TestAdminCommandParsing(t *testing.T) {
 		{"pause_default", []string{"pause", "sample-a", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/pause", `{"reason":"manual"}`},
 		{"pause_until", []string{"pause", "sample-a", "--admin-socket", "admin.sock", "--reason", "egress", "--until", "2026-10-07T00:00:00Z"}, "POST", "/accounts/sample-a/pause", `{"reason":"egress","until":"2026-10-07T00:00:00Z"}`},
 		{"resume", []string{"resume", "sample-a", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/resume", ""},
+		{"refresh", []string{"refresh", "sample-a", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/refresh", ""},
+		{"refresh_without_alias", []string{"refresh", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"no_socket", []string{"reload"}, "", "", ""},
 		{"reload_with_alias", []string{"reload", "sample-a", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"pause_without_alias", []string{"pause", "--admin-socket", "admin.sock"}, "", "", ""},

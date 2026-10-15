@@ -270,22 +270,30 @@ func outcome(state *requestState, interrupted bool) string {
 }
 
 // inspectUpstream runs on every upstream response before it is written back. It keeps
-// the upstream's status for the traffic row, saves the account's quota readings from
-// the response headers and, when the upstream refuses the account's token, pauses the
-// account for credentialPause so that the session's next request binds elsewhere. The
-// response passes through unchanged and is not replayed.
+// the upstream's status for the traffic row and hands the response to recordUpstream.
+// The response passes through unchanged and is not replayed.
 func (rt *router) inspectUpstream(res *http.Response) error {
-	ctx := res.Request.Context()
-	if state, ok := ctx.Value(stateKey{}).(*requestState); ok {
+	if state, ok := res.Request.Context().Value(stateKey{}).(*requestState); ok {
 		state.upstreamStatus = res.StatusCode
 	}
-	a := accountFrom(ctx)
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), captureWriteTimeout)
-	defer cancel()
 	source := "response"
 	if res.StatusCode == http.StatusTooManyRequests {
 		source = "429"
 	}
+	rt.recordUpstream(res, source)
+	return nil
+}
+
+// recordUpstream saves the quota readings of an upstream response for the account its
+// request was sent through, under source, and returns them. When the upstream refuses
+// the account's token it pauses the account for credentialPause, and when it
+// rate-limits the account it pauses it until the earliest reset, so that sessions bind
+// elsewhere. Failures are logged.
+func (rt *router) recordUpstream(res *http.Response, source string) []session.Reading {
+	ctx := res.Request.Context()
+	a := accountFrom(ctx)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), captureWriteTimeout)
+	defer cancel()
 	readings := quotaReadings(res.Header, source)
 	if err := rt.store.RecordQuota(ctx, a.alias, readings); err != nil {
 		log.Printf("quota record failed alias=%s", a.alias)
@@ -306,7 +314,7 @@ func (rt *router) inspectUpstream(res *http.Response) error {
 			log.Printf("account pause failed alias=%s", a.alias)
 		}
 	}
-	return nil
+	return readings
 }
 
 // maxErrorBody bounds the part of a 401 body read to classify it.

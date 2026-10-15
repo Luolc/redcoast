@@ -14,10 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Luolc/redcoast/claude"
 )
 
 // adminCommands are the subcommands served over the management socket.
-var adminCommands = map[string]bool{"reload": true, "handoff": true, "status": true, "sessions": true, "pause": true, "resume": true, "machine": true}
+var adminCommands = map[string]bool{"reload": true, "handoff": true, "status": true, "sessions": true, "pause": true, "resume": true, "refresh": true, "machine": true}
 
 // adminCommand is a parsed management invocation: the request to send to the socket.
 type adminCommand struct {
@@ -37,6 +39,7 @@ var errAdminUsage = errors.New(`usage:
       [--cwd-prefix <path>] [--machine <name>] [--state ended|all]
   redcoast claude pause <alias> --admin-socket <path> [--reason <text>] [--until <RFC 3339>]
   redcoast claude resume <alias> --admin-socket <path>
+  redcoast claude refresh <alias> --admin-socket <path>
   redcoast claude machine add <name> <sha256-of-credential> --admin-socket <path> [--max-sessions <n>]
   redcoast claude machine revoke <name> --admin-socket <path>
   redcoast claude machine limit <name> <n> --admin-socket <path>
@@ -45,7 +48,9 @@ reload reads the inventory and 1Password again and replaces the accounts; nothin
 changes when it fails; handoff starts the binary at the path the gateway was started
 from (the current release) on the gateway's sockets, and the old process drains once
 the new one is ready and keeps serving when it is not; pause without --until lasts
-until resume; sessions lists the sessions started in [since, until), by default the last
+until resume; refresh sends the account one small request through its exit to read its
+quota again, and ends its pause after an upstream 429 when the reading is under the
+hard threshold; sessions lists the sessions started in [since, until), by default the last
 day, newest first and at most 500, only the ended ones unless --state all; machine add takes the SHA-256 the client machine printed, never the credential itself`)
 
 // handoffCommandTimeout bounds a handoff command: the new process's startup, bounded
@@ -55,6 +60,10 @@ const handoffCommandTimeout = handoffTimeout + 30*time.Second
 // reloadTimeout bounds a reload command: the inventory, the references and the wait
 // for the binding sections in progress.
 const reloadTimeout = 90 * time.Second
+
+// refreshCommandTimeout bounds a refresh command: the gateway's own bound on the
+// refresh and the answer.
+const refreshCommandTimeout = claude.RefreshTimeout + 10*time.Second
 
 // parseAdminCommand parses "<subcommand> [args]".
 func parseAdminCommand(arguments []string) (adminCommand, error) {
@@ -92,18 +101,8 @@ func parseAdminCommand(arguments []string) (adminCommand, error) {
 		case "handoff":
 			cmd.timeout = handoffCommandTimeout
 		}
-	case "pause", "resume":
-		if len(rest) != 1 || !accountAlias.MatchString(rest[0]) {
-			return adminCommand{}, errAdminUsage
-		}
-		cmd.path = "/accounts/" + rest[0] + "/" + arguments[0]
-		if arguments[0] == "pause" {
-			body, err := pauseBody(*reason, *until)
-			if err != nil {
-				return adminCommand{}, err
-			}
-			cmd.body = body
-		}
+	case "pause", "resume", "refresh":
+		return accountCommand(cmd, arguments[0], rest, *reason, *until)
 	default:
 		return adminCommand{}, errAdminUsage
 	}
@@ -179,6 +178,30 @@ func machineCommand(cmd adminCommand, rest []string, maxSessions int) (adminComm
 	return cmd, nil
 }
 
+// accountCommand builds the pause, resume or refresh of the one alias in rest.
+func accountCommand(cmd adminCommand, verb string, rest []string, reason, until string) (adminCommand, error) {
+	if len(rest) != 1 || !accountAlias.MatchString(rest[0]) {
+		return adminCommand{}, errAdminUsage
+	}
+	switch verb {
+	case "refresh":
+		return refreshCommand(cmd.socket, rest[0]), nil
+	case "pause":
+		body, err := pauseBody(reason, until)
+		if err != nil {
+			return adminCommand{}, err
+		}
+		cmd.body = body
+	}
+	cmd.path = "/accounts/" + rest[0] + "/" + verb
+	return cmd, nil
+}
+
+// refreshCommand is the refresh of account alias over socket.
+func refreshCommand(socket, alias string) adminCommand {
+	return adminCommand{socket: socket, method: http.MethodPost, path: "/accounts/" + alias + "/refresh", timeout: refreshCommandTimeout}
+}
+
 // pauseBody builds the body of a pause: the reason and, when given, the end.
 func pauseBody(reason, until string) (map[string]any, error) {
 	body := map[string]any{"reason": reason}
@@ -190,6 +213,20 @@ func pauseBody(reason, until string) (map[string]any, error) {
 		body["until"] = at.UTC()
 	}
 	return body, nil
+}
+
+// refusal is the gateway's failure answer to a management request.
+type refusal struct {
+	path    string
+	status  int
+	message string // the gateway's error; empty when it gave none
+}
+
+func (r *refusal) Error() string {
+	if r.message == "" {
+		return fmt.Sprintf("%s refused with status %d", r.path, r.status)
+	}
+	return fmt.Sprintf("%s refused: %s", r.path, r.message)
 }
 
 // runAdmin sends the command to the gateway's management socket and writes the answer
@@ -228,10 +265,11 @@ func runAdmin(ctx context.Context, cmd adminCommand, out io.Writer) error {
 		var failure struct {
 			Error string `json:"error"`
 		}
-		if json.Unmarshal(answer, &failure) == nil && failure.Error != "" {
-			return fmt.Errorf("%s refused: %s", strings.TrimPrefix(cmd.path, "/"), failure.Error)
+		refused := &refusal{path: strings.TrimPrefix(cmd.path, "/"), status: res.StatusCode}
+		if json.Unmarshal(answer, &failure) == nil {
+			refused.message = failure.Error
 		}
-		return fmt.Errorf("%s refused with status %d", strings.TrimPrefix(cmd.path, "/"), res.StatusCode)
+		return refused
 	}
 	var pretty bytes.Buffer
 	if json.Indent(&pretty, bytes.TrimSpace(answer), "", "  ") != nil {

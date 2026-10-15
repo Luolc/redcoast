@@ -26,7 +26,7 @@ func parseUtilization(value string) (float64, bool) {
 // response into one reading per window. A window whose utilization is missing or
 // malformed, or whose status or reset is present but malformed, yields no reading, so
 // the previous good reading of that window is kept. source names where the reading
-// came from: response or 429.
+// came from: response, 429 or refresh.
 func quotaReadings(header http.Header, source string) []session.Reading {
 	var readings []session.Reading
 	for _, window := range []string{session.Window5h, session.Window7d} {

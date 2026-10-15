@@ -1,8 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,7 +33,7 @@ func TestPlanCommand(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v: %v", arguments, err)
 		}
-		if err := runPlan(ctx, cmd); err != nil {
+		if err := runPlan(ctx, cmd, io.Discard); err != nil {
 			t.Fatalf("%v: %v", arguments, err)
 		}
 	}
@@ -75,8 +83,99 @@ func TestPlanCommand(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := runPlan(ctx, cmd); err == nil {
+		if err := runPlan(ctx, cmd, io.Discard); err == nil {
 			t.Fatalf("%v written", overlapping)
 		}
+	}
+}
+
+// TestPlanRefreshesRaisedAccounts checks that a plan change asks the gateway for one
+// refresh of each account whose quota unit is higher now: a new or bigger plan, and a
+// bigger unit of the plan an account is on. A unit that stays or goes down, a plan for
+// another account and a period that starts later send nothing. An account the gateway
+// refuses with 409 (paused for another reason) gets a line, not an error. Without the
+// socket the command prints how to refresh instead.
+func TestPlanRefreshesRaisedAccounts(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "gateway.sqlite")
+	socket := filepath.Join(t.TempDir(), "a.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var received []string
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		received = append(received, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/accounts/sample-d/refresh" {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"account paused: egress_ip_mismatch"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"alias":"sample-a"}`))
+	}))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	for _, step := range []struct {
+		arguments []string
+		refreshed []string
+	}{
+		{[]string{"schedule", "sample-a", "pro", "2020-01-01T00:00:00Z"}, []string{"sample-a"}},
+		{[]string{"schedule", "sample-b", "max-5x", "2020-01-01T00:00:00Z"}, []string{"sample-b"}},
+		{[]string{"schedule", "sample-a", "max-20x", "2020-01-01T00:00:00Z"}, []string{"sample-a"}},
+		{[]string{"schedule", "sample-a", "max-20x", "2020-01-01T00:00:00Z"}, nil},
+		{[]string{"schedule", "sample-a", "pro", "2020-01-01T00:00:00Z"}, nil},
+		{[]string{"unit", "max-5x", "6", "120", "1970-01-01T00:00:00Z"}, []string{"sample-b"}},
+		{[]string{"unit", "max-5x", "6", "120", "1970-01-01T00:00:00Z"}, nil},
+		{[]string{"unit", "max-5x", "4", "80", "1970-01-01T00:00:00Z"}, nil},
+		{[]string{"schedule", "sample-c", "max-20x", "2099-01-01T00:00:00Z"}, nil},
+	} {
+		mu.Lock()
+		received = nil
+		mu.Unlock()
+		cmd, err := parsePlanCommand(append([]string{"--session-db", db, "--admin-socket", socket}, step.arguments...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := runPlan(t.Context(), cmd, io.Discard); err != nil {
+			t.Fatalf("%v: %v", step.arguments, err)
+		}
+		var want []string
+		for _, alias := range step.refreshed {
+			want = append(want, "POST /accounts/"+alias+"/refresh")
+		}
+		mu.Lock()
+		got := received
+		mu.Unlock()
+		if !slices.Equal(got, want) {
+			t.Fatalf("%v: socket received %q, want %q", step.arguments, got, want)
+		}
+	}
+	cmd, err := parsePlanCommand([]string{"--session-db", db, "--admin-socket", socket, "schedule", "sample-d", "pro", "2020-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runPlan(t.Context(), cmd, &out); err != nil || out.String() != "sample-d not refreshed: account paused: egress_ip_mismatch\n" {
+		t.Fatalf("refused refresh: %v output %q", err, out.String())
+	}
+	mu.Lock()
+	received = nil
+	mu.Unlock()
+	cmd, err = parsePlanCommand([]string{"--session-db", db, "unit", "max-5x", "7", "140", "1970-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runPlan(t.Context(), cmd, &out); err != nil || !strings.HasPrefix(out.String(), "quota unit raised for sample-b; ") || !strings.Contains(out.String(), "redcoast claude refresh <alias>") {
+		t.Fatalf("without the socket: %v output %q", err, out.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) != 0 {
+		t.Fatalf("socket received %q without --admin-socket", received)
 	}
 }

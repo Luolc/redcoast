@@ -407,6 +407,17 @@ func (s *Store) Pause(ctx context.Context, alias string, until time.Time, reason
 	return nil
 }
 
+// PauseReason returns the reason of account alias's pause in effect, or "" when it is
+// not paused.
+func (s *Store) PauseReason(ctx context.Context, alias string) (string, error) {
+	var reason string
+	err := s.db.QueryRowContext(ctx, "SELECT COALESCE(pause_reason, '') FROM account_state WHERE alias = ? AND paused_until > ?", alias, s.now()).Scan(&reason)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("read account state: %v", err)
+	}
+	return reason, nil
+}
+
 // Resume clears the pause of account alias.
 func (s *Store) Resume(ctx context.Context, alias string) error {
 	_, err := s.db.ExecContext(ctx, "UPDATE account_state SET paused_until = NULL, pause_reason = NULL, updated_at = ? WHERE alias = ?", s.now(), alias)
@@ -431,4 +442,30 @@ func (s *Store) transact(ctx context.Context, fn func(tx *sql.Tx) error) error {
 		return fmt.Errorf("commit transaction: %v", err)
 	}
 	return nil
+}
+
+// EndQuotaPause ends the quota pause (QuotaPauseReason) of account alias when its latest
+// readings no longer put it at or over the hard threshold, by the same rules selection
+// applies. A pause for any other reason is left alone. It reports whether a pause ended.
+func (s *Store) EndQuotaPause(ctx context.Context, alias string) (bool, error) {
+	ended := false
+	err := s.transact(ctx, func(tx *sql.Tx) error {
+		now := s.now()
+		soft, hard, err := thresholds(ctx, tx)
+		if err != nil {
+			return err
+		}
+		st, err := accountStanding(ctx, tx, alias, now, soft, hard)
+		if err != nil || st.tier == tierExhausted {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, "UPDATE account_state SET paused_until = NULL, pause_reason = NULL, updated_at = ? WHERE alias = ? AND pause_reason = ? AND paused_until > ?", now, alias, QuotaPauseReason, now)
+		if err != nil {
+			return fmt.Errorf("end quota pause: %v", err)
+		}
+		n, _ := result.RowsAffected()
+		ended = n > 0
+		return nil
+	})
+	return ended, err
 }

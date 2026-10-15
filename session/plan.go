@@ -125,6 +125,42 @@ func quotaUnitAt(ctx context.Context, tx *sql.Tx, alias string, at int64) (float
 	return planUnitAt(ctx, tx, plan, at)
 }
 
+// QuotaUnits returns the quota unit at time at of every account that has a plan
+// period, 0 for one with no plan or no unit then.
+func (s *Store) QuotaUnits(ctx context.Context, at time.Time) (map[string]float64, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, "SELECT DISTINCT alias FROM plan_schedule")
+	if err != nil {
+		return nil, fmt.Errorf("read plan schedule: %v", err)
+	}
+	var aliases []string
+	for rows.Next() {
+		var alias string
+		if err := rows.Scan(&alias); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("read plan schedule: %v", err)
+		}
+		aliases = append(aliases, alias)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read plan schedule: %v", err)
+	}
+	units := make(map[string]float64, len(aliases))
+	for _, alias := range aliases {
+		unit, err := quotaUnitAt(ctx, tx, alias, at.UnixMilli())
+		if err != nil && !errors.Is(err, ErrNoPlan) {
+			return nil, err
+		}
+		units[alias] = unit
+	}
+	return units, nil
+}
+
 // planUnitAt returns plan's quota unit in effect at the time in Unix milliseconds.
 func planUnitAt(ctx context.Context, tx *sql.Tx, plan string, at int64) (float64, error) {
 	var unit float64
