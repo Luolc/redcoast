@@ -215,6 +215,20 @@ func pauseBody(reason, until string) (map[string]any, error) {
 	return body, nil
 }
 
+// refusal is the gateway's failure answer to a management request.
+type refusal struct {
+	path    string
+	status  int
+	message string // the gateway's error; empty when it gave none
+}
+
+func (r *refusal) Error() string {
+	if r.message == "" {
+		return fmt.Sprintf("%s refused with status %d", r.path, r.status)
+	}
+	return fmt.Sprintf("%s refused: %s", r.path, r.message)
+}
+
 // runAdmin sends the command to the gateway's management socket and writes the answer
 // to out. A failure answer is returned as an error with the gateway's message.
 func runAdmin(ctx context.Context, cmd adminCommand, out io.Writer) error {
@@ -251,10 +265,11 @@ func runAdmin(ctx context.Context, cmd adminCommand, out io.Writer) error {
 		var failure struct {
 			Error string `json:"error"`
 		}
-		if json.Unmarshal(answer, &failure) == nil && failure.Error != "" {
-			return fmt.Errorf("%s refused: %s", strings.TrimPrefix(cmd.path, "/"), failure.Error)
+		refused := &refusal{path: strings.TrimPrefix(cmd.path, "/"), status: res.StatusCode}
+		if json.Unmarshal(answer, &failure) == nil {
+			refused.message = failure.Error
 		}
-		return fmt.Errorf("%s refused with status %d", strings.TrimPrefix(cmd.path, "/"), res.StatusCode)
+		return refused
 	}
 	var pretty bytes.Buffer
 	if json.Indent(&pretty, bytes.TrimSpace(answer), "", "  ") != nil {

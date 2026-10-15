@@ -35,6 +35,12 @@ var refreshHeaders = map[string]string{
 // errNoSuchAccount is returned by a refresh of an alias outside the current set.
 var errNoSuchAccount = errors.New("no such account in the current set")
 
+// pausedError is returned by a refresh of an account paused for a reason other than
+// quota; nothing is sent.
+type pausedError struct{ reason string }
+
+func (e pausedError) Error() string { return "account paused: " + e.reason }
+
 // Refreshed is the outcome of one refresh: the upstream's status, the account's stored
 // readings after it and whether its quota pause ended.
 type Refreshed struct {
@@ -50,10 +56,12 @@ func (e *Entrypoint) Refresh(ctx context.Context, alias string) (Refreshed, erro
 	return e.router.refresh(ctx, alias)
 }
 
-// refresh sends refreshBody upstream for account alias, regardless of its pause and
-// thresholds, and handles the answer as recordUpstream handles any response, under the
+// refresh sends refreshBody upstream for account alias, regardless of its thresholds
+// and of a quota pause, and handles the answer as recordUpstream handles any response, under the
 // source refresh. A 2xx answer then ends the account's quota pause if the readings
-// allow it, so that the account can be chosen again before its reset.
+// allow it, so that the account can be chosen again before its reset. An account
+// paused for any other reason, such as a changed exit IP or an operator's pause, gets
+// nothing sent with its token: the refresh fails with pausedError.
 func (rt *router) refresh(ctx context.Context, alias string) (Refreshed, error) {
 	a := rt.accounts.set.Load().lookup(alias)
 	if a == nil {
@@ -61,6 +69,13 @@ func (rt *router) refresh(ctx context.Context, alias string) (Refreshed, error) 
 	}
 	ctx, cancel := context.WithTimeout(ctx, RefreshTimeout)
 	defer cancel()
+	reason, err := rt.store.PauseReason(ctx, alias)
+	switch {
+	case err != nil:
+		return Refreshed{}, errors.New("session store unavailable")
+	case reason != "" && reason != session.QuotaPauseReason:
+		return Refreshed{}, pausedError{reason}
+	}
 	req, err := http.NewRequestWithContext(context.WithValue(ctx, accountKey{}, a), http.MethodPost, rt.upstream.JoinPath("v1", "messages").String(), strings.NewReader(refreshBody))
 	if err != nil {
 		return Refreshed{}, err

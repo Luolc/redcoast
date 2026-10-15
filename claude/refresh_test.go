@@ -75,7 +75,7 @@ func (e *refreshExit) requests() int {
 // readings stored under the source refresh and, when they are under hard, the quota
 // pause ended so that the session's next request is served by the account. Control
 // arms: a refresh that still reads over hard, and a 429 without readings, keep the
-// account out; a pause for another reason survives a good reading.
+// account out; an account paused for another reason gets 409 and nothing is sent.
 func TestRefreshMakesAccountSelectableAgain(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
@@ -154,13 +154,14 @@ func TestRefreshMakesAccountSelectableAgain(t *testing.T) {
 		t.Fatalf("after the refresh: status=%d body=%s", status, text)
 	}
 
-	// A pause for another reason is not ended by a good reading.
-	for _, reason := range []string{"upstream_401", "manual"} {
+	// An account paused for another reason is not refreshed: its token stays home.
+	for _, reason := range []string{"upstream_401", "manual", EgressMismatchReason} {
 		if err := h.store.Pause(ctx, "sample-a", indefinitePause, reason); err != nil {
 			t.Fatal(err)
 		}
-		if status, body := adminCall(t, refresher, http.MethodPost, "/accounts/sample-a/refresh", ""); status != 200 || body["pause_ended"] != false || h.paused()["sample-a"] != reason {
-			t.Fatalf("%s: status=%d body=%v paused=%v", reason, status, body, h.paused())
+		sent := exit.requests()
+		if status, body := adminCall(t, refresher, http.MethodPost, "/accounts/sample-a/refresh", ""); status != 409 || body["error"] != "account paused: "+reason || exit.requests() != sent || h.paused()["sample-a"] != reason {
+			t.Fatalf("%s: status=%d body=%v exit=%d (was %d) paused=%v", reason, status, body, exit.requests(), sent, h.paused())
 		}
 		if err := h.store.Resume(ctx, "sample-a"); err != nil {
 			t.Fatal(err)

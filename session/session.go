@@ -407,6 +407,17 @@ func (s *Store) Pause(ctx context.Context, alias string, until time.Time, reason
 	return nil
 }
 
+// PauseReason returns the reason of account alias's pause in effect, or "" when it is
+// not paused.
+func (s *Store) PauseReason(ctx context.Context, alias string) (string, error) {
+	var reason string
+	err := s.db.QueryRowContext(ctx, "SELECT COALESCE(pause_reason, '') FROM account_state WHERE alias = ? AND paused_until > ?", alias, s.now()).Scan(&reason)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("read account state: %v", err)
+	}
+	return reason, nil
+}
+
 // Resume clears the pause of account alias.
 func (s *Store) Resume(ctx context.Context, alias string) error {
 	_, err := s.db.ExecContext(ctx, "UPDATE account_state SET paused_until = NULL, pause_reason = NULL, updated_at = ? WHERE alias = ?", s.now(), alias)

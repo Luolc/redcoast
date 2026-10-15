@@ -254,8 +254,9 @@ func (a *Admin) serveResume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"alias": alias})
 }
 
-// serveRefresh reads an account's quota again and answers with the outcome; 502 when
-// the upstream was not reached.
+// serveRefresh reads an account's quota again and answers with the outcome; 409 when
+// the account is paused for a reason other than quota, 502 when the upstream was not
+// reached.
 func (a *Admin) serveRefresh(w http.ResponseWriter, r *http.Request) {
 	alias, ok := a.knownAlias(w, r)
 	if !ok {
@@ -266,7 +267,10 @@ func (a *Admin) serveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	refreshed, err := a.Refresh(r.Context(), alias)
+	var paused pausedError
 	switch {
+	case errors.As(err, &paused):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 	case errors.Is(err, errNoSuchAccount):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 	case err != nil:

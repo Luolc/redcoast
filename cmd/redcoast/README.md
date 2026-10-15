@@ -107,7 +107,7 @@ Every command below talks to the running gateway over `--admin-socket` (the `adm
 | `redcoast claude reload` | re-read the inventory; all or nothing |
 | `redcoast claude handoff` | start the program at the service's path with the listeners inherited; the old process drains for up to 30 minutes, and keeps serving if the new one fails |
 | `redcoast claude pause <alias> [--reason] [--until]`, `resume <alias>` | take an account out of selection, or put it back (also after an exit IP mismatch) |
-| `redcoast claude refresh <alias>` | read the account's quota again: one request through its exit (`/v1/messages`, one output token of the small model), its readings saved; a pause after an upstream 429 ends when they are under the hard threshold, other pauses stay |
+| `redcoast claude refresh <alias>` | read the account's quota again: one request through its exit (`/v1/messages`, one output token of the small model), its readings saved; a pause after an upstream 429 ends when they are under the hard threshold; an account paused for any other reason is refused (409) and nothing is sent. A non-2xx `upstream_status` with no readings means the upstream refused the request itself, for example a retired model |
 | `redcoast claude machine add <name> <sha256> [--max-sessions n]` | register a client machine's credential hash |
 | `redcoast claude machine revoke <name>`, `machine limit <name> <n>`, `machine list` | end a machine's sessions and refuse it, change its limit, list machines |
 

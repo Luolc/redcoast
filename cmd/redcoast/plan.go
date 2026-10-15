@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -137,7 +138,9 @@ func parsePeriod(texts []string) (from, to time.Time, err error) {
 
 // runPlan writes the parsed period to the store. The accounts whose quota unit at this
 // moment is higher after the write than before it are refreshed over the admin socket
-// when one is given; otherwise one line says how to refresh them. A unit that stays
+// when one is given; an account the gateway does not refresh because of a pause other
+// than quota gets a line, not an error. Without the socket one line says how to refresh
+// them. A unit that stays
 // the same or goes down sends nothing, and neither does a period that starts later.
 func runPlan(ctx context.Context, cmd planCommand, out io.Writer) error {
 	raised, err := writePlan(ctx, cmd)
@@ -150,7 +153,14 @@ func runPlan(ctx context.Context, cmd planCommand, out io.Writer) error {
 	}
 	var errs []error
 	for _, alias := range raised {
-		if err := runAdmin(ctx, refreshCommand(cmd.adminSocket, alias), out); err != nil {
+		err := runAdmin(ctx, refreshCommand(cmd.adminSocket, alias), out)
+		var refused *refusal
+		switch {
+		case errors.As(err, &refused) && refused.status == http.StatusConflict:
+			if _, err := fmt.Fprintf(out, "%s not refreshed: %s\n", alias, refused.message); err != nil {
+				return err
+			}
+		case err != nil:
 			errs = append(errs, fmt.Errorf("plan written; %s: %v", alias, err))
 		}
 	}
