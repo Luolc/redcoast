@@ -38,6 +38,7 @@ const credentialsInputTimeout = 5 * time.Second
 var errUsage = errors.New(`usage:
   redcoast claude serve --config <path>
   redcoast claude plan --session-db <path> ...
+  redcoast claude thresholds --session-db <path> <soft> <hard>
   redcoast claude reload|handoff|status|sessions|pause|resume|refresh|machine ... --admin-socket <path>
 a command given without its arguments prints its own usage`)
 
@@ -256,22 +257,29 @@ func reloader(cfg config, accounts *claude.Accounts, startup claude.Resolver, eg
 }
 
 // claudeCommand returns the arguments after "redcoast claude", the first of them
-// "serve", "plan" or a management subcommand.
+// "serve", "plan", "thresholds" or a management subcommand.
 func claudeCommand(arguments []string) ([]string, error) {
-	if len(arguments) < 2 || arguments[0] != "claude" || arguments[1] != "serve" && arguments[1] != "plan" && !adminCommands[arguments[1]] {
+	if len(arguments) < 2 || arguments[0] != "claude" || arguments[1] != "serve" && arguments[1] != "plan" && arguments[1] != "thresholds" && !adminCommands[arguments[1]] {
 		return nil, errUsage
 	}
 	return arguments[1:], nil
 }
 
-// runSubcommand runs "plan" or one of the management subcommands.
+// runSubcommand runs "plan", "thresholds" or one of the management subcommands.
 func runSubcommand(ctx context.Context, arguments []string) error {
-	if arguments[0] == "plan" {
+	switch arguments[0] {
+	case "plan":
 		cmd, err := parsePlanCommand(arguments[1:])
 		if err != nil {
 			return err
 		}
 		return runPlan(ctx, cmd, os.Stdout)
+	case "thresholds":
+		cmd, err := parseThresholdsCommand(arguments[1:])
+		if err != nil {
+			return err
+		}
+		return runThresholds(ctx, cmd)
 	}
 	cmd, err := parseAdminCommand(arguments)
 	if err != nil {

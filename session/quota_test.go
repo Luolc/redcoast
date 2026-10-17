@@ -79,6 +79,32 @@ func TestThresholds(t *testing.T) {
 	}
 }
 
+// TestSetThresholds checks that both thresholds are written together, with the time of
+// the write, and that a pair Thresholds would refuse leaves the stored pair as it was.
+func TestSetThresholds(t *testing.T) {
+	c := newClock()
+	store, _ := open(t, c)
+	ctx := context.Background()
+	c.Advance(time.Minute)
+	if err := store.SetThresholds(ctx, "0.85", "0.97"); err != nil {
+		t.Fatal(err)
+	}
+	if soft, hard, err := store.Thresholds(ctx); err != nil || soft != 0.85 || hard != 0.97 {
+		t.Fatalf("soft=%v hard=%v err=%v", soft, hard, err)
+	}
+	if n := count(t, store, "SELECT COUNT(*) FROM settings WHERE updated_at = ?", c.Now().UnixMilli()); n != 2 {
+		t.Fatalf("%d settings rows carry the time of the write, want 2", n)
+	}
+	for _, bad := range [][2]string{{"0.97", "0.85"}, {"0.9", "1.5"}, {"-0.1", "0.9"}, {"ninety", "0.95"}} {
+		if err := store.SetThresholds(ctx, bad[0], bad[1]); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+		if soft, hard, err := store.Thresholds(ctx); err != nil || soft != 0.85 || hard != 0.97 {
+			t.Fatalf("after %q: soft=%v hard=%v err=%v", bad, soft, hard, err)
+		}
+	}
+}
+
 // TestMigrateFromVersionOne opens a file left at schema version 1 and checks that the
 // plan tables and their seeds are added without touching the version-1 data.
 func TestMigrateFromVersionOne(t *testing.T) {
