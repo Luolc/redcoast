@@ -59,10 +59,10 @@ func TestSelectionOrder(t *testing.T) {
 			schedule(t, store, "sample-b", "max-20x")
 			utilizationA := 0.5
 			if control {
-				utilizationA = 0.85
+				utilizationA = 0.92
 			}
 			read(t, store, "sample-a", Window7d, utilizationA, "allowed", now.Add(6*day))
-			read(t, store, "sample-b", Window7d, 0.85, "allowed_warning", now.Add(day))
+			read(t, store, "sample-b", Window7d, 0.92, "allowed_warning", now.Add(day))
 		}, map[bool]string{false: "sample-a", true: "sample-b"}},
 		{"no_reading_counts_as_zero_over_a_week", func(store *Store, now time.Time, control bool) {
 			// A has no reading: 1 × 10 ÷ 7 days. B at 50% resetting in a day: 0.5 × unit ÷ 1 day.
@@ -74,7 +74,7 @@ func TestSelectionOrder(t *testing.T) {
 		}, map[bool]string{false: "sample-a", true: "sample-b"}},
 		{"soft_threshold_read_per_request", func(store *Store, now time.Time, control bool) {
 			// A scores far higher (max-20x, 60%, resetting in a day) than B (pro, 40%,
-			// six days). Under the default soft of 80% both are open and A wins. The
+			// six days). Under the default soft of 90% both are open and A wins. The
 			// control arm changes one thing: soft lowered to 50% in the settings, which
 			// puts A in the soft tier, so B wins.
 			schedule(t, store, "sample-a", "max-20x")
@@ -144,7 +144,7 @@ func TestSoftThresholdKeepsLeaseOnly(t *testing.T) {
 		if err != nil || first.Alias != "sample-a" {
 			t.Fatalf("first binding %q %v", first.Alias, err)
 		}
-		utilization := 0.85
+		utilization := 0.92
 		if control {
 			utilization = 0.5
 		}
@@ -174,7 +174,7 @@ func TestSoftThresholdKeepsLeaseOnly(t *testing.T) {
 
 // TestHardThresholdRebindsAtOnce (E4.3) checks that a bound account crossing hard in
 // either window, or reported rejected, loses the session on its very next request,
-// inside the lease. Control arm: 85% is over soft only and keeps the session.
+// inside the lease. Control arm: 92% is over soft only and keeps the session.
 func TestHardThresholdRebindsAtOnce(t *testing.T) {
 	for _, test := range []struct {
 		name        string
@@ -183,10 +183,10 @@ func TestHardThresholdRebindsAtOnce(t *testing.T) {
 		status      string
 		want        string
 	}{
-		{"7d_over_hard", Window7d, 0.95, "allowed_warning", "sample-b"},
-		{"5h_over_hard", Window5h, 0.9, "allowed_warning", "sample-b"},
+		{"7d_over_hard", Window7d, 0.97, "allowed_warning", "sample-b"},
+		{"5h_over_hard", Window5h, 0.95, "allowed_warning", "sample-b"},
 		{"rejected_status", Window5h, 0.5, "rejected", "sample-b"},
-		{"over_soft_only", Window7d, 0.85, "allowed_warning", "sample-a"},
+		{"over_soft_only", Window7d, 0.92, "allowed_warning", "sample-a"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			c := newClock()
@@ -226,11 +226,11 @@ func TestAllOverHard(t *testing.T) {
 			t.Fatal(err)
 		}
 		earliest := c.Now().Add(2 * time.Hour)
-		read(t, store, "sample-a", Window5h, 0.92, "allowed_warning", earliest)
+		read(t, store, "sample-a", Window5h, 0.97, "allowed_warning", earliest)
 		read(t, store, "sample-a", Window7d, 0.4, "allowed", c.Now().Add(5*24*time.Hour))
-		utilizationB := 0.9
+		utilizationB := 0.95
 		if control {
-			utilizationB = 0.85
+			utilizationB = 0.92
 		}
 		read(t, store, "sample-b", Window7d, utilizationB, "allowed_warning", c.Now().Add(3*24*time.Hour))
 		c.Advance(time.Second)

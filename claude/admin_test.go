@@ -86,7 +86,7 @@ func TestAdminPauseResumeStatus(t *testing.T) {
 	}
 	status, body = adminCall(t, admin, http.MethodGet, "/status", "")
 	accounts, _ := body["accounts"].([]any)
-	if status != 200 || len(accounts) != 2 || body["live_sessions"] != float64(1) || body["soft"] != 0.8 || body["hard"] != 0.9 {
+	if status != 200 || len(accounts) != 2 || body["live_sessions"] != float64(1) || body["soft"] != 0.9 || body["hard"] != 0.95 {
 		t.Fatalf("status: %d %v", status, body)
 	}
 	a, _ := accounts[0].(map[string]any)

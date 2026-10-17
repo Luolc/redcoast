@@ -71,8 +71,8 @@ func TestIssueRefusedWhenUnavailable(t *testing.T) {
 		return resp.StatusCode, refused, string(body)
 	}
 	reset := c.Now().Add(90 * time.Minute)
-	read(t, store, "sample-a", Window5h, 0.9, "allowed_warning", reset)
-	read(t, store, "sample-b", Window7d, 0.95, "allowed_warning", c.Now().Add(24*time.Hour))
+	read(t, store, "sample-a", Window5h, 0.95, "allowed_warning", reset)
+	read(t, store, "sample-b", Window7d, 0.97, "allowed_warning", c.Now().Add(24*time.Hour))
 	status, refused, body := post()
 	if status != http.StatusTooManyRequests || refused.Code != "quota_exhausted" || !strings.HasPrefix(refused.Message, "redcoast: local gateway quota exhausted") || !refused.ResetAt.Equal(reset) || !strings.Contains(refused.Message, reset.Format(time.RFC3339)) {
 		t.Fatalf("all over hard: status=%d body=%s", status, body)
