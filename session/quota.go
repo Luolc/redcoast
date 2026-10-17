@@ -125,3 +125,19 @@ func thresholds(ctx context.Context, tx *sql.Tx) (soft, hard float64, err error)
 	}
 	return values["soft"], values["hard"], nil
 }
+
+// SetThresholds writes the soft and hard quota thresholds, as the text Thresholds
+// parses, in one transaction. Values Thresholds would refuse are not written: the new
+// pair is read back with the same rules before the commit.
+func (s *Store) SetThresholds(ctx context.Context, soft, hard string) error {
+	now := s.now()
+	return s.transact(ctx, func(tx *sql.Tx) error {
+		for key, value := range map[string]string{"soft": soft, "hard": hard} {
+			if _, err := tx.ExecContext(ctx, "UPDATE settings SET value = ?, updated_at = ? WHERE key = ?", value, now, key); err != nil {
+				return fmt.Errorf("write %s threshold: %v", key, err)
+			}
+		}
+		_, _, err := thresholds(ctx, tx)
+		return err
+	})
+}

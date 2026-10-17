@@ -244,7 +244,7 @@ func TestBucketURL(t *testing.T) {
 
 // TestClaudeCommand checks that "claude" and a known command lead every command line.
 func TestClaudeCommand(t *testing.T) {
-	for _, arguments := range [][]string{{"claude", "serve", "--config", "x"}, {"claude", "plan"}, {"claude", "machine", "list"}} {
+	for _, arguments := range [][]string{{"claude", "serve", "--config", "x"}, {"claude", "plan"}, {"claude", "thresholds"}, {"claude", "machine", "list"}} {
 		if command, err := claudeCommand(arguments); err != nil || !slices.Equal(command, arguments[1:]) {
 			t.Errorf("%q: got %q %v", arguments, command, err)
 		}

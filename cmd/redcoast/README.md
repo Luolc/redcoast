@@ -114,6 +114,8 @@ Every command below talks to the running gateway over `--admin-socket` (the `adm
 
 `redcoast claude plan --session-db <path> …` writes subscription plans straight into the database and does not need the gateway to run. The gateway only reads the quota from upstream responses, so an account over its hard threshold keeps its old reading until the window resets, even after its plan was upgraded upstream. With `--admin-socket <path>`, `plan` therefore has the gateway refresh each account whose quota unit is higher now than before the change (a new or bigger plan, or a bigger unit of its plan), once; a unit that stays or goes down, or a period that starts later, sends nothing. Without the socket it prints which accounts to refresh. Upgrade upstream first: the refresh reads what the upstream reports, not what the database says.
 
+`redcoast claude thresholds --session-db <path> <soft> <hard>` writes the soft and hard quota thresholds straight into the database, both in one transaction, and does not need the gateway to run. Both are fractions in [0, 1] with soft not above hard (for example `0.9 0.95`); a pair outside these rules is refused, exits 1 and leaves the stored pair as it was. The gateway reads the thresholds on every request, so the next one uses the new pair; `status` shows it.
+
 ## Add a client machine
 
 On the client, create the machine credential and print its hash:
