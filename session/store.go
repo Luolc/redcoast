@@ -29,8 +29,8 @@ const (
 // Thresholds are the initial soft and hard quota thresholds written to the settings
 // table; Bind reads the current values for every request.
 const (
-	DefaultSoft = "0.8"
-	DefaultHard = "0.9"
+	DefaultSoft = "0.9"
+	DefaultHard = "0.95"
 )
 
 // schemaVersion is stored in PRAGMA user_version. Each version's tables are created by

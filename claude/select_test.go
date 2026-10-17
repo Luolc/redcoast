@@ -34,8 +34,8 @@ func TestLocalRateLimitWhenAllOverHard(t *testing.T) {
 	h, exitA, exitB := twoAccounts(t, 429, 429)
 	server := h.gateway("http://127.0.0.1:1")
 	earliest := h.clock.Add(90 * time.Minute)
-	readQuota(t, h, "sample-a", 0.95, h.clock.Add(3*time.Hour))
-	readQuota(t, h, "sample-b", 0.9, earliest)
+	readQuota(t, h, "sample-a", 0.97, h.clock.Add(3*time.Hour))
+	readQuota(t, h, "sample-b", 0.95, earliest)
 	req, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/v1/messages", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)

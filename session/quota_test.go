@@ -60,7 +60,7 @@ func TestThresholds(t *testing.T) {
 	store, _ := open(t, newClock())
 	ctx := context.Background()
 	soft, hard, err := store.Thresholds(ctx)
-	if err != nil || soft != 0.8 || hard != 0.9 {
+	if err != nil || soft != 0.9 || hard != 0.95 {
 		t.Fatalf("defaults soft=%v hard=%v err=%v", soft, hard, err)
 	}
 	if _, err := store.db.Exec("UPDATE settings SET value = '0.7' WHERE key = 'soft'"); err != nil {
@@ -69,7 +69,7 @@ func TestThresholds(t *testing.T) {
 	if soft, _, err = store.Thresholds(ctx); err != nil || soft != 0.7 {
 		t.Fatalf("edited soft=%v err=%v", soft, err)
 	}
-	for _, bad := range []string{"seventy", "1.5", "0.95", "NaN", "+Inf", "-Inf"} {
+	for _, bad := range []string{"seventy", "1.5", "0.97", "NaN", "+Inf", "-Inf"} {
 		if _, err := store.db.Exec("UPDATE settings SET value = ? WHERE key = 'soft'", bad); err != nil {
 			t.Fatal(err)
 		}

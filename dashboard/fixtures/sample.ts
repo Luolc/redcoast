@@ -13,8 +13,8 @@ export function sampleDashboard(now: Date): Dashboard {
   };
   return {
     at: at(0),
-    soft: 0.8,
-    hard: 0.9,
+    soft: 0.9,
+    hard: 0.95,
     health: {
       status: "degraded",
       reasons: ["sample-ac: paused (upstream_429)"],
@@ -51,7 +51,7 @@ export function sampleDashboard(now: Date): Dashboard {
             source: "response",
           },
           "7d": {
-            utilization: 0.83,
+            utilization: 0.92,
             status: "allowed_warning",
             reset_at: at(3 * 24 * 60),
             observed_at: at(-1),

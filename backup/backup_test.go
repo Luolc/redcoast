@@ -319,7 +319,7 @@ func TestRestoreDrill(t *testing.T) {
 	if err != nil || len(schedule) != 1 || schedule[0].Plan != "max-5x" || !schedule[0].From.Equal(period.From) {
 		t.Fatalf("plan_schedule %+v %v", schedule, err)
 	}
-	if soft, hard, err := restored.Thresholds(ctx); err != nil || soft != 0.7 || hard != 0.9 {
+	if soft, hard, err := restored.Thresholds(ctx); err != nil || soft != 0.7 || hard != 0.95 {
 		t.Fatalf("thresholds %v %v %v", soft, hard, err)
 	}
 }
