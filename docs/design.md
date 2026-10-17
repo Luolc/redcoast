@@ -81,7 +81,7 @@ Configuration:
 
 Selection and accounts:
 
-19. At or over the hard threshold a session rebinds at once; over soft only new bindings and renewals are blocked; when every account is out for quota the answer is 429 with `Retry-After`, for any other reason 503. [`session/select_test.go`](../session/select_test.go): `TestHardThresholdRebindsAtOnce`, `TestSoftThresholdKeepsLeaseOnly`, `TestAllOverHard`, `TestExhaustionByPauseReason`; [`claude/select_test.go`](../claude/select_test.go): `TestLocalRateLimitWhenAllOverHard`.
+19. At or over the hard threshold a session rebinds at once; over soft only new bindings and renewals are blocked; when every account is out for quota the answer is 429 with `Retry-After`, for any other reason 503. The thresholds are read from the store on every request, and `redcoast claude thresholds` writes both in one transaction, never a pair that read refuses. [`session/select_test.go`](../session/select_test.go): `TestHardThresholdRebindsAtOnce`, `TestSoftThresholdKeepsLeaseOnly`, `TestAllOverHard`, `TestExhaustionByPauseReason`; [`claude/select_test.go`](../claude/select_test.go): `TestLocalRateLimitWhenAllOverHard`; [`session/quota_test.go`](../session/quota_test.go): `TestThresholds`, `TestSetThresholds`.
 20. Inference is never replayed, and a stream in flight stays on its account when the binding changes. [`claude/proxy_test.go`](../claude/proxy_test.go): `TestInferenceIsNotReplayed`; [`claude/route_test.go`](../claude/route_test.go): `TestInFlightStreamStaysOnAccount`.
 21. An upstream 401 pauses the account for an hour only when the token itself was refused; a pause never shortens one in effect (a refresh may end an `upstream_429` pause early, invariant 22). [`claude/route_test.go`](../claude/route_test.go): `TestRefusedTokenPausesForAnHour`, `TestUpstreamUnauthorizedPausesAccount`; [`session/select_test.go`](../session/select_test.go): `TestPauseNeverShortens`.
 22. A refresh sends a request only for an account that is not paused or is paused for `upstream_429`, and ends only that pause, and only after a 2xx answer whose readings are under the hard threshold; a pause for any other reason (`upstream_401`, exit change, manual) is neither probed nor lifted. A plan change that raises an account's quota unit asks for one refresh of that account, and an account paused for another reason is reported, not an error. [`claude/refresh_test.go`](../claude/refresh_test.go): `TestRefreshMakesAccountSelectableAgain`, `TestRefreshAll`; [`cmd/redcoast/plan_test.go`](../cmd/redcoast/plan_test.go): `TestPlanRefreshesRaisedAccounts`.
@@ -116,7 +116,7 @@ Operations:
 - Backups lose up to an hour; sessions issued after the restored snapshot are unknown and their clients must relaunch. Backups pause for up to 30 minutes after a handoff.
 - During a handoff's drain the account and tunnel limits apply per process, so they double; reloads are not coordinated across the two processes.
 - Schema migrations are one-way; a rollback across one needs a decision by the operator.
-- The soft and hard thresholds have no management command, and plans have no read command.
+- Plans have no read command.
 - The egress check calls one fixed IP echo service and expects a top-level `ip` field; it should be configurable.
 - IPv6 CONNECT targets are refused by the syntax check.
 - The hi rehearsal's `cancel` case sometimes fails its hygiene check because the gateway container is killed at shutdown; CI leaves it out until the cause is known.
