@@ -1,6 +1,6 @@
-# `changes` decides which path groups a change touches; `lint` always runs;
-# `go`, `experiments` and `dashboard` run when their group changed, in
-# parallel. `check` passes only when every job it needs passed, or was
+# `changes` decides which path groups a change touches; `lint` always runs,
+# including the commit hooks (gofmt among them) over every file; `go`,
+# `experiments` and `dashboard` run when their group changed, in parallel. `check` passes only when every job it needs passed, or was
 # skipped because its group need not run (see AGENTS.md, "Checks"). `e2e`
 # and `govulncheck` also run only when their paths changed; `check` does not
 # need them. No step uses a credential: the rehearsals run on made-up
@@ -78,13 +78,19 @@ jobs:
           # log and summary show the finding.
           GITLEAKS_ENABLE_COMMENTS: false
 
-      - name: Tailnet address literals
-        run: .github/scripts/check-tailnet-literals.sh
+      # For the gofmt hook.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
 
-      - uses: astral-sh/setup-uv@v6
-
-      - name: Skill frontmatter
-        run: uv run --no-project --python 3.14 --with pyyaml==6.0.3 python .github/scripts/check-skill-frontmatter.py .agents/skills/*/SKILL.md
+      # The commit hooks of .pre-commit-config.yaml: tailnet address
+      # literals, skill frontmatter, gofmt. The gitleaks hook scans staged
+      # changes, which CI does not have; the step above does that work.
+      - name: Commit hooks
+        run: pipx run --spec pre-commit==4.7.0 pre-commit run --all-files --show-diff-on-failure
+        env:
+          SKIP: gitleaks
 
       - name: Release guard tests
         run: |
@@ -106,14 +112,6 @@ jobs:
           cache-dependency-path: |
             go.sum
             tools/golangci-lint.sum
-
-      - name: Go format
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            printf 'gofmt differs:\n%s\n' "$unformatted" >&2
-            exit 1
-          fi
 
       - name: Go vet
         run: go vet ./...
