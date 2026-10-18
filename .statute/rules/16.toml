@@ -1,0 +1,29 @@
+id = 16
+slug = "security-sensitive-review"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R274"
+default = "on"
+authority = ["secure-authoring"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Review a change to security-sensitive code from P0"
+
+[text.statement]
+en = "When a change touches authentication, session credentials, the binding of a session to its source address, the upstream path allowlist, the destination checks of the forward proxy, the listen address policy or credential resolution, review it with its findings in those parts starting at P0."
+
+[text.reason]
+en = '''
+These parts are what keeps a real token on the gateway and a session to the machine it was issued to; a flaw in any of them gives away an account, so a doubt there blocks the merge until it is settled.
+'''
+
+[text.verification]
+en = '''
+Violated when a verdict approves such a change while it ranks a finding in those parts below P0.
+'''

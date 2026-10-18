@@ -1,5 +1,6 @@
 # Commit hooks: a secret scan of the staged changes, then the checks of CI's
-# lint job that take seconds. CI runs them all with --all-files.
+# lint job that take seconds, then the statute compile check. CI runs them all
+# with --all-files.
 repos:
   # First, so that a secret is stopped before any other hook runs. The
   # upstream entry already has --staged and --redact; --redact is repeated so
@@ -25,9 +26,19 @@ repos:
         language: python
         additional_dependencies: ["pyyaml==6.0.3"]
         files: ^\.agents/skills/[^/]+/SKILL\.md$
-      # gofmt -l exits 0 even when it lists files.
+      # gofmt -l exits 0 even when it lists files; on a syntax error it exits
+      # non-zero with the error on stderr and lists nothing.
       - id: gofmt
         name: gofmt
-        entry: sh -c 'out=$(gofmt -l "$@") && [ -z "$out" ] || { printf "gofmt differs:\n%s\n" "$out" >&2; exit 1; }' --
+        entry: sh -c 'out=$(gofmt -l "$@") || exit 1; [ -z "$out" ] || { printf "gofmt differs:\n%s\n" "$out" >&2; exit 1; }' --
         language: system
         types: [go]
+  # AGENTS.md and the skills statute copies and links must match a fresh
+  # compile of statute.toml and statute.lock; the private output, which git
+  # ignores, is not compared. rev must name the statute version in
+  # statute.lock: statute refuses a lock another version wrote, so the hook
+  # fails until the two agree.
+  - repo: https://github.com/Luolc/statute-pre-commit
+    rev: v0.1.25
+    hooks:
+      - id: statute-compile

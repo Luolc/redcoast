@@ -1,0 +1,31 @@
+id = 15
+slug = "tailnet-addresses"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R266"
+default = "on"
+authority = ["personal-info"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Write no address of the tailnet range but its prefix and first address"
+
+[text.statement]
+en = "In the files of this repository, write no address in 100.64.0.0/10 other than the prefix itself and its first address 100.64.0.1, and use those two only as synthetic boundary values in tests of the listen and destination policies."
+
+[text.reason]
+en = '''
+Tailnets give their machines addresses in 100.64.0.0/10, so any other address of the range may be a real machine of a private network, which a public repository must not locate ({@rule:R259}). The prefix and its first address are boundary values the policies need to be tested on.
+'''
+
+[text.verification]
+en = '''
+`.github/scripts/check-tailnet-literals.sh` lists every other such literal in the tracked files and fails on it; the commit hooks and CI run it. In a review, any other address of the range is a P0 finding.
+
+Violated when a tracked file holds an address in 100.64.0.0/10 other than those two.
+'''

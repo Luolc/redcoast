@@ -1,0 +1,29 @@
+id = 2
+slug = "design-sections"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R232"
+default = "on"
+authority = ["simplicity"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Keep the fixed sections of `docs/design.md`"
+
+[text.statement]
+en = "Keep `docs/design.md` in these sections, in this order: what redcoast is and what it is not; the parts and how they connect, as one diagram and one paragraph; the invariants; the interfaces, as links only; known issues and next steps."
+
+[text.reason]
+en = '''
+A fixed outline tells a reader where each kind of fact is and an author where to put it, and keeps the file short: an interface is described once, next to its code, and the design links to it.
+'''
+
+[text.verification]
+en = '''
+Violated when a change adds, drops or reorders a section of `docs/design.md`, gives the parts more than one diagram and one paragraph, or describes an interface there instead of linking to it.
+'''

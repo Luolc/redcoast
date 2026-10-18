@@ -12,7 +12,7 @@
 
 ## Checks
 
-<!-- The local checks you ran and their results (AGENTS.md, "Checks"). -->
+<!-- The local checks you ran and their results (AGENTS.md, L7). -->
 
 ## Pre-push leak review
 

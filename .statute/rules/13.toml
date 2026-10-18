@@ -1,0 +1,31 @@
+id = 13
+slug = "release-by-version-tag"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R268"
+default = "on"
+authority = ["division-of-instructions.project-instructions"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Release redcoast only by pushing the tag of the version in `cmd/redcoast/version.go`"
+
+[text.statement]
+en = "Release redcoast only by pushing to `Luolc/redcoast` the tag `v<version>`, where `<version>` is the version constant in `cmd/redcoast/version.go` at the tagged commit; the release pull request bumps that constant first."
+
+[text.reason]
+en = '''
+A rule about releases needs to know where the version is written and which act releases it. This names both: the push of the tag starts `.github/workflows/release.yml`, which checks the tag (`.github/scripts/release-tag-guard.sh`) and that the commit is on `main` (`.github/scripts/release-on-main.sh`) and publishes the builds. It grants no authority: a release still goes through a principal ({@rule:R32}), and which commit may be tagged is for {@rule:R58}.
+'''
+
+[text.verification]
+en = '''
+Creating the GitHub Release from that tag is part of the release the tag push starts, not a release of its own.
+
+Violated when a version of redcoast is made available by an act other than pushing its tag, or when a tag `v<version>` is pushed on a commit whose constant in `cmd/redcoast/version.go` is not `<version>`.
+'''

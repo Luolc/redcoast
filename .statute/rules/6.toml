@@ -1,0 +1,30 @@
+id = 6
+slug = "manuals-beside-code"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+overrides = "R207"
+authority = ["no-restating"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Keep each manual next to the code it is for"
+
+[text.statement]
+en = "Keep each manual for installing, running or rehearsing a part of redcoast as the README of that part's directory (`cmd/redcoast/README.md`, `cmd/redcoast-client/README.md`, `e2e/README.md`, `experiments/README.md`), and not under `docs/`."
+
+[text.reason]
+en = '''
+A manual changes with its code; beside it, the two change in the same place, and the directory of the code is where its reader looks. {@rule:R207} would put manuals in `docs/knowledge/`; this rule takes its place here.
+'''
+
+[text.verification]
+en = '''
+Another document that needs those steps links to the manual.
+
+Violated when a change puts a manual under `docs/` or anywhere other than the directory of the code it is for.
+'''

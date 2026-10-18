@@ -1,0 +1,31 @@
+id = 11
+slug = "ci-without-credentials"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R276"
+default = "on"
+authority = ["sensitive-info"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Let no CI step use a credential or reach a real account"
+
+[text.statement]
+en = "Let no step of CI use a credential or reach a real account: the rehearsals in CI run on made-up accounts, a fake upstream and a fake exit, and the authenticated mode of the hi rehearsal never runs in CI."
+
+[text.reason]
+en = '''
+CI runs on every pull request, from any branch of a public repository; a credential it could read would be within reach of every change, and a real account reached from it would be used by code no one has reviewed yet.
+'''
+
+[text.verification]
+en = '''
+The `GITHUB_TOKEN` that GitHub gives each job is not a credential in this sense.
+
+Violated when a workflow reads a secret other than `GITHUB_TOKEN`, or a CI step sends a request to a real account or runs the hi rehearsal in its authenticated mode.
+'''
