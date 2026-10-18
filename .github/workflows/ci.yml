@@ -1,11 +1,11 @@
 # `changes` decides which path groups a change touches; `lint` always runs,
 # including the commit hooks (gofmt among them) over every file; `go`,
-# `experiments` and `dashboard` run when their group changed, in parallel. `check` passes only when every job it needs passed, or was
-# skipped because its group need not run (see AGENTS.md, "Checks"). `e2e`
-# and `govulncheck` also run only when their paths changed; `check` does not
-# need them. No step uses a credential: the rehearsals run on made-up
-# accounts, a fake upstream and a fake exit; only the hi rehearsal runs the
-# real Claude CLI.
+# `experiments` and `dashboard` run when their group changed, in parallel.
+# `check` passes only when every job it needs passed, or was skipped because
+# its group need not run (see AGENTS.md, "Checks"). `e2e` and `govulncheck`
+# also run only when their paths changed; `check` does not need them. No
+# step uses a credential: the rehearsals run on made-up accounts, a fake
+# upstream and a fake exit; only the hi rehearsal runs the real Claude CLI.
 
 name: CI
 
