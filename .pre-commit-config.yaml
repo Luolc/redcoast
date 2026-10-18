@@ -26,11 +26,10 @@ repos:
         language: python
         additional_dependencies: ["pyyaml==6.0.3"]
         files: ^\.agents/skills/[^/]+/SKILL\.md$
-      # gofmt -l exits 0 even when it lists files; on a syntax error it exits
-      # non-zero with the error on stderr and lists nothing.
+      # gofmt -l exits 0 even when it lists files.
       - id: gofmt
         name: gofmt
-        entry: sh -c 'out=$(gofmt -l "$@") || exit 1; [ -z "$out" ] || { printf "gofmt differs:\n%s\n" "$out" >&2; exit 1; }' --
+        entry: sh -c 'out=$(gofmt -l "$@") && [ -z "$out" ] || { printf "gofmt differs:\n%s\n" "$out" >&2; exit 1; }' --
         language: system
         types: [go]
   # AGENTS.md and the skills statute copies and links must match a fresh
