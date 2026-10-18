@@ -1,0 +1,29 @@
+id = 10
+slug = "red-e2e-before-merge"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R274"
+default = "on"
+authority = ["discriminating-checks"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Merge over a red `e2e` only once its cause is found and is not the pull request"
+
+[text.statement]
+en = "Before merging a pull request, read the result of the `e2e` job of `.github/workflows/ci.yml` at the head being merged, if it ran; when it failed, merge only once its cause is found and is not the pull request, and write in the pull request the failing run and that cause."
+
+[text.reason]
+en = '''
+`e2e` runs the end-to-end rehearsals in Docker when the Go code, `e2e/` or `experiments/` changed. `check` does not need it, so a red `e2e` leaves `check` green and does not stop a merge by itself; it is still the only check of the parts working together, and a failure waved through unread can hide a regression of the pull request.
+'''
+
+[text.verification]
+en = '''
+Violated when a pull request is merged while `e2e` at its head failed and the pull request does not name the failing run and a cause that is not the pull request.
+'''

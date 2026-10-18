@@ -1,0 +1,31 @@
+id = 9
+slug = "merge-does-not-wait-for-ci"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R274"
+default = "on"
+authority = ["decide-yourself.routine-changes"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions"]
+
+[title]
+en = "Merge an approved pull request without waiting for CI"
+
+[text.statement]
+en = "Merge an approved pull request into `main` without holding it for `check` to finish: `check` in `.github/workflows/ci.yml` runs on every pull request but is not a required status check of `main`."
+
+[text.reason]
+en = '''
+{@rule:R211} asks a repository's instructions to say whether a merge waits for CI; this says it does not.
+'''
+
+[text.verification]
+en = '''
+A pull request whose `check` has already failed at the approved head is still not merged, and a red `e2e` is handled as {@rule:L10} says.
+
+Violated when an approved pull request that is otherwise ready is held back only to wait for `check` to finish.
+'''

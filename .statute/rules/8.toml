@@ -1,0 +1,31 @@
+id = 8
+slug = "install-commit-hooks"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R77"
+default = "on"
+authority = ["sensitive-info"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions"]
+
+[title]
+en = "Install the commit hooks before the first commit in a clone"
+
+[text.statement]
+en = "In each clone of this repository, run `uvx pre-commit install` once before the first commit."
+
+[text.reason]
+en = '''
+The commit hooks scan the staged changes for credentials with gitleaks, with `--redact` so that a hit does not print the secret, then run the quick checks of {@rule:L7}. git does not install them with the clone, and a commit made without them is not scanned before it leaves the machine.
+'''
+
+[text.verification]
+en = '''
+The hooks are installed when the file `git rev-parse --git-path hooks/pre-commit` prints is the one `pre-commit` writes.
+
+Violated when a commit is made in a clone where the hooks are not installed.
+'''

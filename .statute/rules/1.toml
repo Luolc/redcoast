@@ -1,0 +1,29 @@
+id = 1
+slug = "one-design-file"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R232"
+default = "on"
+authority = ["simplicity"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Keep the whole design in `docs/design.md`, describing only the current state"
+
+[text.statement]
+en = "Keep the whole design of redcoast in the one file `docs/design.md`, edited in place, saying what is true now and not how it got there; write no ADR or other design note anywhere else, and put the reason for a decision in the description of the pull request that makes it."
+
+[text.reason]
+en = '''
+One short file that states only the present is read whole before a change, and a reader never has to tell a current decision from a superseded one. The history and the reasons of decisions are already kept, with the change itself, in its pull request.
+'''
+
+[text.verification]
+en = '''
+Violated when a change adds another design file, an ADR or a design note, or writes into `docs/design.md` how the design got to where it is.
+'''

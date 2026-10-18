@@ -1,0 +1,29 @@
+id = 3
+slug = "invariants-link-tests"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R232"
+default = "on"
+authority = ["discriminating-checks"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Link each invariant of the design to the test that guards it"
+
+[text.statement]
+en = "Give each invariant that `docs/design.md` lists a link to the test that guards it, naming a test that exists at the same commit, or mark it \"untested\"."
+
+[text.reason]
+en = '''
+An invariant is worth only the check that would fail if it broke; the link lets a reviewer find that check, and a mark says plainly that there is none. A test renamed or removed without the link following leaves an invariant that looks guarded and is not.
+'''
+
+[text.verification]
+en = '''
+Violated when an invariant has neither a link nor the mark, or when its link leads to a file or test that does not exist at that commit.
+'''
