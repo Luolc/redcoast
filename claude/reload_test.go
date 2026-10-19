@@ -100,6 +100,7 @@ type reloadHarness struct {
 	dir         string
 	gateway     *httptest.Server
 	passwordRef string // the proxy password reference rewrite uses; empty is the default one
+	extra       string // appended to every account file rewrite writes
 }
 
 // newReloadHarness writes the account files (alias to token reference), loads them,
@@ -152,7 +153,7 @@ func (h *reloadHarness) rewrite(accounts map[string]string) {
 		if h.passwordRef != "" {
 			content = strings.Replace(content, "op://example-proxies/proxy-account/password", h.passwordRef, 1)
 		}
-		if err := os.WriteFile(filepath.Join(h.dir, alias+".yaml"), []byte(content), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(h.dir, alias+".yaml"), []byte(content+h.extra), 0o600); err != nil {
 			h.t.Fatal(err)
 		}
 	}
@@ -339,6 +340,25 @@ func TestReloadChangesToken(t *testing.T) {
 				t.Fatalf("control arm: exit saw %v, want the old token last", seen)
 			}
 		})
+	}
+}
+
+// TestReloadChangesIdentity checks that a reload that gives the accounts a client
+// identity counts them as changed and serves them with it. Control arm: a second
+// reload of the same files changes nothing.
+func TestReloadChangesIdentity(t *testing.T) {
+	h := newReloadHarness(t, aAndB)
+	h.extra = "device_id: " + syntheticDeviceID + "\naccount_uuid: " + syntheticAccountUUID + "\n"
+	h.rewrite(aAndB)
+	r, err := h.reload(nil)
+	if err != nil || !slices.Equal(r.Changed, []string{"sample-a", "sample-b"}) {
+		t.Fatalf("reload adding the identity: %+v, %v", r, err)
+	}
+	if a := h.accounts.lookup("sample-a"); a.deviceID != syntheticDeviceID || a.accountUUID != syntheticAccountUUID {
+		t.Fatalf("sample-a serves identity %q %q", a.deviceID, a.accountUUID)
+	}
+	if r, err := h.reload(nil); err != nil || r.Changed != nil {
+		t.Fatalf("control arm: %+v, %v", r, err)
 	}
 }
 

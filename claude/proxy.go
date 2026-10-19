@@ -69,7 +69,9 @@ func newReverseProxy(target *url.URL, transport http.RoundTripper, inspect func(
 			p.SetURL(target)
 			// Rewrite receives a cleaned query; retain the original query encoding.
 			p.Out.URL.RawQuery = p.In.URL.RawQuery
-			accountFrom(p.In.Context()).replaceClientAuthentication(p.Out.Header)
+			a := accountFrom(p.In.Context())
+			a.replaceClientAuthentication(p.Out.Header)
+			rewriteIdentity(p.Out, a)
 			// Transport may retry idempotent requests only when their body is replayable.
 			// Every forwarded request gets a non-replayable body, including empty ones.
 			if p.Out.Body == nil || p.Out.Body == http.NoBody {

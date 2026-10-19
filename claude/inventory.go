@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -23,14 +24,23 @@ const maxInventoryFile = 64 << 10
 // accounts are served.
 var accountStatuses = map[string]bool{"active": true, "paused": true, "suspended": true, "retired": true, "testing": true}
 
+// The shapes of the two client identity fields: Claude Code's device ID is 32 random
+// bytes in lower-case hex, the account UUID is lower case.
+var (
+	deviceIDShape    = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	accountUUIDShape = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+)
+
 // inventoryFile is the part of one <inventory>/<alias>.yaml the gateway consumes.
 // The other keys belong to other tools and are not validated here.
 type inventoryFile struct {
-	Email      string  `yaml:"email"`
-	Access     string  `yaml:"access"`
-	Status     string  `yaml:"status"`
-	OAuthToken *string `yaml:"oauth_token"`
-	Proxy      struct {
+	Email       string  `yaml:"email"`
+	Access      string  `yaml:"access"`
+	Status      string  `yaml:"status"`
+	OAuthToken  *string `yaml:"oauth_token"`
+	DeviceID    string  `yaml:"device_id"`
+	AccountUUID string  `yaml:"account_uuid"`
+	Proxy       struct {
 		Host        string `yaml:"host"`
 		Port        int    `yaml:"port"`
 		ExpectedIP  string `yaml:"expected_egress_ip"`
@@ -49,6 +59,8 @@ type inventoryAccount struct {
 	tokenRef    string
 	usernameRef string
 	passwordRef string
+	deviceID    string // the device ID upstream requests carry for this account, or ""
+	accountUUID string // the account's UUID, or ""
 }
 
 // fieldError reports a problem with one field of one account. It carries the alias and
@@ -143,7 +155,7 @@ func readInventoryFile(alias, path string) (account inventoryAccount, served boo
 func servedAccount(alias string, file inventoryFile) (inventoryAccount, error) {
 	var errs []error
 	report := func(field, problem string) { errs = append(errs, fieldError{alias, field, problem}) }
-	account := inventoryAccount{alias: alias, email: file.Email, usernameRef: file.Proxy.UsernameRef, passwordRef: file.Proxy.PasswordRef}
+	account := inventoryAccount{alias: alias, email: file.Email, usernameRef: file.Proxy.UsernameRef, passwordRef: file.Proxy.PasswordRef, deviceID: file.DeviceID, accountUUID: file.AccountUUID}
 	if file.OAuthToken != nil {
 		account.tokenRef = *file.OAuthToken
 	}
@@ -160,6 +172,13 @@ func servedAccount(alias string, file inventoryFile) (inventoryAccount, error) {
 	}
 	if file.Proxy.Port < 1 || file.Proxy.Port > 65535 {
 		report("proxy.port", "not a port")
+	}
+	// Both identity fields are optional; an empty one is sent as "".
+	if file.DeviceID != "" && !deviceIDShape.MatchString(file.DeviceID) {
+		report("device_id", "not 64 lower-case hex digits")
+	}
+	if file.AccountUUID != "" && !accountUUIDShape.MatchString(file.AccountUUID) {
+		report("account_uuid", "not a lower-case UUID")
 	}
 	expected, err := netip.ParseAddr(file.Proxy.ExpectedIP)
 	if err != nil || expected.Zone() != "" {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -58,8 +59,11 @@ func TestLoadAccounts(t *testing.T) {
 		"op://example-proxies/proxy-account/password":        "synthetic-value-proxy-password",
 		"op://example-vault/token-shared/section/credential": "sk-ant-oat01-synthetic-value-section",
 	}
-	a := inventoryYAML("sample-a", "active", "gateway", "op://example-vault/token-sample-a/credential", "8001")
+	// sample-a has both client identity fields, sample-b neither.
+	a := inventoryYAML("sample-a", "active", "gateway", "op://example-vault/token-sample-a/credential", "8001") + "device_id: " + syntheticDeviceID + "\naccount_uuid: " + syntheticAccountUUID + "\n"
 	b := inventoryYAML("sample-b", "active", "gateway", "op://example-vault/token-sample-b/credential", "8002")
+	// Malformed identity values; an error must not carry them.
+	badDeviceID, badAccountUUID := strings.ToUpper(syntheticDeviceID), "synthetic-not-a-uuid"
 	for _, test := range []struct {
 		name  string
 		files map[string]string
@@ -89,6 +93,8 @@ func TestLoadAccounts(t *testing.T) {
 		{"host_with_credentials", map[string]string{"sample-a.yaml": a, "sample-b.yaml": strings.Replace(b, "host: proxy.example.test", "host: u:p@proxy.example.test", 1)}, nil, []string{"sample-b: proxy.host"}},
 		// Every failure is reported, not only the first one.
 		{"unresolvable_references", map[string]string{"sample-a.yaml": strings.Replace(a, "op://example-vault/token-sample-a/credential", "op://example-vault/token-missing/credential", 1), "sample-b.yaml": strings.Replace(b, "op://example-proxies/proxy-account/password", "op://example-proxies/proxy-account/missing", 1)}, nil, []string{"sample-a: oauth_token: cannot resolve", "sample-b: proxy.password_ref: cannot resolve"}},
+		{"empty_identity", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b + "device_id: \"\"\naccount_uuid: \"\"\n"}, []string{"sample-a", "sample-b"}, nil},
+		{"identity_malformed", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b + "device_id: " + badDeviceID + "\naccount_uuid: " + badAccountUUID + "\n"}, nil, []string{"sample-b: device_id", "sample-b: account_uuid"}},
 		{"value_with_line_break", map[string]string{"sample-a.yaml": a, "sample-b.yaml": strings.Replace(b, "op://example-vault/token-sample-b/credential", "op://example-vault/token-newline/credential", 1)}, nil, []string{"sample-b: oauth_token"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -111,7 +117,7 @@ func TestLoadAccounts(t *testing.T) {
 						t.Fatalf("error %q does not name %q", err, mention)
 					}
 				}
-				for _, value := range values {
+				for _, value := range slices.Concat(slices.Collect(maps.Values(values)), []string{badDeviceID, badAccountUUID}) {
 					if strings.Contains(err.Error(), value) {
 						t.Fatalf("error %q carries a resolved value", err)
 					}
@@ -134,6 +140,12 @@ func TestLoadAccounts(t *testing.T) {
 				if a.exit.User != nil {
 					t.Fatal("exit URL carries credentials")
 				}
+			}
+			if got := accounts.lookup("sample-a"); got.deviceID != syntheticDeviceID || got.accountUUID != syntheticAccountUUID {
+				t.Fatalf("sample-a: identity %q %q", got.deviceID, got.accountUUID)
+			}
+			if got := accounts.lookup("sample-b"); got.deviceID != "" || got.accountUUID != "" {
+				t.Fatalf("sample-b: identity %q %q, want empty", got.deviceID, got.accountUUID)
 			}
 			if accounts.lookup("sample-a").transport == accounts.lookup("sample-b").transport {
 				t.Fatal("accounts share a transport")

@@ -28,7 +28,7 @@ type EgressCheck func(ctx context.Context, a *account) error
 type Reload struct {
 	Added    []string `json:"added"`
 	Removed  []string `json:"removed"`
-	Changed  []string `json:"changed"`  // same alias, new token or exit; served by a new outbound object
+	Changed  []string `json:"changed"`  // same alias, new token, exit or client identity; served by a new outbound object
 	Rejected []string `json:"rejected"` // refused by the egress check; not in the new set
 	Moved    int      `json:"moved"`
 	Unplaced int      `json:"unplaced"`
@@ -198,9 +198,11 @@ func diff(ctx context.Context, old, next *AccountSet, verify EgressCheck) Reload
 	return r
 }
 
-// sameConfig reports whether b has a's token, exit, expected exit IP and proxy credentials.
+// sameConfig reports whether b has a's token, exit, expected exit IP, proxy credentials
+// and client identity.
 func (a *account) sameConfig(b *account) bool {
-	return a.token == b.token && a.exit.String() == b.exit.String() && a.expectedIP == b.expectedIP && a.proxyUsername == b.proxyUsername && a.proxyPassword == b.proxyPassword
+	return a.token == b.token && a.exit.String() == b.exit.String() && a.expectedIP == b.expectedIP && a.proxyUsername == b.proxyUsername && a.proxyPassword == b.proxyPassword &&
+		a.deviceID == b.deviceID && a.accountUUID == b.accountUUID
 }
 
 // lock takes the exclusive lock, waiting at most reloadWait for the binding sections
