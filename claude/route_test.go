@@ -711,8 +711,9 @@ func TestRequestAllowlist(t *testing.T) {
 }
 
 // TestRefusedRowsAreLimitedPerSource sends more refused requests from one address than
-// a window records: only refusalRowsPerSource of them get a row, a request with a valid
-// session still does, and the next window records refusals again. Control arm: once
+// a window records: only refusalRowsPerSource of them get a row, whether the
+// credential is unknown or not of the session shape, a request with a valid session
+// still does, and the next window records refusals again. Control arm: once
 // the loopback address is over its limit, the first refusal from another address is
 // still recorded, and the loopback address's next one is not.
 func TestRefusedRowsAreLimitedPerSource(t *testing.T) {
@@ -725,8 +726,13 @@ func TestRefusedRowsAreLimitedPerSource(t *testing.T) {
 	server := httptest.NewServer(rt)
 	t.Cleanup(server.Close)
 	unknown := "sk-ant-gws-" + strings.Repeat("B", 43)
-	for range refusalRowsPerSource + 2 {
-		if status, _ := post(t, h, server, unknown, `{}`, "", ""); status != 401 {
+	// The last two are not of the session shape and count against the same limit.
+	for i := range refusalRowsPerSource + 2 {
+		token := unknown
+		if i >= refusalRowsPerSource {
+			token = "sk-ant-oat01-" + strings.Repeat("B", 43)
+		}
+		if status, _ := post(t, h, server, token, `{}`, "", ""); status != 401 {
 			t.Fatalf("status=%d", status)
 		}
 	}
