@@ -11,7 +11,7 @@ import (
 // management interface.
 func healthPauseReason(reason string) string {
 	switch reason {
-	case EgressMismatchReason, "upstream_401", session.QuotaPauseReason:
+	case EgressMismatchReason, "upstream_401", session.QuotaPauseReason, NeedsImportReason:
 		return reason
 	}
 	return "manual"
@@ -27,7 +27,8 @@ type health struct {
 // HealthHandler returns the read-only health endpoint, GET /health. The answer is 200
 // in both states, so a monitor tells a degraded gateway from an unreachable one by the
 // body. Degraded means an account of the current set is paused or its last egress
-// check could not read an IP, or the session store cannot be read.
+// check could not read an IP, the session store cannot be read, or Problems names a
+// problem.
 func (e *Egress) HealthHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +54,9 @@ func (e *Egress) judge(accounts []session.AccountStatus, err error) health {
 		if e.failedCheck(a) {
 			answer.Reasons = append(answer.Reasons, a.alias+": egress check could not read the exit IP")
 		}
+	}
+	if e.Problems != nil {
+		answer.Reasons = append(answer.Reasons, e.Problems()...)
 	}
 	if len(answer.Reasons) > 0 {
 		answer.Status = "degraded"

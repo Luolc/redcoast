@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -12,7 +13,7 @@ import (
 )
 
 // Admin is the management interface the operator reaches over the management unix
-// socket: reload, status, pause, resume and quota refresh, machines and the session list. Only the service user can open the socket;
+// socket: reload, status, pause, resume, quota refresh, login import, machines and the session list. Only the service user can open the socket;
 // there is no authentication beyond that.
 type Admin struct {
 	accounts *Accounts
@@ -23,6 +24,8 @@ type Admin struct {
 	Handoff func() error
 	// Refresh reads an account's quota again from the upstream; nil refuses every refresh.
 	Refresh func(ctx context.Context, alias string) (Refreshed, error)
+	// Import replaces an account's login and renews it; nil refuses every import.
+	Import func(ctx context.Context, alias string, login []byte) error
 }
 
 // NewAdmin returns the management interface over accounts and store; reload runs one
@@ -51,6 +54,7 @@ func (a *Admin) Handler() http.Handler {
 	mux.HandleFunc("POST /accounts/{alias}/resume", a.serveResume)
 	mux.HandleFunc("POST /accounts/{alias}/refresh", a.serveRefresh)
 	mux.HandleFunc("POST /refresh", a.serveRefreshAll)
+	mux.HandleFunc("POST /accounts/{alias}/import", a.serveImport)
 	mux.HandleFunc("GET /sessions", a.serveSessions)
 	mux.HandleFunc("GET /machines", a.serveMachines)
 	mux.HandleFunc("POST /machines", a.serveAddMachine)
@@ -305,6 +309,43 @@ func (a *Admin) serveRefreshAll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, results)
+}
+
+// maxImportBody bounds the body of an import, a login of a few kilobytes.
+const maxImportBody = 64 << 10
+
+// serveImport replaces an account's login with the request body and renews it: 400
+// when the provider refuses the login, 409 when the renewal is refused (the account
+// stays paused for a new import), 502 when the renewal failed otherwise (the login is
+// kept and the renewal retried).
+func (a *Admin) serveImport(w http.ResponseWriter, r *http.Request) {
+	alias, ok := a.knownAlias(w, r)
+	if !ok {
+		return
+	}
+	if a.Import == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": errNoImport.Error()})
+		return
+	}
+	login, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxImportBody))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "the login must be at most 64 KiB"})
+		return
+	}
+	err = a.Import(r.Context(), alias, login)
+	var refused ImportError
+	switch {
+	case errors.As(err, &refused):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	case errors.Is(err, ErrRenewalRefused):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "imported, but the renewal was refused: " + err.Error()})
+	case errors.Is(err, errNoSuchAccount):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	case err != nil:
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "imported, but the renewal failed and is retried: " + err.Error()})
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"alias": alias, "imported": "renewed"})
+	}
 }
 
 // knownAlias reads the alias path value and checks it is in the current set.

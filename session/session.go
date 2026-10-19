@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -448,6 +449,28 @@ func (s *Store) Resume(ctx context.Context, alias string) error {
 		return fmt.Errorf("resume account: %v", err)
 	}
 	return nil
+}
+
+// EndPause clears the pause of account alias when its reason is one of reasons, and
+// reports whether it did; a pause for another reason is left alone.
+func (s *Store) EndPause(ctx context.Context, alias string, reasons ...string) (bool, error) {
+	if len(reasons) == 0 {
+		return false, nil
+	}
+	query := "UPDATE account_state SET paused_until = NULL, pause_reason = NULL, updated_at = ? WHERE alias = ? AND pause_reason IN (?" + strings.Repeat(", ?", len(reasons)-1) + ")"
+	args := []any{s.now(), alias}
+	for _, reason := range reasons {
+		args = append(args, reason)
+	}
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("end account pause: %v", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("end account pause: %v", err)
+	}
+	return n > 0, nil
 }
 
 // transact runs fn in one write transaction (BEGIN IMMEDIATE) and commits when it

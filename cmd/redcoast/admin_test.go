@@ -29,6 +29,8 @@ func TestAdminCommandParsing(t *testing.T) {
 		{"resume", []string{"resume", "sample-a", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/resume", ""},
 		{"refresh", []string{"refresh", "sample-a", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/refresh", ""},
 		{"refresh_without_alias", []string{"refresh", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"import", []string{"import", "sample-a", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/import", ""},
+		{"import_without_alias", []string{"import", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"refresh_all", []string{"refresh", "--all", "--admin-socket", "admin.sock"}, "POST", "/refresh", ""},
 		{"refresh_all_with_alias", []string{"refresh", "sample-a", "--all", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"all_outside_refresh", []string{"status", "--all", "--admin-socket", "admin.sock"}, "", "", ""},
@@ -76,7 +78,8 @@ func TestAdminCommandParsing(t *testing.T) {
 }
 
 // TestRunAdmin checks the client against a fake management socket: a success is
-// written out indented, a refusal becomes an error carrying the gateway's message.
+// written out indented, a refusal becomes an error carrying the gateway's message, and
+// an import sends its input as it is, refusing one over 64 KiB without sending it.
 func TestRunAdmin(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "a.sock")
 	listener, err := net.Listen("unix", socket)
@@ -114,7 +117,21 @@ func TestRunAdmin(t *testing.T) {
 	if err := runAdmin(t.Context(), cmd, &out); err == nil || !strings.Contains(err.Error(), "reload refused: sample-a: oauth_token: cannot resolve") || out.Len() != 0 {
 		t.Fatalf("refused reload: %v output %q", err, out.String())
 	}
-	if len(received) != 2 || received[0] != `POST /accounts/sample-a/pause {"reason":"manual"}` || received[1] != "POST /reload " {
+	cmd, err = parseAdminCommand([]string{"import", "sample-a", "--admin-socket", socket})
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := `{"tokens": {"access_token": "synthetic-access-token"}}`
+	cmd.input = strings.NewReader(login)
+	out.Reset()
+	if err := runAdmin(t.Context(), cmd, &out); err != nil || strings.Contains(out.String(), "synthetic-access-token") {
+		t.Fatalf("import: %v output %q", err, out.String())
+	}
+	cmd.input = strings.NewReader(strings.Repeat(" ", maxImportInput+1))
+	if err := runAdmin(t.Context(), cmd, &out); err == nil || !strings.Contains(err.Error(), "64 KiB") {
+		t.Fatalf("oversize import: %v", err)
+	}
+	if len(received) != 3 || received[0] != `POST /accounts/sample-a/pause {"reason":"manual"}` || received[1] != "POST /reload " || received[2] != "POST /accounts/sample-a/import "+login {
 		t.Fatalf("socket received %q", received)
 	}
 	cmd.socket = filepath.Join(t.TempDir(), "missing.sock")

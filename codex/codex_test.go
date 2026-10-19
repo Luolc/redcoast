@@ -426,8 +426,9 @@ func TestUpstreamUnauthorizedPauses(t *testing.T) {
 }
 
 // TestAccountInventory checks a Codex account's inventory fields and login: the
-// installation ID must be present and a lower-case UUID v4, the login private and
-// complete, and the email present. Errors name the alias and field and carry no value.
+// installation ID must be present and a lower-case UUID v4, the login, when there is
+// one yet, private and complete, and the email present. Errors name the alias and field
+// and carry no value.
 func TestAccountInventory(t *testing.T) {
 	login := authJSON()
 	for _, test := range []struct {
@@ -443,6 +444,7 @@ func TestAccountInventory(t *testing.T) {
 		{"upper_case", "installation_id: " + strings.ToUpper(accountInstallation) + "\n", login, 0o600, "sample-a: installation_id: not a lower-case UUID v4"},
 		{"version_1", "installation_id: 0b8c7e2a-3f41-1d2e-9a6b-5c1d2e3f4a5b\n", login, 0o600, "sample-a: installation_id: not a lower-case UUID v4"},
 		{"readable_login", "installation_id: " + accountInstallation + "\n", login, 0o644, "sample-a: auth.json: must be a regular file"},
+		{"no_login", "installation_id: " + accountInstallation + "\n", "", 0o600, ""},
 		{"no_account_id", "installation_id: " + accountInstallation + "\n", strings.Replace(login, syntheticAccountID, "", 1), 0o600, "sample-a: auth.json: tokens.account_id"},
 		{"token_with_space", "installation_id: " + accountInstallation + "\n", strings.Replace(login, syntheticAccessToken, "synthetic token", 1), 0o600, "sample-a: auth.json: tokens.access_token"},
 	} {
@@ -453,8 +455,10 @@ func TestAccountInventory(t *testing.T) {
 				file = strings.Replace(file, "email: sample-a@example.test\n", "", 1)
 			}
 			writeFile(t, filepath.Join(dir, "inventory", "sample-a.yaml"), file, 0o700, 0o600)
-			writeFile(t, filepath.Join(dir, "accounts", "sample-a", authFile), test.auth, 0o700, test.authMode)
-			set, err := claude.LoadAccounts(t.Context(), filepath.Join(dir, "inventory"), New(filepath.Join(dir, "accounts")), resolve, 1)
+			if test.auth != "" {
+				writeFile(t, filepath.Join(dir, "accounts", "sample-a", authFile), test.auth, 0o700, test.authMode)
+			}
+			set, err := claude.LoadAccounts(t.Context(), filepath.Join(dir, "inventory"), New(filepath.Join(dir, "accounts"), testTokenURL), resolve, 1)
 			if test.problem == "" {
 				if err != nil || len(set.Candidates()) != 1 {
 					t.Fatalf("got %v", err)

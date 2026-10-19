@@ -138,6 +138,7 @@ type router struct {
 	proxy    *httputil.ReverseProxy
 	limits   Limits
 	refusals refusalRows
+	renewals renewals
 	now      func() time.Time // the clock Retry-After and pauses are measured on; tests inject the store's
 }
 
@@ -307,7 +308,8 @@ func (rt *router) inspectUpstream(res *http.Response) error {
 
 // recordUpstream saves the quota readings of an upstream response for the account its
 // request was sent through, under source, and returns them. When the upstream refuses
-// the account's token it pauses the account for credentialPause, and when it
+// the account's token it pauses the account for credentialPause, or until a renewal
+// it queues succeeds when the provider renews credentials, and when it
 // rate-limits the account it pauses it until the earliest reset, so that sessions bind
 // elsewhere. Failures are logged.
 func (rt *router) recordUpstream(res *http.Response, source string) []session.Reading {
@@ -321,11 +323,21 @@ func (rt *router) recordUpstream(res *http.Response, source string) []session.Re
 	}
 	switch res.StatusCode {
 	case http.StatusUnauthorized:
+		// Taken before Refused looks at the credential, so a renewal that settles after
+		// this is known to have covered the credential this response refused.
+		refusedAt := rt.now()
 		if !rt.provider.Refused(res) {
 			break
 		}
-		if err := rt.store.Pause(ctx, a.alias, rt.now().Add(credentialPause), "upstream_401"); err != nil {
+		until := rt.now().Add(credentialPause)
+		if rt.provider.Renew != nil {
+			until = indefinitePause
+		}
+		if err := rt.store.Pause(ctx, a.alias, until, "upstream_401"); err != nil {
 			log.Printf("account pause failed alias=%s", a.alias)
+		}
+		if rt.provider.Renew != nil {
+			rt.renewals.queue(a.alias, refusedAt)
 		}
 	case http.StatusTooManyRequests:
 		// The upstream refused the account: the session's next request binds elsewhere
