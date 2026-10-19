@@ -149,6 +149,7 @@ type gateway struct {
 	store    *session.Store
 	accounts *claude.Accounts
 	entry    *claude.Entrypoint
+	provider claude.Provider
 	dir      string           // the temporary directory with inventory/ and accounts/
 	server   *httptest.Server // the reverse proxy
 	forward  *httptest.Server // the forward proxy
@@ -211,7 +212,7 @@ func newGatewayWith(t *testing.T, login string) *gateway {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &gateway{t: t, exit: exit, store: store, accounts: accounts, entry: entrypoint, dir: dir, server: server, forward: forward, token: issued.Token}
+	return &gateway{t: t, exit: exit, store: store, accounts: accounts, entry: entrypoint, provider: provider, dir: dir, server: server, forward: forward, token: issued.Token}
 }
 
 // connect sends CONNECT target to the forward proxy at address with token as the proxy
