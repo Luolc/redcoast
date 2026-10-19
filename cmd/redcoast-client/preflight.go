@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -15,8 +17,9 @@ import (
 // credential is not used.
 var overridingVariables = []string{"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"}
 
-// forbiddenSettingsEnv lists the variables a settings env map must not set: the
-// overriding ones, the ones the launcher sets, and every proxy variable it clears.
+// forbiddenSettingsEnv lists the variables a settings env map must not set to any
+// value: the overriding ones, the gateway's, and every proxy variable the launcher
+// clears.
 func forbiddenSettingsEnv() []string {
 	seen := make(map[string]bool)
 	var keys []string
@@ -34,29 +37,32 @@ func forbiddenSettingsEnv() []string {
 // overridingSettings are settings keys that select another credential or login.
 var overridingSettings = []string{"apiKeyHelper", "forceLoginMethod", "forceLoginGatewayUrl"}
 
-// preflight returns everything that would stop the session credential from being
-// used: a configuration directory that has not completed onboarding, an overriding
-// variable in the environment, or an overriding key or variable in any settings layer
-// (managed, user, project, local, and files or JSON given with --settings). A settings
-// env map may also not set any proxy variable: claude would apply it over the
-// launcher's HTTPS_PROXY. Only the presence of keys is examined; no value is read, and
-// nothing is reported verbatim except key names and file paths.
-func preflight(environ []string, cwd, home string, args []string) []string {
+// preflight returns as overrides everything that would stop the session credential
+// from being used: a configuration directory that has not completed onboarding, an
+// overriding variable in the environment, or an overriding key or variable in any
+// settings layer (managed, user, project, local, and files or JSON given with
+// --settings). A settings env map may also not set any proxy variable: claude would
+// apply it over the launcher's HTTPS_PROXY. It returns as conflicts each toggle that a
+// settings env map sets to a value other than the launcher's. Of these variables only
+// the toggles' values are read; nothing else is reported verbatim except key names and
+// file paths.
+func preflight(environ []string, cwd, home string, args []string) (overrides, conflicts []string) {
 	env := environment(environ)
-	var problems []string
 	config := configDir(env, home)
 	if err := onboardingCompleted(stateFile(env, home)); err != nil {
-		problems = append(problems, err.Error())
+		overrides = append(overrides, err.Error())
 	}
 	for _, key := range overridingVariables {
 		if _, present := env[key]; present {
-			problems = append(problems, key+" in the environment")
+			overrides = append(overrides, key+" in the environment")
 		}
 	}
 	for _, layer := range settingsLayers(config, cwd, args) {
-		problems = append(problems, layer.problems()...)
+		layerOverrides, layerConflicts := layer.problems()
+		overrides = append(overrides, layerOverrides...)
+		conflicts = append(conflicts, layerConflicts...)
 	}
-	return problems
+	return overrides, conflicts
 }
 
 // stateFile is claude's own state file with the onboarding flag: ~/.claude.json, or
@@ -173,40 +179,91 @@ func mainCheckout(gitFile string) string {
 	return filepath.Dir(filepath.Dir(worktrees))
 }
 
-// problems reports the overriding keys and env variables in the layer. A missing file
-// is fine; a file that exists but is not a JSON object is reported, since claude's
-// reading of it cannot be predicted.
-func (l settingsLayer) problems() []string {
+// problems reports the overriding keys and env variables in the layer, and the toggles
+// its env map sets to another value. A missing file is fine; a file that exists but is
+// not a JSON object is reported, since claude's reading of it cannot be predicted.
+func (l settingsLayer) problems() (overrides, conflicts []string) {
 	data := []byte(l.inline)
 	where := l.name
 	if l.inline == "" {
 		var err error
 		data, err = os.ReadFile(l.path)
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return nil, nil
 		}
 		where = l.name + " " + l.path
 		if err != nil {
-			return []string{where + " cannot be read"}
+			return []string{where + " cannot be read"}, nil
 		}
 	}
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(data, &keys); err != nil {
-		return []string{where + " is not a JSON object"}
+		return []string{where + " is not a JSON object"}, nil
 	}
-	var problems []string
 	for _, key := range overridingSettings {
 		if _, present := keys[key]; present {
-			problems = append(problems, key+" in "+where)
+			overrides = append(overrides, key+" in "+where)
 		}
 	}
 	var env map[string]json.RawMessage
 	if raw, present := keys["env"]; present && json.Unmarshal(raw, &env) == nil {
-		for _, key := range forbiddenSettingsEnv() {
-			if _, present := env[key]; present {
-				problems = append(problems, "env."+key+" in "+where)
-			}
+		overrides = append(overrides, envOverrides(env, where)...)
+		conflicts = toggleConflicts(env, where)
+	}
+	return overrides, conflicts
+}
+
+// envOverrides reports each variable of forbiddenSettingsEnv in a settings env map,
+// without reading its value.
+func envOverrides(env map[string]json.RawMessage, where string) []string {
+	var problems []string
+	for _, key := range forbiddenSettingsEnv() {
+		if _, present := env[key]; present {
+			problems = append(problems, "env."+key+" in "+where)
 		}
 	}
 	return problems
+}
+
+// toggleConflicts reports each toggle that a settings env map sets to anything but the
+// JSON string of the launcher's value.
+func toggleConflicts(env map[string]json.RawMessage, where string) []string {
+	var problems []string
+	for _, toggle := range toggles {
+		raw, present := env[toggle.key]
+		var value string
+		if !present || (json.Unmarshal(raw, &value) == nil && value == toggle.value) {
+			continue
+		}
+		problems = append(problems, "env."+toggle.key+" is "+settingsValue(raw)+" in "+where+"; the launcher sets "+strconv.Quote(toggle.value))
+	}
+	return problems
+}
+
+// maxValueLength caps the characters of a settings value shown in a message.
+const maxValueLength = 32
+
+// settingsValue renders a settings env value for a message: a JSON string quoted, any
+// other JSON value as its compact JSON text, cut to maxValueLength characters and with
+// every character outside printable ASCII escaped, so that the file cannot fill or
+// drive the terminal.
+func settingsValue(raw json.RawMessage) string {
+	var text string
+	isString := json.Unmarshal(raw, &text) == nil
+	if !isString {
+		var compact bytes.Buffer
+		if json.Compact(&compact, raw) != nil {
+			return "an unreadable value"
+		}
+		text = compact.String()
+	}
+	suffix := ""
+	if runes := []rune(text); len(runes) > maxValueLength {
+		text, suffix = string(runes[:maxValueLength]), "..."
+	}
+	quoted := strconv.QuoteToASCII(text)
+	if !isString {
+		quoted = quoted[1 : len(quoted)-1]
+	}
+	return quoted + suffix
 }
