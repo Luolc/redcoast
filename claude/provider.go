@@ -46,7 +46,10 @@ type Provider struct {
 	// Import replaces account alias's credential with login, once login passes the
 	// provider's checks against the account; its errors carry no value of login. Nil
 	// refuses every import.
-	Import func(alias string, login []byte) error
+	Import func(ctx context.Context, alias string, login []byte) error
+	// Problems names the accounts' credential problems now, without values; each makes
+	// the health endpoint degraded and is logged when renewals stop. Nil has none.
+	Problems func() []string
 	// Guard checks a request the reverse proxy forwards just before it leaves for the
 	// upstream: an error answers 502 and nothing is sent. Nil checks nothing. A quota
 	// refresh's Probe is the gateway's own request and does not pass it.

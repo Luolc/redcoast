@@ -60,6 +60,7 @@ type loginState struct {
 	// the token ended, and outcome its result; mu guards both.
 	settled time.Time
 	outcome error
+	unsaved atomic.Pointer[unsavedLogin] // a renewed login served but not written yet
 }
 
 // tokens are what a forwarded request needs from the login.
@@ -224,18 +225,32 @@ func headerValue(value string) bool {
 	return true
 }
 
-// lockAccount takes the lock of the account in dir, waiting for another process that
-// holds it, and returns its release.
-func lockAccount(dir string) (func(), error) {
+// lockPoll is how often lockAccount tries a lock another process holds.
+const lockPoll = 50 * time.Millisecond
+
+// lockAccount takes the lock of the account in dir, waiting while another process
+// holds it until ctx ends, and returns its release.
+func lockAccount(ctx context.Context, dir string) (func(), error) {
 	f, err := os.OpenFile(filepath.Join(dir, lockFile), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, errors.New("cannot open the lock file")
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, errors.New("cannot lock the lock file")
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() { _ = f.Close() }, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = f.Close()
+			return nil, errors.New("cannot lock the lock file")
+		}
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, errors.New("another process holds the account's lock")
+		case <-time.After(lockPoll):
+		}
 	}
-	return func() { _ = f.Close() }, nil
 }
 
 // writeAuth replaces the auth.json in dir with data, whole or not at all, and returns

@@ -46,6 +46,7 @@ func New(accountsDir, tokenURL string) claude.Provider {
 		Refused:    l.refused,
 		Renew:      r.renew,
 		Import:     r.importLogin,
+		Problems:   l.problems,
 		Guard:      guard,
 	}
 }

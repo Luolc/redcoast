@@ -115,29 +115,24 @@ func (q *renewals) init() {
 // interval, and each account queued by an upstream 401 or a failed import renewal,
 // retried after a failure until it succeeds or is refused. A refused renewal pauses the
 // account for NeedsImportReason; a queued one that succeeds ends a pause for that
-// reason or for upstream_401. A renewal leaves the queue before its outcome changes
-// the pause, so a 401 that pauses the account after that is queued again.
+// reason or for upstream_401. Accounts paused for upstream_401 when it starts are
+// queued. A renewal leaves the queue before its outcome changes the pause, so a 401
+// that pauses the account after that is queued again. The provider's problems left at
+// the end are logged.
 func (e *Entrypoint) RunRenewals(ctx context.Context, interval time.Duration) error {
 	rt := e.router
 	if rt.provider.Renew == nil {
 		<-ctx.Done()
 		return nil
 	}
+	defer rt.logProblems()
+	rt.queuePaused(ctx)
 	sweep := rt.now()
 	for {
 		now := rt.now()
-		due, next := rt.renewals.due(now)
-		for alias, r := range due {
-			err := rt.renew(ctx, alias, r.since)
-			rt.renewals.retry(alias, rt.now(), err == nil || errors.Is(err, ErrRenewalRefused) || errors.Is(err, errNoSuchAccount))
-			rt.settle(ctx, alias, err, true)
-		}
+		next := rt.renewQueued(ctx, now)
 		if !now.Before(sweep) {
-			for _, alias := range rt.accounts.Candidates() {
-				if !rt.renewals.queued(alias) {
-					rt.settle(ctx, alias, rt.renew(ctx, alias, time.Time{}), false)
-				}
-			}
+			rt.sweepRenewals(ctx)
 			sweep = rt.now().Add(interval)
 		}
 		wait := sweep.Sub(rt.now())
@@ -153,6 +148,49 @@ func (e *Entrypoint) RunRenewals(ctx context.Context, interval time.Duration) er
 			timer.Stop()
 		case <-timer.C:
 		}
+	}
+}
+
+// queuePaused queues the accounts paused for upstream_401: a process that starts,
+// after a handoff or a restart, takes up the renewals the one before it left, since
+// only a renewal ends that pause.
+func (rt *router) queuePaused(ctx context.Context) {
+	for _, alias := range rt.accounts.Candidates() {
+		if reason, err := rt.store.PauseReason(ctx, alias); err == nil && reason == "upstream_401" {
+			rt.renewals.queue(alias, rt.now())
+		}
+	}
+}
+
+// renewQueued runs the queued renewals due at now and returns when the next one is
+// due (zero when none is queued).
+func (rt *router) renewQueued(ctx context.Context, now time.Time) time.Time {
+	due, next := rt.renewals.due(now)
+	for alias, r := range due {
+		err := rt.renew(ctx, alias, r.since)
+		rt.renewals.retry(alias, rt.now(), err == nil || errors.Is(err, ErrRenewalRefused) || errors.Is(err, errNoSuchAccount))
+		rt.settle(ctx, alias, err, true)
+	}
+	return next
+}
+
+// sweepRenewals renews every account not queued whose credential is due.
+func (rt *router) sweepRenewals(ctx context.Context) {
+	for _, alias := range rt.accounts.Candidates() {
+		if !rt.renewals.queued(alias) {
+			rt.settle(ctx, alias, rt.renew(ctx, alias, time.Time{}), false)
+		}
+	}
+}
+
+// logProblems logs the provider's credential problems, such as a renewed login not
+// saved, which a person must see when the process stops.
+func (rt *router) logProblems() {
+	if rt.provider.Problems == nil {
+		return
+	}
+	for _, problem := range rt.provider.Problems() {
+		log.Printf("credential problem at stop: %s", problem)
 	}
 }
 
@@ -215,7 +253,9 @@ func (e *Entrypoint) Import(ctx context.Context, alias string, login []byte) err
 	if rt.accounts.set.Load().lookup(alias) == nil {
 		return errNoSuchAccount
 	}
-	if err := rt.provider.Import(alias, login); err != nil {
+	importCtx, cancel := context.WithTimeout(ctx, renewTimeout)
+	defer cancel()
+	if err := rt.provider.Import(importCtx, alias, login); err != nil {
 		return ImportError{err}
 	}
 	err := rt.renew(ctx, alias, rt.now())

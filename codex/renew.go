@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -60,6 +63,9 @@ func (r renewer) renew(ctx context.Context, alias string, client *http.Client, r
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if st.unsaved.Load() != nil {
+		return r.save(ctx, st)
+	}
 	forced := !refusedAt.IsZero()
 	if forced && st.settled.After(refusedAt) {
 		return st.outcome
@@ -79,7 +85,7 @@ func (r renewer) renewLocked(ctx context.Context, st *loginState, client *http.C
 	if _, err := readAuth(st.dir); err != nil {
 		return fmt.Errorf("%w: %s: %v", claude.ErrRenewalRefused, authFile, err)
 	}
-	unlock, err := lockAccount(st.dir)
+	unlock, err := lockAccount(ctx, st.dir)
 	if err != nil {
 		return err
 	}
@@ -120,13 +126,61 @@ func (r renewer) renewLocked(ctx context.Context, st *loginState, client *http.C
 	if err != nil {
 		return err
 	}
-	if err := writeAuth(st.dir, data); err != nil {
-		// The refresh token on disk was spent by this renewal, so no later renewal can
-		// work: a person has to look at the directory and import the login again.
-		return fmt.Errorf("%w: the renewed login was not saved, %v", claude.ErrRenewalRefused, err)
-	}
 	st.tokens.Store(&tokens{access: renewed.AccessToken, accountID: doc.Tokens.AccountID})
+	if err := writeAuth(st.dir, data); err != nil {
+		// The refresh token on disk is spent: the renewed login is served from memory
+		// and its write retried, with no renewal, until it is saved.
+		st.unsaved.Store(&unsavedLogin{data: data, spent: doc.Tokens.RefreshToken})
+		log.Printf("renewed login not saved alias=%s: %v; it needs a new import if this process stops first", filepath.Base(st.dir), err)
+		return fmt.Errorf("the renewed login is served but not saved: %v", err)
+	}
 	return nil
+}
+
+// unsavedLogin is a renewed login whose write failed: the document to write and the
+// refresh token it spent, which the stored login still holds.
+type unsavedLogin struct {
+	data  []byte
+	spent string
+}
+
+// save writes st's unsaved login under the account's lock, with st.mu held. When the
+// stored login no longer holds the spent refresh token, another login was imported
+// since, and that one is served instead.
+func (r renewer) save(ctx context.Context, st *loginState) error {
+	unlock, err := lockAccount(ctx, st.dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	unsaved := st.unsaved.Load()
+	doc, err := readAuth(st.dir)
+	if err == nil && doc.Tokens.RefreshToken != unsaved.spent {
+		st.tokens.Store(doc.served())
+		st.unsaved.Store(nil)
+		return nil
+	}
+	if err := writeAuth(st.dir, unsaved.data); err != nil {
+		return fmt.Errorf("the renewed login is served but still not saved: %v", err)
+	}
+	st.unsaved.Store(nil)
+	st.settled, st.outcome = r.now(), nil
+	return nil
+}
+
+// problems names the accounts whose renewed login is served but not saved, for the
+// health endpoint.
+func (l *logins) problems() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for alias, st := range l.byAlias {
+		if st.unsaved.Load() != nil {
+			out = append(out, alias+": renewed login not saved; a new import is needed if the gateway stops first")
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // due returns the reason the Codex CLI gives for renewing doc now, or "" when it is
@@ -243,7 +297,7 @@ func (d authDoc) renewed(renewed refreshed, at time.Time) ([]byte, error) {
 // the identity check: the account's first login, or one of the same ChatGPT account as
 // the stored login. Replacing the account means deleting its directory first. Errors
 // never carry a token.
-func (r renewer) importLogin(alias string, data []byte) error {
+func (r renewer) importLogin(ctx context.Context, alias string, data []byte) error {
 	st := r.logins.lookup(alias)
 	if st == nil {
 		return errors.New("no such account")
@@ -267,7 +321,7 @@ func (r renewer) importLogin(alias string, data []byte) error {
 	if err != nil && !errors.Is(err, errNoLogin) {
 		return fmt.Errorf("stored %s: %v", authFile, err)
 	}
-	unlock, err := lockAccount(st.dir)
+	unlock, err := lockAccount(ctx, st.dir)
 	if err != nil {
 		return err
 	}
@@ -282,6 +336,7 @@ func (r renewer) importLogin(alias string, data []byte) error {
 		return err
 	}
 	st.tokens.Store(doc.served())
+	st.unsaved.Store(nil)
 	return nil
 }
 

@@ -397,8 +397,10 @@ func TestRenewFailures(t *testing.T) {
 }
 
 // TestRenewNotSaved checks a renewal whose renewed login cannot be written: the
-// refresh token on disk is spent, so the renewal is refused (the account waits for a
-// person and a new import), and neither the file nor the token served changes.
+// refresh token on disk is spent, so the process serves the renewed token from memory,
+// names the account as a problem and, without renewing again, retries the write at
+// each renewal until it is saved. The control arm is the write once the directory is
+// writable again.
 func TestRenewNotSaved(t *testing.T) {
 	accountsDir := t.TempDir()
 	stored := loginJSON(syntheticAccessToken, syntheticRefreshToken, idToken(syntheticEmail, syntheticAccountID), syntheticAccountID)
@@ -413,15 +415,152 @@ func TestRenewNotSaved(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	err := r.renew(t.Context(), "sample-a", server.Client(), time.Now())
-	if !errors.Is(err, claude.ErrRenewalRefused) || !strings.Contains(err.Error(), "not saved") || count.Load() != 1 {
-		t.Fatalf("got %v after %d refreshes, want a refusal after one", err, count.Load())
+	for i := range 2 {
+		err := r.renew(t.Context(), "sample-a", server.Client(), time.Now())
+		if err == nil || errors.Is(err, claude.ErrRenewalRefused) || !strings.Contains(err.Error(), "not saved") || count.Load() != 1 {
+			t.Fatalf("try %d: %v after %d refreshes, want a failure to retry after one", i+1, err, count.Load())
+		}
+		if data, _ := os.ReadFile(filepath.Join(dir, authFile)); string(data) != stored {
+			t.Fatal("the stored login changed")
+		}
+		if got := r.logins.lookup("sample-a").tokens.Load(); got.access != "synthetic-access-1" {
+			t.Fatal("the process does not serve the renewed token")
+		}
+		if problems := r.logins.problems(); len(problems) != 1 || !strings.HasPrefix(problems[0], "sample-a: renewed login not saved") {
+			t.Fatalf("problems %q", problems)
+		}
 	}
-	if data, _ := os.ReadFile(filepath.Join(dir, authFile)); string(data) != stored {
-		t.Fatal("the stored login changed")
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if got := r.logins.lookup("sample-a").tokens.Load(); got.access != syntheticAccessToken {
-		t.Fatal("the process serves an unsaved token")
+	if err := r.renew(t.Context(), "sample-a", server.Client(), time.Time{}); err != nil || count.Load() != 1 {
+		t.Fatalf("control arm: %v after %d refreshes", err, count.Load())
+	}
+	doc, err := readAuth(dir)
+	if err != nil || doc.Tokens.AccessToken != "synthetic-access-1" || doc.Tokens.RefreshToken != "synthetic-refresh-token-1" || len(r.logins.problems()) != 0 {
+		t.Fatalf("after the write: %v, problems %q", err, r.logins.problems())
+	}
+}
+
+// TestRenewLocked checks that a renewal waits for another process's lock only as long
+// as its context allows, sending nothing, and that another account's renewal goes on;
+// the control arm renews once the lock is released.
+func TestRenewLocked(t *testing.T) {
+	accountsDir := t.TempDir()
+	login := loginJSON(syntheticAccessToken, syntheticRefreshToken, idToken(syntheticEmail, syntheticAccountID), syntheticAccountID)
+	writeFile(t, filepath.Join(accountsDir, "sample-a", authFile), login, 0o700, 0o600)
+	writeFile(t, filepath.Join(accountsDir, "sample-b", authFile), login, 0o700, 0o600)
+	server, count, _ := rotatingEndpoint(t, 0)
+	r := processRenewer(t, accountsDir, server.URL+"/oauth/token")
+	source, err := r.logins.account("sample-b", []byte("email: "+syntheticEmail+"\ninstallation_id: "+accountInstallation+"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	release, err := lockAccount(t.Context(), filepath.Join(accountsDir, "sample-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := r.renew(ctx, "sample-a", server.Client(), time.Now()); err == nil || !strings.Contains(err.Error(), "another process holds") || time.Since(start) > 2*time.Second || count.Load() != 0 {
+		t.Fatalf("locked account: %v after %v and %d refreshes", err, time.Since(start), count.Load())
+	}
+	if err := r.renew(t.Context(), "sample-b", server.Client(), time.Now()); err != nil || count.Load() != 1 {
+		t.Fatalf("other account: %v, %d refreshes", err, count.Load())
+	}
+	release()
+	writeFile(t, filepath.Join(accountsDir, "sample-a", authFile), loginJSON(syntheticAccessToken, "synthetic-refresh-token-1", idToken(syntheticEmail, syntheticAccountID), syntheticAccountID), 0o700, 0o600)
+	if err := r.renew(t.Context(), "sample-a", server.Client(), time.Now()); err != nil || count.Load() != 2 {
+		t.Fatalf("control arm: %v, %d refreshes", err, count.Load())
+	}
+}
+
+// TestRenewIdentity checks the identity check of a renewed login: an id_token of
+// another email or another ChatGPT account refuses the renewal, and neither the stored
+// login nor the token served changes; the control arm renews.
+func TestRenewIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name, id string
+		refused  bool
+	}{
+		{"other_email", idToken("sample-b@example.test", syntheticAccountID), true},
+		{"other_account", idToken(syntheticEmail, "synthetic-account-id-other"), true},
+		{"control", idToken(syntheticEmail, syntheticAccountID), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			accountsDir := t.TempDir()
+			stored := loginJSON(syntheticAccessToken, syntheticRefreshToken, idToken(syntheticEmail, syntheticAccountID), syntheticAccountID)
+			writeFile(t, filepath.Join(accountsDir, "sample-a", authFile), stored, 0o700, 0o600)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "synthetic-access-1", "refresh_token": "synthetic-refresh-token-1", "id_token": test.id})
+			}))
+			t.Cleanup(server.Close)
+			r := processRenewer(t, accountsDir, server.URL+"/oauth/token")
+			err := r.renew(t.Context(), "sample-a", server.Client(), time.Now())
+			if errors.Is(err, claude.ErrRenewalRefused) != test.refused || (!test.refused && err != nil) {
+				t.Fatalf("got %v, want refused %v", err, test.refused)
+			}
+			data, _ := os.ReadFile(filepath.Join(accountsDir, "sample-a", authFile))
+			served := r.logins.lookup("sample-a").tokens.Load().access
+			if test.refused && (string(data) != stored || served != syntheticAccessToken) || !test.refused && served != "synthetic-access-1" {
+				t.Fatalf("stored login changed %v, serving the renewed token %v", string(data) != stored, served == "synthetic-access-1")
+			}
+		})
+	}
+}
+
+// TestRenewNoRedirect checks that a renewal follows no redirect of the token endpoint,
+// so the refresh token goes nowhere else: the import's renewal fails (502) and the exit
+// sees no request to where the redirect points.
+func TestRenewNoRedirect(t *testing.T) {
+	g := newGatewayWith(t, "")
+	g.exit.setAnswer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth/token" {
+			w.Header().Set("Location", "http://127.0.0.1:9/elsewhere")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+		}
+	})
+	err := g.entry.Import(t.Context(), "sample-a", []byte(loginJSON(syntheticAccessToken, syntheticRefreshToken, idToken(syntheticEmail, syntheticAccountID), syntheticAccountID)))
+	if err == nil || errors.Is(err, claude.ErrRenewalRefused) || !strings.Contains(err.Error(), "307") {
+		t.Fatalf("got %v, want a failure on the 307", err)
+	}
+	for _, e := range g.exit.exchanges() {
+		if e.path != "/oauth/token" {
+			t.Fatalf("the exit saw a request to %s", e.path)
+		}
+	}
+}
+
+// TestRenewalsAfterRestart checks that a process starting its renewals takes up an
+// account another process left paused for upstream_401, which no sweep would renew,
+// and ends the pause with a renewal; the control arm, an operator's pause, stays and
+// sends nothing.
+func TestRenewalsAfterRestart(t *testing.T) {
+	for _, test := range []struct {
+		reason, after string
+		refreshes     int
+	}{
+		{"upstream_401", "", 1},
+		{"maintenance", "maintenance", 0},
+	} {
+		t.Run(test.reason, func(t *testing.T) {
+			g := newGateway(t)
+			endpoint := &tokenEndpoint{answer: func(n int, _ map[string]string) (int, string) { return http.StatusOK, renewedAnswer(n) }}
+			endpoint.install(g.exit, func() int { return http.StatusOK })
+			if err := g.store.Pause(t.Context(), "sample-a", time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), test.reason); err != nil {
+				t.Fatal(err)
+			}
+			g.runRenewals()
+			eventually(t, "the renewals", func() bool { return len(endpoint.seen()) == test.refreshes && g.pauseReason() == test.after })
+			time.Sleep(100 * time.Millisecond)
+			if len(endpoint.seen()) != test.refreshes || g.pauseReason() != test.after {
+				t.Fatalf("%d refreshes, paused for %q", len(endpoint.seen()), g.pauseReason())
+			}
+		})
 	}
 }
 
