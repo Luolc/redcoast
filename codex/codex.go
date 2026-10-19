@@ -45,8 +45,16 @@ func New(accountsDir string) claude.Provider {
 		// The client cannot change how a request authenticates upstream: the gateway
 		// sets both headers. So any 401 is the account's login refused.
 		Refused: func(*http.Response) bool { return true },
-		Guard:   uniqueHeaders,
+		Guard:   guard,
 	}
+}
+
+// guard refuses a request marked unreadableBody and one whose header names repeat.
+func guard(out *http.Request) error {
+	if out.Header.Get(unreadableBody) != "" {
+		return errUnreadableBody
+	}
+	return uniqueHeaders(out)
 }
 
 // errRepeatedHeader refuses a request that would leave with a header name twice.

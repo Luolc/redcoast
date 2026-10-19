@@ -78,8 +78,7 @@ func TestForwarding(t *testing.T) {
 // TestBodyInstallationID checks requests whose turn metadata carries no installation
 // ID, as the Codex CLI's memory requests do: the client's ID in the body's
 // client_metadata reaches the upstream as the account's, at the same length. A body
-// whose ID the gateway cannot read gets 502 and the client's ID does not reach the
-// upstream; a compressed body gets 400 unless it comes from Pi, whose compressed body
+// whose ID the gateway cannot read gets 502 and nothing of it reaches the upstream; a compressed body gets 400 unless it comes from Pi, whose compressed body
 // goes upstream unchanged.
 func TestBodyInstallationID(t *testing.T) {
 	g := newGateway(t)
@@ -111,7 +110,7 @@ func TestBodyInstallationID(t *testing.T) {
 				t.Fatalf("status %d %q, want %d", status, body, test.status)
 			}
 			if test.upstream == "" {
-				if len(seen) != 0 && status != http.StatusBadGateway {
+				if len(seen) != 0 {
 					t.Fatalf("%d requests upstream, want none", len(seen))
 				}
 				return
