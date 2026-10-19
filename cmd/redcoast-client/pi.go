@@ -14,20 +14,21 @@ import (
 )
 
 // piProviderVariables are the variables from which Pi 1.2.0 takes a credential for a
-// provider other than openai-codex (packages/ai/src/env-api-keys.ts and
-// api/anthropic-messages.ts). Without them, and with no login in auth.json,
-// openai-codex is the only provider with a credential, and pi falls back to it for a
-// project's defaultProvider or a resumed session's model, which it uses only when
-// their provider has one.
+// provider other than openai-codex (packages/ai/src/env-api-keys.ts,
+// api/anthropic-messages.ts and api/bedrock-converse-stream.ts), or the server of its
+// built-in llama extension (extensions/llama/provider.ts). Without them, and with no
+// login in auth.json, openai-codex is the only provider with a credential, and pi
+// falls back to it for a project's defaultProvider or a resumed session's model,
+// which it uses only when their provider has one.
 var piProviderVariables = []string{
 	"AI_GATEWAY_API_KEY", "ANT_LING_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_FEDERATION_RULE_ID",
 	"ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_SERVICE_ACCOUNT_ID",
 	"ANTHROPIC_WORKSPACE_ID", "AWS_ACCESS_KEY_ID", "AWS_BEARER_TOKEN_BEDROCK", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-	"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_PROFILE", "AWS_SECRET_ACCESS_KEY", "AWS_WEB_IDENTITY_TOKEN_FILE",
+	"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_PROFILE", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
 	"AZURE_OPENAI_API_KEY", "BASETEN_API_KEY", "CEREBRAS_API_KEY", "CLOUDFLARE_API_KEY", "COPILOT_GITHUB_TOKEN",
 	"DEEPSEEK_API_KEY", "FIREWORKS_API_KEY", "GCLOUD_PROJECT", "GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
 	"GOOGLE_CLOUD_API_KEY", "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_PROJECT", "GROQ_API_KEY", "HF_TOKEN", "KIMI_API_KEY",
-	"META_API_KEY", "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY", "MISTRAL_API_KEY", "MOONSHOT_API_KEY", "NVIDIA_API_KEY",
+	"LLAMA_BASE_URL", "META_API_KEY", "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY", "MISTRAL_API_KEY", "MOONSHOT_API_KEY", "NVIDIA_API_KEY",
 	"OPENAI_API_KEY", "OPENCODE_API_KEY", "OPENROUTER_API_KEY", "QWEN_TOKEN_PLAN_API_KEY", "QWEN_TOKEN_PLAN_CN_API_KEY",
 	"RADIUS_API_KEY", "TOGETHER_API_KEY", "TYPESAFE_API_KEY", "XAI_API_KEY", "XIAOMI_API_KEY",
 	"XIAOMI_TOKEN_PLAN_AMS_API_KEY", "XIAOMI_TOKEN_PLAN_CN_API_KEY", "XIAOMI_TOKEN_PLAN_SGP_API_KEY", "ZAI_API_KEY",
