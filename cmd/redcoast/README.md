@@ -40,6 +40,8 @@ email: someone@example.test # optional; shown on the dashboard
 access: gateway # gateway or direct
 status: active # active, paused, suspended, retired or testing
 oauth_token: op://example-vault/example-a/token # a `claude setup-token` token
+device_id: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef # optional; 64 lower-case hex digits
+account_uuid: 01234567-89ab-cdef-0123-456789abcdef # optional; lower-case UUID
 proxy: # the account's exit, an HTTP proxy
   host: proxy.example.test
   port: 8080
@@ -47,6 +49,8 @@ proxy: # the account's exit, an HTTP proxy
   username_ref: op://example-vault/example-a-proxy/username
   password_ref: op://example-vault/example-a-proxy/password
 ```
+
+`device_id` and `account_uuid` are the identity the gateway puts into `metadata.user_id` of the account's requests in place of the client's; a missing or empty one is sent as an empty string. A malformed one is refused, naming the account and the field, never the value. Changing either counts as changing the account on a reload.
 
 All of an active account's references must resolve, or the gateway does not start (and a reload changes nothing). An optional `direct-hosts.yaml` in the same directory lists the exact `host:port` CONNECT targets the gateway dials itself instead of through an account's exit:
 
