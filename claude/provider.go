@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/Luolc/redcoast/session"
 )
@@ -32,8 +33,20 @@ type Provider struct {
 	// Readings parses an upstream response's quota readings, recorded under source.
 	Readings func(header http.Header, source string) []session.Reading
 	// Refused reports whether an upstream 401 means the account's credential was
-	// refused, which pauses the account.
+	// refused, which pauses the account: for credentialPause without Renew, and with it
+	// until a forced renewal succeeds.
 	Refused func(res *http.Response) bool
+	// Renew renews account alias's credential through client, whose requests leave
+	// through the account's exit and do not follow redirects. With refusedAt, the time
+	// the upstream refused the credential, it renews at once unless a renewal settled
+	// after refusedAt, whose outcome then stands; with a zero refusedAt, only when the
+	// credential is due. An error wrapping ErrRenewalRefused means only a new import
+	// brings the account back. Nil renews nothing.
+	Renew func(ctx context.Context, alias string, client *http.Client, refusedAt time.Time) error
+	// Import replaces account alias's credential with login, once login passes the
+	// provider's checks against the account; its errors carry no value of login. Nil
+	// refuses every import.
+	Import func(alias string, login []byte) error
 	// Guard checks a request the reverse proxy forwards just before it leaves for the
 	// upstream: an error answers 502 and nothing is sent. Nil checks nothing. A quota
 	// refresh's Probe is the gateway's own request and does not pass it.

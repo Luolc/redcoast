@@ -8,6 +8,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -28,6 +29,10 @@ import (
 	"github.com/Luolc/redcoast/session"
 	"github.com/cloudflare/tableflip"
 )
+
+// renewalSweep is how often a gateway whose provider renews credentials checks every
+// account's for one that is due; the Codex CLI renews within five minutes of expiry.
+const renewalSweep = time.Minute
 
 // accountsLoadTimeout bounds reading the inventory and resolving its references at
 // startup, the SDK's client setup included.
@@ -104,9 +109,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if gateway.Probe != nil {
-		admin.Refresh = entrypoint.Refresh
-	}
+	offerAccountActions(admin, gateway, entrypoint)
 	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started)
 	if err != nil {
 		log.Fatal(err)
@@ -121,6 +124,7 @@ func main() {
 	// in progress, and the store is closed after them, before the failure is reported.
 	servers := []func(context.Context) error{
 		func(ctx context.Context) error { return egress.Run(ctx, cfg.egressInterval) },
+		func(ctx context.Context) error { return entrypoint.RunRenewals(ctx, renewalSweep) },
 		func(ctx context.Context) error {
 			return claude.Serve(ctx, l.health, cfg.readOnly(egress.HealthHandler()))
 		},
@@ -151,6 +155,17 @@ func main() {
 	<-upg.Exit()
 	if err := errors.Join(err, dashboard.Close(), store.Close()); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// offerAccountActions gives the management interface the quota refresh and the login
+// import of entrypoint when gateway's provider has them.
+func offerAccountActions(admin *claude.Admin, gateway claude.Provider, entrypoint *claude.Entrypoint) {
+	if gateway.Probe != nil {
+		admin.Refresh = entrypoint.Refresh
+	}
+	if gateway.Import != nil && gateway.Renew != nil {
+		admin.Import = entrypoint.Import
 	}
 }
 
@@ -239,7 +254,7 @@ func newBackup(ctx context.Context, cfg config, store *session.Store, resolve cl
 		Region:      cfg.backup.Region,
 		Prefix:      cfg.backup.Prefix,
 		Credentials: backup.Credentials{AccessKeyID: keyID, SecretAccessKey: secret},
-		Dir:         filepath.Join(filepath.Dir(cfg.sessionDB), "backup"),
+		Dir:         backupDir(cfg.sessionDB),
 	}), nil
 }
 
@@ -287,7 +302,7 @@ func newProvider(ctx context.Context, cfg config, resolve claude.Resolver) (clau
 	if err != nil {
 		return claude.Provider{}, nil, fmt.Errorf("codex.session_key: %v", err)
 	}
-	return codex.New(cfg.codex.AccountsDir), form, nil
+	return codex.New(cfg.codex.AccountsDir, cmp.Or(cfg.codex.TokenURL, codex.TokenURL)), form, nil
 }
 
 // runSubcommand runs "plan", "thresholds" or one of the management subcommands.

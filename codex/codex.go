@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Luolc/redcoast/claude"
 )
@@ -31,28 +32,28 @@ var requests = map[string]bool{"POST " + prefix + "/responses": true}
 const notSession = "not a redcoast Codex session credential; start pi or codex through redcoast-client"
 
 // New returns the Codex provider whose accounts' logins are in accountsDir, one
-// directory per alias.
-func New(accountsDir string) claude.Provider {
+// directory per alias, renewed at tokenURL: TokenURL, or a loopback URL in tests.
+func New(accountsDir, tokenURL string) claude.Provider {
+	l := &logins{accountsDir: accountsDir}
+	r := renewer{logins: l, tokenURL: tokenURL, now: time.Now}
 	return claude.Provider{
 		Requests:   requests,
 		Prefix:     prefix,
 		Screen:     screen,
 		NotSession: notSession,
-		Account: func(alias string, document []byte) (claude.CredentialSource, error) {
-			return account(accountsDir, alias, document)
-		},
-		Readings: quotaReadings,
-		// The client cannot change how a request authenticates upstream: the gateway
-		// sets both headers. So any 401 is the account's login refused.
-		Refused: func(*http.Response) bool { return true },
-		Guard:   guard,
+		Account:    l.account,
+		Readings:   quotaReadings,
+		Refused:    l.refused,
+		Renew:      r.renew,
+		Import:     r.importLogin,
+		Guard:      guard,
 	}
 }
 
-// guard refuses a request marked unreadableBody and one whose header names repeat.
+// guard refuses a request marked refusedMark and one whose header names repeat.
 func guard(out *http.Request) error {
-	if out.Header.Get(unreadableBody) != "" {
-		return errUnreadableBody
+	if reason := out.Header.Get(refusedMark); reason != "" {
+		return errors.New(reason)
 	}
 	return uniqueHeaders(out)
 }

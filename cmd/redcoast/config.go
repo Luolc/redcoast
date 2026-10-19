@@ -73,11 +73,13 @@ type backupConfig struct {
 }
 
 // codexFile is the codex section, which only a Codex gateway takes: the directory of
-// the accounts' logins, one directory per alias, and the reference of the key that
-// signs session credentials.
+// the accounts' logins, one directory per alias, the reference of the key that signs
+// session credentials, and the token endpoint logins are renewed at, which only tests
+// set (to a loopback URL).
 type codexFile struct {
 	AccountsDir string `yaml:"accounts_dir"`
 	SessionKey  string `yaml:"session_key"`
+	TokenURL    string `yaml:"token_url"`
 }
 
 // fileConfig is the configuration file. Keys it does not name are refused; keys left
@@ -404,9 +406,10 @@ func parseCodexBase(raw string) (*url.URL, error) {
 }
 
 // checkCodex checks the codex section: a Codex gateway needs it, with an absolute
-// accounts directory and a credential reference for the session key, and keeps no
-// capture records, whose redaction knows only Claude's credentials; a Claude gateway
-// refuses it.
+// accounts directory away from the store's directory, the backup snapshots and the
+// dashboard's files, a credential reference for the session key and the real token
+// endpoint or a loopback one, and keeps no capture records, whose redaction knows only
+// Claude's credentials; a Claude gateway refuses it.
 func checkCodex(report func(key, problem string), provider string, f fileConfig) {
 	if provider != "codex" {
 		if f.Codex != nil {
@@ -421,12 +424,36 @@ func checkCodex(report func(key, problem string), provider string, f fileConfig)
 		report("codex", "missing")
 		return
 	}
-	if !filepath.IsAbs(f.Codex.AccountsDir) {
+	switch {
+	case !filepath.IsAbs(f.Codex.AccountsDir):
 		report("codex.accounts_dir", "must be an absolute path")
+	case filepath.Clean(f.Codex.AccountsDir) == filepath.Dir(f.SessionDB) || within(f.Codex.AccountsDir, backupDir(f.SessionDB)):
+		// A login must never reach the store's directory or the backup snapshots, whose
+		// directory is emptied before each snapshot.
+		report("codex.accounts_dir", "must not be session_db's directory or in its backup directory")
+	case f.DashboardDir != "" && within(f.Codex.AccountsDir, f.DashboardDir):
+		report("codex.accounts_dir", "must not be in dashboard_dir, whose files are served")
 	}
 	if err := credential.Check(f.Codex.SessionKey); err != nil {
 		report("codex.session_key", err.Error())
 	}
+	if f.Codex.TokenURL != "" && f.Codex.TokenURL != codex.TokenURL {
+		target, err := url.Parse(f.Codex.TokenURL)
+		if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.User != nil || !isLoopbackAddress(target.Host) {
+			report("codex.token_url", "must be "+codex.TokenURL+" or a loopback URL")
+		}
+	}
+}
+
+// backupDir is the directory of the local backup snapshots of the store at sessionDB.
+func backupDir(sessionDB string) string {
+	return filepath.Join(filepath.Dir(sessionDB), "backup")
+}
+
+// within reports whether path is root or inside it, by their cleaned names.
+func within(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // loadTLS reads listen.tls's certificate and key, which must pair, and checks that the

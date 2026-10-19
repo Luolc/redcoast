@@ -203,10 +203,12 @@ func TestExampleConfig(t *testing.T) {
 
 // TestCodexConfiguration checks the Codex gateway's configuration: its own defaults,
 // the upstream (the Codex API's base URL or a loopback URL, nothing else), the codex
-// section it requires and a Claude gateway refuses, and capture, which it refuses. The
+// section it requires and a Claude gateway refuses (its accounts directory away from the
+// store, the backups and the dashboard; its token endpoint), and capture, which it refuses. The
 // example file parses with the defaults it shows.
 func TestCodexConfiguration(t *testing.T) {
 	const section = "codex: {accounts_dir: /var/lib/redcoast-codex/accounts, session_key: 'env://SESSION_KEY'}\n"
+	atStore := strings.Replace(baseConfig, "session_db: gateway.sqlite", "session_db: /var/lib/rc/sessions.db", 1)
 	for _, test := range []struct {
 		name, provider, yaml string
 		upstream             string // expected when accepted
@@ -222,6 +224,12 @@ func TestCodexConfiguration(t *testing.T) {
 		{"no_section", "codex", baseConfig, "", "codex: missing"},
 		{"relative_accounts_dir", "codex", baseConfig + "codex: {accounts_dir: accounts, session_key: 'env://SESSION_KEY'}\n", "", "codex.accounts_dir: must be an absolute path"},
 		{"key_not_a_reference", "codex", baseConfig + "codex: {accounts_dir: /accounts, session_key: plain-text-key}\n", "", "codex.session_key"},
+		{"accounts_beside_store", "codex", atStore + "codex: {accounts_dir: /var/lib/rc/accounts, session_key: 'env://SESSION_KEY'}\n", "https://chatgpt.com/backend-api/codex", ""},
+		{"accounts_in_store_dir", "codex", atStore + "codex: {accounts_dir: /var/lib/rc/, session_key: 'env://SESSION_KEY'}\n", "", "codex.accounts_dir: must not be session_db's directory"},
+		{"accounts_in_backup", "codex", atStore + "codex: {accounts_dir: /var/lib/rc/backup/accounts, session_key: 'env://SESSION_KEY'}\n", "", "codex.accounts_dir: must not be session_db's directory"},
+		{"accounts_in_dashboard", "codex", baseConfig + "dashboard_dir: /srv/dashboard\ncodex: {accounts_dir: /srv/dashboard/accounts, session_key: 'env://SESSION_KEY'}\n", "", "codex.accounts_dir: must not be in dashboard_dir"},
+		{"loopback_token_url", "codex", baseConfig + "codex: {accounts_dir: /accounts, session_key: 'env://SESSION_KEY', token_url: 'http://127.0.0.1:8791/oauth/token'}\n", "https://chatgpt.com/backend-api/codex", ""},
+		{"other_token_url", "codex", baseConfig + "codex: {accounts_dir: /accounts, session_key: 'env://SESSION_KEY', token_url: 'https://auth.example/oauth/token'}\n", "", "codex.token_url: must be https://auth.openai.com/oauth/token or a loopback URL"},
 		{"capture", "codex", baseConfig + section + "capture_dir: /var/lib/capture\n", "", "capture_dir: not supported"},
 		{"section_at_claude", "claude", baseConfig + section, "", "codex: only redcoast codex serve"},
 		{"path_at_claude", "claude", baseConfig + "upstream: https://chatgpt.com/backend-api/codex\n", "", "upstream: not an origin"},

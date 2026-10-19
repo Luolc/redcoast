@@ -3,7 +3,6 @@ package codex
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -95,18 +94,20 @@ func replaceInstallationID(out *http.Request, account string) {
 // maxReadBody bounds a body read whole by replaceInBody.
 const maxReadBody = 64 << 20
 
-// unreadableBody marks a request whose body may carry an installation ID that the
-// gateway cannot find: it is not a JSON object, is larger than maxReadBody, or has an
+// refusedMark marks a request the guard refuses, so that nothing of it is sent and the
+// client gets 502; its value is the reason. Authorize marks a request of an account
+// without a login, and one whose body may carry an installation ID that the gateway
+// cannot find: the body is not a JSON object, is larger than maxReadBody, or has an
 // x-codex-installation-id in client_metadata that is not a string of
-// clientInstallationID's shape. The guard refuses a request with the mark, so nothing
-// of it is sent and the client gets 502.
-const unreadableBody = "Redcoast-Unreadable-Body"
+// clientInstallationID's shape. A client that sends the mark itself only has its own
+// request refused.
+const refusedMark = "Redcoast-Refused"
 
-// errUnreadableBody is the guard's refusal of a request marked unreadableBody.
-var errUnreadableBody = errors.New("the request body's installation ID cannot be read")
+// unreadableBody is the reason of a request marked for its body.
+const unreadableBody = "the request body's installation ID cannot be read"
 
 // replaceInBody puts account's installation ID in place of the one in out's body's
-// client_metadata, everywhere in the body, or marks out unreadableBody.
+// client_metadata, everywhere in the body, or marks out refusedMark.
 func replaceInBody(out *http.Request, account string) {
 	data, err := io.ReadAll(io.LimitReader(out.Body, maxReadBody+1))
 	_ = out.Body.Close()
@@ -115,13 +116,13 @@ func replaceInBody(out *http.Request, account string) {
 		ClientMetadata map[string]json.RawMessage `json:"client_metadata"`
 	}
 	if err != nil || len(data) > maxReadBody || json.Unmarshal(data, &request) != nil {
-		out.Header.Set(unreadableBody, "1")
+		out.Header.Set(refusedMark, unreadableBody)
 		return
 	}
 	if raw, present := request.ClientMetadata["x-codex-installation-id"]; present {
 		var id string
 		if json.Unmarshal(raw, &id) != nil || !clientInstallationID.MatchString(id) {
-			out.Header.Set(unreadableBody, "1")
+			out.Header.Set(refusedMark, unreadableBody)
 			return
 		}
 		replaceAll(data, []byte(id), []byte(account))

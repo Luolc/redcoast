@@ -136,7 +136,7 @@ On the gateway, register the hash with `machine add`, and set `listen.session` s
 
 The configuration takes the keys of [`redcoast.example.yaml`](../../redcoast.example.yaml); [`redcoast-codex.example.yaml`](../../redcoast-codex.example.yaml) shows what differs: the upstream is the Codex API's base URL `https://chatgpt.com/backend-api/codex` (or a loopback URL in tests), the default listen addresses are other ports, `capture_dir` is refused, and a `codex` section is required:
 
-- `codex.accounts_dir`: an absolute path to a directory with one directory per account alias, mode 0700, holding the account's ChatGPT login as `auth.json` in `$CODEX_HOME`'s format, mode 0600. The logins stay outside the database, and so outside its backups.
+- `codex.accounts_dir`: an absolute path to an existing directory, mode 0700, with one directory per account alias, mode 0700, holding the account's ChatGPT login as `auth.json` in `$CODEX_HOME`'s format, mode 0600, beside a `lock` file. The logins stay outside the database, and so outside its backups: the directory may not be `session_db`'s directory, nor be in its `backup` directory or in `dashboard_dir`.
 - `codex.session_key`: the reference of a key of at least 32 bytes that signs session credentials. They are JWTs carrying a made-up `chatgpt_account_id`, which Pi requires; changing the key ends every session issued under the old one.
 
 An account file of the Codex inventory has the keys of a Claude one without `oauth_token`, `email` is required, and `installation_id` is a lower-case UUID v4 that the account's requests carry in place of the client's:
@@ -154,7 +154,17 @@ proxy:
   password_ref: op://example-vault/example-b-proxy/password
 ```
 
-The gateway forwards only `POST /backend-api/codex/responses`, answers a WebSocket upgrade with 426 so that the clients stream over HTTP, and reads each account's quota from the `x-codex-primary-*` and `x-codex-secondary-*` headers of its responses. In this release it only reads the logins: putting a login into `accounts_dir` and refreshing it are still to come, and an upstream 401 pauses the account for an hour, as on the Claude gateway.
+The gateway forwards only `POST /backend-api/codex/responses`, answers a WebSocket upgrade with 426 so that the clients stream over HTTP, and reads each account's quota from the `x-codex-primary-*` and `x-codex-secondary-*` headers of its responses.
+
+An account without a login loads, its requests get 502, and within a minute it is paused with the reason `needs_reimport`, which `status` and `/health` show. To give it a login, log in with the Codex CLI on a machine where the account's browser session is (`codex login`), then copy that `auth.json` to the gateway host and import it:
+
+```sh
+redcoast codex import sample-a --admin-socket /run/redcoast-codex/admin.sock < auth.json
+```
+
+The import is refused unless the `email` of the login's `id_token` is the inventory's `email` (ignoring case), its `tokens.account_id` is the `id_token`'s ChatGPT account ID, and, when the account already has a login, that account ID is the stored one's; to put another ChatGPT account under the alias, delete the account's directory first. The gateway then renews the login at once, so the copy it came from stops working: delete it. The command fails with the reason when the renewal is refused (the account stays paused for a new import) and when it failed otherwise (the login is kept and the renewal retried).
+
+The gateway renews each login through the account's exit, as the Codex CLI does: within five minutes of the access token's expiry, or, when that cannot be read, eight days after the last renewal. An upstream 401 pauses the account (`upstream_401`) until a renewal succeeds; one is queued at once and retried after a minute, then after twice as long each time, up to an hour. When the token endpoint refuses the refresh token, or the renewed login fails the checks above, the account is paused for `needs_reimport` until a new import. A process holds an account's `lock` while it renews, and reads `auth.json` again under it, so the two processes of a handoff never renew one account at once.
 
 ## Backups
 
