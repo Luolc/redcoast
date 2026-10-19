@@ -62,7 +62,7 @@ func (h *harness) add(alias, token string) *account {
 	if err := h.store.SetPlanSchedule(context.Background(), session.PlanPeriod{Alias: alias, Plan: "pro", From: time.UnixMilli(0), Source: "manual"}); err != nil {
 		h.t.Fatal(err)
 	}
-	a := &account{alias: alias, credential: bearer(token), proxyUsername: "synthetic-user-" + alias, proxyPassword: "Synthetic-Password-" + alias, exit: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}, transport: newTransport(DefaultAccountConcurrency), slots: make(chan struct{}, DefaultAccountConcurrency)}
+	a := &account{alias: alias, credential: claudeCredential{token: token}, proxyUsername: "synthetic-user-" + alias, proxyPassword: "Synthetic-Password-" + alias, exit: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}, transport: newTransport(DefaultAccountConcurrency), slots: make(chan struct{}, DefaultAccountConcurrency)}
 	h.t.Cleanup(a.transport.CloseIdleConnections)
 	h.accounts.set.Load().byAlias[alias] = a
 	return a
@@ -258,5 +258,10 @@ func newRecordStore(dir string, known *strings.Replacer) *RecordStore {
 
 // tokenOf returns the OAuth token of a Claude account.
 func tokenOf(a *account) string {
-	return string(a.credential.(bearer))
+	return claudeOf(a).token
+}
+
+// claudeOf returns the credential of a Claude account.
+func claudeOf(a *account) claudeCredential {
+	return a.credential.(claudeCredential)
 }

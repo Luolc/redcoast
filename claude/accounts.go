@@ -249,16 +249,16 @@ func knownValueReplacerFor(accounts []*account) *strings.Replacer {
 		}
 	}
 	for _, a := range accounts {
-		// Only a provider with Capture keeps records, and its accounts hold bearer tokens.
-		token, ok := a.credential.(bearer)
+		// Only a provider with Capture keeps records, and its accounts hold Claude's tokens.
+		c, ok := a.credential.(claudeCredential)
 		if !ok {
 			continue
 		}
-		tokenMark, partial := partialToken(string(token))
+		tokenMark, partial := partialToken(c.token)
 		if !partial {
 			tokenMark = knownCredential
 		}
-		addValue(string(token), tokenMark)
+		addValue(c.token, tokenMark)
 	}
 	// The proxy accounts come after the tokens so that a form both share is fully hidden.
 	for _, a := range accounts {

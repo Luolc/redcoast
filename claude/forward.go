@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Luolc/redcoast/internal/denylist"
 	"github.com/Luolc/redcoast/session"
 )
 
@@ -27,9 +28,9 @@ import (
 var connectTarget = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}:[0-9]{1,5}$`)
 
 // connectRecord is the saved capture record of one forward-proxy request. Result is
-// one of ok, refused (not a CONNECT, an invalid target, or an account-route target
-// accountTarget rules out), auth_failed, not_session (the credential does not have
-// the shape of a session credential), wrong_source, no_account,
+// one of ok, refused (not a CONNECT, an invalid target, a host the deny list names,
+// or an account-route target accountTarget rules out), auth_failed, not_session (the
+// credential does not have the shape of a session credential), wrong_source, no_account,
 // quota_exhausted, store_failed, limited, egress_failed (the exit could not be reached, answered
 // nothing valid, or refused the tunnel; ExitStatus tells which; on the direct route,
 // the target could not be reached), idle_timeout or
@@ -53,9 +54,9 @@ type connectRecord struct {
 // in Proxy-Authorization, has the session store evaluate the binding and tunnels every
 // CONNECT through the bound account's exit with that account's proxy credentials,
 // except a target listed in the inventory's direct-hosts.yaml, which it connects to
-// from the gateway's own address. Neither route reaches a non-public address. A failed
-// connection on either route is not retried on the other. A tunnel stays on the
-// account it was opened with. Other methods are refused.
+// from the gateway's own address. Neither route reaches a non-public address or a host
+// the deny list names. A failed connection on either route is not retried on the
+// other. A tunnel stays on the account it was opened with. Other methods are refused.
 type forwardProxy struct {
 	store    *session.Store
 	accounts *Accounts
@@ -123,7 +124,9 @@ func (f *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		row.Route = "direct"
 	}
 	record.Route = row.Route
-	if row.Route == "account" && !accountTarget(r.Host) {
+	// The deny list is checked before authentication: no credential opens a tunnel to
+	// a denied host, so the request needs no binding and takes no tunnel slot.
+	if denylist.Denied(row.Host) || row.Route == "account" && !accountTarget(r.Host) {
 		record.Result = "refused"
 		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
 		return
