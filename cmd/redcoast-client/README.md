@@ -1,6 +1,6 @@
-# redcoast-client: starting Claude Code through the gateway
+# redcoast-client: starting Claude Code, Pi and Codex CLI through the gateway
 
-`redcoast-client claude [claude's arguments]` asks the gateway for a session, starts `claude` with the session's settings and passes every argument after `claude` through unchanged. When `claude` exits, the launcher ends the session.
+`redcoast-client claude [claude's arguments]` asks the gateway for a session, starts `claude` with the session's settings and passes every argument after `claude` through unchanged. `redcoast-client pi …` and `redcoast-client codex …` do the same for Pi and Codex CLI, through the gateway's Codex process ([Pi and Codex CLI](#pi-and-codex-cli)). When the client exits, the launcher ends the session.
 
 ## Install
 
@@ -64,6 +64,8 @@ The launcher reads only environment variables. Exactly one of two modes:
 | `REDCOAST_CLIENT_CLAUDE` | The `claude` executable; default `claude` on `PATH`. |
 | `REDCOAST_CLIENT_MACHINE` | The machine name reported over the socket; default the host name. Over the network the gateway knows the machine by its credential. |
 
+`pi` and `codex` read `REDCOAST_CLIENT_CODEX_SOCKET`, `REDCOAST_CLIENT_CODEX_ADDRESS` and `REDCOAST_CLIENT_CODEX_CREDENTIAL_FILE` instead of the first three: the same modes, for the gateway's Codex process, which has its own session interface and its own registered machines. The credential file may be the same one, registered with both processes. Their executables are `REDCOAST_CLIENT_PI` and `REDCOAST_CLIENT_CODEX`, by default `pi` and `codex` on `PATH`.
+
 For example, on a client machine:
 
 ```sh
@@ -78,6 +80,32 @@ Before asking for a session the launcher refuses (exit 3) when anything on the m
 
 `claude` then runs with `ANTHROPIC_BASE_URL` set to the gateway's reverse proxy, `CLAUDE_CODE_OAUTH_TOKEN` set to the session credential, `HTTPS_PROXY` set to the gateway's forward proxy with the session credential, `NO_PROXY` for the reverse proxy's host, and Claude Code's nonessential traffic, official marketplace auto-install and auto-updater turned off. Every other proxy variable is removed. The launcher forwards SIGINT, SIGTERM and SIGHUP, and on Linux collects the processes `claude` leaves behind.
 
-Exit status: `claude`'s own, 128 plus the signal number when it was killed, or 3 for a failure before `claude` started.
+Exit status: the client's own, 128 plus the signal number when it was killed, or 3 for a failure before the client started.
 
 If the launcher itself is killed with SIGKILL, its session stays live, and keeps one of the machine's session slots, until it has been idle for 7 days or the machine is revoked.
+
+## Pi and Codex CLI
+
+Each client gets a configuration directory of its own, which must hold no login: `~/.config/pi` as Pi's `PI_CODING_AGENT_DIR`, `~/.config/codex` as Codex CLI's `CODEX_HOME`. The launcher creates the directory with mode 0700 and refuses (exit 3) one that others can enter, since Codex CLI writes its environment, the session credential included, into shell snapshots there. Your own `~/.pi/agent` and `~/.codex` are not used; copy any settings or skills you want into the new directory.
+
+Both get the session credential in `CODEX_GATEWAY_TOKEN`, `HTTPS_PROXY` set to the gateway's forward proxy with the session credential, and `NO_PROXY` for the gateway's host, `127.0.0.1` and `localhost`. Every other proxy variable is removed.
+
+`redcoast-client pi` refuses to start when `auth.json` in its directory has an `openai-codex`, `openai` or `radius` login, which Pi would use or send instead of the session credential, or when the command line has `--api-key`. It writes `models.json` in its directory, replacing what was there, so that Pi's built-in `openai-codex` provider uses the gateway (`<gateway>/backend-api`) with the key `${CODEX_GATEWAY_TOKEN}`: the credential stays out of the file, and several Pi sessions can run from the directory at once. It sets `PI_OFFLINE=1`. Choose the provider with `--provider openai-codex`, or with `defaultProvider` in the directory's `settings.json`.
+
+`redcoast-client codex` refuses to start when its directory has an `auth.json`, when a managed configuration exists (`/etc/codex/managed_config.toml`, `/etc/codex/requirements.toml` or `managed_config.toml` in the directory), or when the command line has `--oss`, `--local-provider`, `--remote`, `--remote-auth-token-env` or a `-c` for `model_provider` or `model_providers`. It starts `codex` with these arguments before yours:
+
+```sh
+codex --no-daemon \
+  -c 'model_provider="gateway"' \
+  -c 'model_providers.gateway.name="gateway"' \
+  -c 'model_providers.gateway.base_url="<gateway>/backend-api/codex"' \
+  -c 'model_providers.gateway.wire_api="responses"' \
+  -c 'model_providers.gateway.env_key="CODEX_GATEWAY_TOKEN"' \
+  -c 'model_providers.gateway.supports_websockets=false' \
+  -c features.plugins=false -c analytics.enabled=false -c 'otel.metrics_exporter="none"' \
+  -c check_for_update_on_startup=false -c feedback.enabled=false \
+  -c 'cli_auth_credentials_store="file"' \
+  [your arguments]
+```
+
+`-c` outranks `config.toml` and a trusted project's `.codex/config.toml`, so neither can turn these back on. Your own `-c` or `--enable` for one of the last six may set it only to the launcher's value; any other value exits 3. `--no-daemon` keeps a shared background server from outliving the session with its credential; `codex agents`, which needs that server, does not run through the launcher.

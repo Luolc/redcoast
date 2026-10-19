@@ -346,7 +346,7 @@ func launch(t *testing.T, socketPresent bool, args ...string) (*session.Store, *
 	}
 	t.Cleanup(func() { _ = stdout.Close(); _ = stderr.Close() })
 	l := &launcher{
-		stdout: stdout, stderr: stderr, signals: signals, cwd: dir, home: home, args: args,
+		client: clients["claude"], stdout: stdout, stderr: stderr, signals: signals, cwd: dir, home: home, args: args,
 		environ: []string{"PATH=/usr/bin:/bin", "HOME=" + home, "REDCOAST_CLIENT_SOCKET=" + socket, "REDCOAST_CLIENT_CLAUDE=" + claude, "REDCOAST_CLIENT_MACHINE=test", "FAKE_OUT=" + out, "FAKE_SLEEP_ODD=" + oddSleep, "HTTP_PROXY=http://stale"},
 	}
 	return store, l, signals, out
@@ -735,14 +735,16 @@ func hashOf(credential string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TestClaudeArgs checks that the arguments after "claude" pass through and that a
-// command line without it is refused.
-func TestClaudeArgs(t *testing.T) {
-	if args, ok := claudeArgs([]string{"claude", "-p", "claude"}); !ok || !slices.Equal(args, []string{"-p", "claude"}) {
-		t.Fatalf("got %q %v", args, ok)
+// TestCommandLine checks that the first argument picks the client and the rest pass
+// through, and that a command line without a client's name is refused.
+func TestCommandLine(t *testing.T) {
+	for _, name := range []string{"claude", "pi", "codex"} {
+		if c, args, ok := commandLine([]string{name, "-p", "claude"}); !ok || c.name != name || !slices.Equal(args, []string{"-p", "claude"}) {
+			t.Fatalf("%s: got %v %q %v", name, c, args, ok)
+		}
 	}
-	for _, arguments := range [][]string{nil, {"-p"}, {"codex", "claude"}} {
-		if _, ok := claudeArgs(arguments); ok {
+	for _, arguments := range [][]string{nil, {"-p"}, {"opencode", "claude"}} {
+		if _, _, ok := commandLine(arguments); ok {
 			t.Errorf("%q accepted", arguments)
 		}
 	}
