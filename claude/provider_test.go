@@ -86,6 +86,11 @@ func TestProviderHooks(t *testing.T) {
 			if res.StatusCode != test.status || test.path == "" && len(paths) != 0 || test.path != "" && (len(paths) != 1 || paths[0] != test.path) {
 				t.Fatalf("status %d, upstream saw %v; want %d and %q", res.StatusCode, paths, test.status, test.path)
 			}
+			if test.name == "screened" {
+				if rows := h.trafficRows(1); len(rows) != 1 || rows[0].result != "refused" || rows[0].request != "POST /api/x/v1/messages" {
+					t.Fatalf("screened request's row: %+v", rows)
+				}
+			}
 		})
 	}
 }

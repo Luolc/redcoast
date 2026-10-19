@@ -34,8 +34,9 @@ type Provider struct {
 	// Refused reports whether an upstream 401 means the account's credential was
 	// refused, which pauses the account.
 	Refused func(res *http.Response) bool
-	// Guard checks a request just before it leaves for the upstream: an error answers
-	// 502 and nothing is sent. Nil checks nothing.
+	// Guard checks a request the reverse proxy forwards just before it leaves for the
+	// upstream: an error answers 502 and nothing is sent. Nil checks nothing. A quota
+	// refresh's Probe is the gateway's own request and does not pass it.
 	Guard func(out *http.Request) error
 	// Probe is the request a quota refresh sends; nil refuses every refresh.
 	Probe *Probe
