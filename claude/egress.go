@@ -50,6 +50,9 @@ type Egress struct {
 
 	mu   sync.Mutex
 	last map[*account]EgressResult // each account object's last check
+
+	// Problems names further problems the health endpoint reports; nil names none.
+	Problems func() []string
 }
 
 // EgressResult is the outcome of one account's last check since the gateway started:

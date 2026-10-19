@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +20,7 @@ import (
 )
 
 // adminCommands are the subcommands served over the management socket.
-var adminCommands = map[string]bool{"reload": true, "handoff": true, "status": true, "sessions": true, "pause": true, "resume": true, "refresh": true, "machine": true}
+var adminCommands = map[string]bool{"reload": true, "handoff": true, "status": true, "sessions": true, "pause": true, "resume": true, "refresh": true, "machine": true, "import": true}
 
 // adminCommand is a parsed management invocation: the request to send to the socket.
 type adminCommand struct {
@@ -27,6 +28,7 @@ type adminCommand struct {
 	method  string
 	path    string
 	body    any           // nil sends no body
+	input   io.Reader     // sent as the body instead, as it is; nil sends body
 	timeout time.Duration // how long the command waits for the gateway's answer
 	// write writes a success answer to out; nil writes it indented.
 	write func(answer []byte, out io.Writer) error
@@ -43,6 +45,7 @@ var errAdminUsage = errors.New(`usage:
   redcoast claude|codex resume <alias> --admin-socket <path>
   redcoast claude|codex refresh <alias> --admin-socket <path>
   redcoast claude|codex refresh --all --admin-socket <path>
+  redcoast codex import <alias> --admin-socket <path> < auth.json
   redcoast claude|codex machine add <name> <sha256-of-credential> --admin-socket <path> [--max-sessions <n>]
   redcoast claude|codex machine revoke <name> --admin-socket <path>
   redcoast claude|codex machine limit <name> <n> --admin-socket <path>
@@ -55,7 +58,9 @@ until resume; refresh sends the account one small request through its exit to re
 quota again, and ends its pause after an upstream 429 when the reading is under the
 hard threshold; refresh --all does that for every account, one after another, prints
 one line per account and fails when any of them failed (an account skipped for a pause
-other than quota is not a failure); sessions lists the sessions started in [since,
+other than quota is not a failure); import reads a Codex login in auth.json's format
+from stdin, replaces the account's login with it when it is the account's, and renews
+it at once, so the copy it came from stops working; sessions lists the sessions started in [since,
 until), by default the last day, newest first and at most 500, only the ended ones unless --state all; machine add takes the SHA-256 the client machine printed, never the credential itself`)
 
 // handoffCommandTimeout bounds a handoff command: the new process's startup, bounded
@@ -74,6 +79,12 @@ const refreshCommandTimeout = claude.RefreshTimeout + 10*time.Second
 // account after another, each bounded by claude.RefreshTimeout; this covers twenty
 // accounts that all run to that bound.
 const refreshAllCommandTimeout = 20*claude.RefreshTimeout + 10*time.Second
+
+// importCommandTimeout bounds an import command: the login's renewal and the answer.
+const importCommandTimeout = 45 * time.Second
+
+// maxImportInput bounds the login an import reads; the gateway takes at most 64 KiB.
+const maxImportInput = 64 << 10
 
 // parseAdminCommand parses "<subcommand> [args]".
 func parseAdminCommand(arguments []string) (adminCommand, error) {
@@ -118,7 +129,7 @@ func parseAdminCommand(arguments []string) (adminCommand, error) {
 		case "handoff":
 			cmd.timeout = handoffCommandTimeout
 		}
-	case "pause", "resume", "refresh":
+	case "pause", "resume", "refresh", "import":
 		return accountCommand(cmd, arguments[0], rest, *reason, *until)
 	default:
 		return adminCommand{}, errAdminUsage
@@ -195,7 +206,7 @@ func machineCommand(cmd adminCommand, rest []string, maxSessions int) (adminComm
 	return cmd, nil
 }
 
-// accountCommand builds the pause, resume or refresh of the one alias in rest.
+// accountCommand builds the pause, resume, refresh or import of the one alias in rest.
 func accountCommand(cmd adminCommand, verb string, rest []string, reason, until string) (adminCommand, error) {
 	if len(rest) != 1 || !accountAlias.MatchString(rest[0]) {
 		return adminCommand{}, errAdminUsage
@@ -203,6 +214,8 @@ func accountCommand(cmd adminCommand, verb string, rest []string, reason, until 
 	switch verb {
 	case "refresh":
 		return refreshCommand(cmd.socket, rest[0]), nil
+	case "import":
+		cmd.input, cmd.timeout = os.Stdin, importCommandTimeout
 	case "pause":
 		body, err := pauseBody(reason, until)
 		if err != nil {
@@ -278,7 +291,14 @@ func runAdmin(ctx context.Context, cmd adminCommand, out io.Writer) error {
 	ctx, cancel := context.WithTimeout(ctx, cmd.timeout)
 	defer cancel()
 	var body io.Reader
-	if cmd.body != nil {
+	switch {
+	case cmd.input != nil:
+		login, err := io.ReadAll(io.LimitReader(cmd.input, maxImportInput+1))
+		if err != nil || len(login) > maxImportInput {
+			return errors.New("stdin: cannot read a login of at most 64 KiB")
+		}
+		body = bytes.NewReader(login)
+	case cmd.body != nil:
 		encoded, err := json.Marshal(cmd.body)
 		if err != nil {
 			return err

@@ -34,6 +34,10 @@ const (
 	syntheticClaudeToken = "sk-ant-oat01-synthetic-claude-token"
 )
 
+// testTokenURL is the token endpoint of the tests. It is never dialed: the account's
+// exit, the fake exit, answers every request sent through it.
+const testTokenURL = "http://127.0.0.1:9/oauth/token"
+
 // exchange is one request the fake exit received.
 type exchange struct {
 	path   string
@@ -61,6 +65,7 @@ func startExit(t *testing.T) *fakeExit {
 		e.seen = append(e.seen, exchange{path: r.URL.Path, header: r.Header.Clone(), body: string(body)})
 		answer := e.answer
 		e.mu.Unlock()
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
 		answer(w, r)
 	}))
 	t.Cleanup(e.server.Close)
@@ -143,6 +148,8 @@ type gateway struct {
 	exit     *fakeExit
 	store    *session.Store
 	accounts *claude.Accounts
+	entry    *claude.Entrypoint
+	dir      string           // the temporary directory with inventory/ and accounts/
 	server   *httptest.Server // the reverse proxy
 	forward  *httptest.Server // the forward proxy
 	token    string           // a session credential of this gateway
@@ -152,11 +159,23 @@ type gateway struct {
 // written to a temporary directory, on the pro plan, and issues one session.
 func newGateway(t *testing.T) *gateway {
 	t.Helper()
+	return newGatewayWith(t, authJSON())
+}
+
+// newGatewayWith starts newGateway's gateway with login as sample-a's auth.json, or
+// without an account directory when login is empty.
+func newGatewayWith(t *testing.T, login string) *gateway {
+	t.Helper()
 	dir := t.TempDir()
 	exit := startExit(t)
 	writeFile(t, filepath.Join(dir, "inventory", "sample-a.yaml"), inventoryYAML(exit.port(t), "installation_id: "+accountInstallation+"\n"), 0o700, 0o600)
-	writeFile(t, filepath.Join(dir, "accounts", "sample-a", authFile), authJSON(), 0o700, 0o600)
-	provider := New(filepath.Join(dir, "accounts"))
+	if err := os.Mkdir(filepath.Join(dir, "accounts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if login != "" {
+		writeFile(t, filepath.Join(dir, "accounts", "sample-a", authFile), login, 0o700, 0o600)
+	}
+	provider := New(filepath.Join(dir, "accounts"), testTokenURL)
 	set, err := claude.LoadAccounts(t.Context(), filepath.Join(dir, "inventory"), provider, resolve, 4)
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +211,7 @@ func newGateway(t *testing.T) *gateway {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &gateway{t: t, exit: exit, store: store, accounts: accounts, server: server, forward: forward, token: issued.Token}
+	return &gateway{t: t, exit: exit, store: store, accounts: accounts, entry: entrypoint, dir: dir, server: server, forward: forward, token: issued.Token}
 }
 
 // connect sends CONNECT target to the forward proxy at address with token as the proxy

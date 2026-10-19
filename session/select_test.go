@@ -391,3 +391,27 @@ func TestPauseNeverShortens(t *testing.T) {
 		t.Fatalf("after Resume: got %q %v, want sample-a", b.Alias, err)
 	}
 }
+
+// TestEndPause checks that EndPause ends a pause only for the reasons it names: an
+// upstream_401 pause ends and the account binds again, while an operator's pause, the
+// control arm, stays.
+func TestEndPause(t *testing.T) {
+	c := newClock()
+	store, _ := open(t, c)
+	ctx := context.Background()
+	far := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+	pause(t, store, "sample-a", far, "upstream_401")
+	pause(t, store, "sample-b", far, "maintenance")
+	for alias, want := range map[string]bool{"sample-a": true, "sample-b": false} {
+		ended, err := store.EndPause(ctx, alias, "upstream_401", "needs_reimport")
+		if err != nil || ended != want {
+			t.Fatalf("%s: ended %v %v, want %v", alias, ended, err, want)
+		}
+	}
+	if reason, err := store.PauseReason(ctx, "sample-b"); err != nil || reason != "maintenance" {
+		t.Fatalf("control arm: sample-b paused for %q %v", reason, err)
+	}
+	if _, b, err := newSession(t, store); err != nil || b.Alias != "sample-a" {
+		t.Fatalf("got %q %v, want sample-a", b.Alias, err)
+	}
+}
