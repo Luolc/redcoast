@@ -133,6 +133,7 @@ func TestForwardProxy(t *testing.T) {
 		{"not_connect", 200, false, "session", 405, "refused"},
 		{"no_credential", 200, true, "", 407, "auth_failed"},
 		{"unknown_credential", 200, true, "sk-ant-gws-" + strings.Repeat("C", 43), 407, "auth_failed"},
+		{"not_session_credential", 200, true, "sk-ant-oat01-" + strings.Repeat("C", 43), 407, "not_session"},
 		{"not_basic", 200, true, "bearer", 407, "auth_failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

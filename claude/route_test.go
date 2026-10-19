@@ -142,13 +142,20 @@ func TestSessionRouting(t *testing.T) {
 	if alias, _, _ := h.binding(session2); alias != "sample-b" {
 		t.Fatalf("session 2 bound to %s", alias)
 	}
-	// Refused credentials: none, malformed, never issued, revoked. No exit sees them.
+	// Refused credentials: none, not of the session shape, never issued, revoked. No
+	// exit sees them. Only the shape tells the second apart from the last two.
 	if err := h.store.Revoke(context.Background(), token2, "client"); err != nil {
 		t.Fatal(err)
 	}
-	for _, token := range []string{"", "not-a-session", "sk-ant-gws-" + strings.Repeat("B", 43), token2} {
-		if status, _ := post(t, h, server, token, `{"messages":[]}`, "", ""); status != 401 {
-			t.Fatalf("token %q: status=%d, want 401", token, status)
+	refused := []struct{ token, body, result string }{
+		{"", "session credential required\n", "auth_failed"},
+		{"sk-ant-oat01-" + strings.Repeat("B", 43), notSessionCredential + "\n", "not_session"},
+		{"sk-ant-gws-" + strings.Repeat("B", 43), "unknown session\n", "auth_failed"},
+		{token2, "unknown session\n", "auth_failed"},
+	}
+	for _, c := range refused {
+		if status, body := post(t, h, server, c.token, `{"messages":[]}`, "", ""); status != 401 || body != c.body {
+			t.Fatalf("token %q: status=%d body=%q, want 401 %q", c.token, status, body, c.body)
 		}
 	}
 	if len(exitA.seen()) != 2 || len(exitB.seen()) != 1 {
@@ -173,9 +180,9 @@ func TestSessionRouting(t *testing.T) {
 		}
 	}
 	// A local refusal has no upstream status: the column is NULL, read back as 0.
-	for _, row := range rows[3:] {
-		if row.result != "auth_failed" || row.status != 0 || row.sessionID != "" || row.alias != "" {
-			t.Fatalf("refused request recorded as %+v", row)
+	for i, row := range rows[3:] {
+		if row.result != refused[i].result || row.status != 0 || row.sessionID != "" || row.alias != "" {
+			t.Fatalf("refused request %d recorded as %+v, want result %s", i, row, refused[i].result)
 		}
 	}
 	// Control arm: pause B; session 2 is revoked, so issue a third session, which would

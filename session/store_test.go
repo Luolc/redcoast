@@ -185,8 +185,9 @@ func TestRevoke(t *testing.T) {
 		t.Fatal("binding history still has an open row after revoke")
 	}
 	for _, token := range []string{"", "sk-ant-gws-short", "Bearer " + issued.Token, TokenPrefix + "x\n" + issued.Token[12:]} {
-		if _, err := store.Bind(ctx, token, accounts); !errors.Is(err, ErrUnknownSession) {
-			t.Fatalf("got %v for malformed credential %q, want ErrUnknownSession", err, token)
+		// Callers that check only for ErrUnknownSession must refuse it too.
+		if _, err := store.Bind(ctx, token, accounts); !errors.Is(err, ErrNotSessionCredential) || !errors.Is(err, ErrUnknownSession) {
+			t.Fatalf("got %v for malformed credential %q, want ErrNotSessionCredential wrapping ErrUnknownSession", err, token)
 		}
 	}
 }

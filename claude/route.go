@@ -77,6 +77,12 @@ var (
 // claudeIDHeaders maps the two headers to their accepted shapes.
 var claudeIDHeaders = map[string]*regexp.Regexp{"X-Claude-Code-Session-Id": claudeSessionID, "X-Claude-Code-Agent-Id": claudeAgentID}
 
+// notSessionCredential answers a credential the gateway never issues, most often the
+// person's own Claude login sent by a claude that redcoast-client did not start. It
+// differs from "unknown session" so the two can be told apart; neither echoes the
+// credential.
+const notSessionCredential = "not a redcoast session credential; start claude through redcoast-client"
+
 // indefinitePause is the pause an operator or the egress check writes without an end.
 // A person clears it with Resume.
 var indefinitePause = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -194,6 +200,10 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	state.sessionID, row.SessionID = binding.SessionID, binding.SessionID
 	var exhausted *session.QuotaExhausted
 	switch {
+	case errors.Is(err, session.ErrNotSessionCredential):
+		row.Result = "not_session"
+		http.Error(down, notSessionCredential, http.StatusUnauthorized)
+		return
 	case errors.Is(err, session.ErrUnknownSession):
 		row.Result = "auth_failed"
 		http.Error(down, "unknown session", http.StatusUnauthorized)
