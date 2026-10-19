@@ -16,14 +16,14 @@ import (
 // writes after it.
 const RefreshTimeout = 30 * time.Second
 
-// refreshBody is the smallest request that the upstream answers with every
+// refreshBody is Claude's Probe body: the smallest request that the upstream answers with every
 // anthropic-ratelimit-unified-{5h,7d}-* header: one output token of the small model.
 // count_tokens is cheaper but its answer carries none of them, and the usage endpoint
 // refuses a setup token for lack of the user:profile scope.
 const refreshBody = `{"model":"claude-haiku-4-5-20251001","max_tokens":1,"system":"You are Claude Code, Anthropic's official CLI for Claude.","messages":[{"role":"user","content":"quota"}]}`
 
-// refreshHeaders are the headers of the refresh request besides the account's token,
-// those of Claude Code's own requests.
+// refreshHeaders are the headers of Claude's Probe besides the account's token, those
+// of Claude Code's own requests.
 var refreshHeaders = map[string]string{
 	"Anthropic-Version": "2023-06-01",
 	"Anthropic-Beta":    "claude-code-20250219," + oauthBeta,
@@ -34,6 +34,9 @@ var refreshHeaders = map[string]string{
 
 // errNoSuchAccount is returned by a refresh of an alias outside the current set.
 var errNoSuchAccount = errors.New("no such account in the current set")
+
+// errNoProbe is returned by a refresh for a provider without a Probe.
+var errNoProbe = errors.New("quota refresh not supported for this provider")
 
 // pausedError is returned by a refresh of an account paused for a reason other than
 // quota; nothing is sent.
@@ -56,13 +59,17 @@ func (e *Entrypoint) Refresh(ctx context.Context, alias string) (Refreshed, erro
 	return e.router.refresh(ctx, alias)
 }
 
-// refresh sends refreshBody upstream for account alias, regardless of its thresholds
+// refresh sends the provider's Probe upstream for account alias, regardless of its thresholds
 // and of a quota pause, and handles the answer as recordUpstream handles any response, under the
 // source refresh. A 2xx answer then ends the account's quota pause if the readings
 // allow it, so that the account can be chosen again before its reset. An account
 // paused for any other reason, such as a changed exit IP or an operator's pause, gets
 // nothing sent with its token: the refresh fails with pausedError.
 func (rt *router) refresh(ctx context.Context, alias string) (Refreshed, error) {
+	probe := rt.provider.Probe
+	if probe == nil {
+		return Refreshed{}, errNoProbe
+	}
 	a := rt.accounts.set.Load().lookup(alias)
 	if a == nil {
 		return Refreshed{}, errNoSuchAccount
@@ -76,14 +83,14 @@ func (rt *router) refresh(ctx context.Context, alias string) (Refreshed, error) 
 	case reason != "" && reason != session.QuotaPauseReason:
 		return Refreshed{}, pausedError{reason}
 	}
-	req, err := http.NewRequestWithContext(context.WithValue(ctx, accountKey{}, a), http.MethodPost, rt.upstream.JoinPath("v1", "messages").String(), strings.NewReader(refreshBody))
+	req, err := http.NewRequestWithContext(context.WithValue(ctx, accountKey{}, a), http.MethodPost, rt.upstream.JoinPath(probe.Path).String(), strings.NewReader(probe.Body))
 	if err != nil {
 		return Refreshed{}, err
 	}
-	for name, value := range refreshHeaders {
+	for name, value := range probe.Header {
 		req.Header.Set(name, value)
 	}
-	a.replaceClientAuthentication(req.Header)
+	a.credential.Authorize(req)
 	res, err := accountTransport{}.RoundTrip(req)
 	if err != nil {
 		// The error can name the exit; only the alias is logged.

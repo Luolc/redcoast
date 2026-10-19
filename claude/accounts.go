@@ -30,10 +30,10 @@ var accountAlias = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 // inject one that never reaches a vault.
 type Resolver = credential.Resolver
 
-// accountInput is one account with its credentials resolved: the real token and the
-// account's exit proxy with its credentials.
+// accountInput is one account with its credentials resolved: the account's own
+// credential and the account's exit proxy with its credentials.
 type accountInput struct {
-	Token         string
+	Credential    Credential
 	Email         string // shown on the dashboard only
 	ProxyURL      string
 	ProxyUsername string
@@ -41,12 +41,12 @@ type accountInput struct {
 	ExpectedIP    netip.Addr // the exit IP the inventory expects
 }
 
-// account is one inventory account with its own outbound side: the real token, the
-// exit proxy, a connection pool that only this account uses and a concurrency limit.
+// account is one inventory account with its own outbound side: the real credential,
+// the exit proxy, a connection pool that only this account uses and a concurrency limit.
 type account struct {
 	alias         string
 	email         string
-	token         string
+	credential    Credential
 	proxyUsername string
 	proxyPassword string
 	exit          *url.URL        // http://host:port of the account's proxy, without credentials
@@ -56,60 +56,48 @@ type account struct {
 }
 
 // AccountSet is the accounts the gateway can bind sessions to. A reload replaces the
-// whole set and builds the new one with the same concurrency.
+// whole set and builds the new one with the same provider and concurrency.
 type AccountSet struct {
 	byAlias     map[string]*account
+	provider    Provider        // reads the accounts' credentials from the inventory
 	concurrency int             // inference requests one account serves at once
 	directHosts map[string]bool // the inventory's direct-hosts.yaml, as targetKey keys
 }
 
-// LoadAccounts reads the inventory directory, resolves every served account's three
-// credential references with resolve and builds the account set, each account serving
-// at most concurrency inference requests at once, with the targets of direct-hosts.yaml.
-// Nothing is served
-// unless everything loaded: every failure is collected and reported by alias and field
-// name, and the resolved values are never part of an error. A reference shared by
-// several accounts is resolved once.
-func LoadAccounts(ctx context.Context, dir string, resolve Resolver, concurrency int) (*AccountSet, error) {
+// LoadAccounts reads the inventory directory, builds every served account's credential
+// with provider and resolves its proxy references with resolve, and builds the account
+// set, each account serving at most concurrency inference requests at once, with the
+// targets of direct-hosts.yaml. Nothing is served unless everything loaded: every
+// failure is collected and reported by alias and field name, and the resolved values
+// are never part of an error. A reference shared by several accounts is resolved once.
+func LoadAccounts(ctx context.Context, dir string, provider Provider, resolve Resolver, concurrency int) (*AccountSet, error) {
 	if concurrency < 1 {
 		return nil, errors.New("account concurrency must be at least 1")
 	}
-	inventory, directHosts, err := readInventory(dir)
+	inventory, directHosts, err := readInventory(dir, provider)
 	if err != nil {
 		return nil, err
 	}
-	set := &AccountSet{byAlias: make(map[string]*account, len(inventory)), concurrency: concurrency, directHosts: directHosts}
+	set := &AccountSet{byAlias: make(map[string]*account, len(inventory)), provider: provider, concurrency: concurrency, directHosts: directHosts}
 	resolved := make(map[string]string)
+	once := func(ctx context.Context, reference string) (string, error) {
+		if value, known := resolved[reference]; known {
+			return value, nil
+		}
+		value, err := resolve(ctx, reference)
+		if err == nil {
+			resolved[reference] = value
+		}
+		return value, err
+	}
 	var errs []error
 	for _, entry := range inventory {
-		var in accountInput
-		complete := true
-		for _, ref := range []struct {
-			field, reference string
-			value            *string
-		}{{"oauth_token", entry.tokenRef, &in.Token}, {"proxy.username_ref", entry.usernameRef, &in.ProxyUsername}, {"proxy.password_ref", entry.passwordRef, &in.ProxyPassword}} {
-			if ctx.Err() != nil {
-				return nil, errors.Join(append(errs, ctx.Err())...)
-			}
-			value, known := resolved[ref.reference]
-			if !known {
-				value, err = resolve(ctx, ref.reference)
-				if err != nil {
-					errs = append(errs, fieldError{entry.alias, ref.field, "cannot resolve: " + err.Error()})
-					complete = false
-					continue
-				}
-				resolved[ref.reference] = value
-			}
-			*ref.value = value
+		if ctx.Err() != nil {
+			return nil, errors.Join(append(errs, ctx.Err())...)
 		}
-		if !complete {
-			continue
-		}
-		in.Email, in.ProxyURL, in.ExpectedIP = entry.email, entry.exit, entry.expectedIP
-		a, err := newAccount(entry.alias, in, concurrency)
+		a, err := loadAccount(ctx, entry, once, concurrency)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %v", entry.alias, err))
+			errs = append(errs, err)
 			continue
 		}
 		set.byAlias[entry.alias] = a
@@ -120,29 +108,58 @@ func LoadAccounts(ctx context.Context, dir string, resolve Resolver, concurrency
 	return set, nil
 }
 
+// loadAccount builds one served account's credential, resolves its proxy references
+// with resolve and builds the account. Every failure is in the returned error.
+func loadAccount(ctx context.Context, entry inventoryAccount, resolve Resolver, concurrency int) (*account, error) {
+	in := accountInput{Email: entry.email, ProxyURL: entry.exit, ExpectedIP: entry.expectedIP}
+	var errs []error
+	source, err := entry.credential(ctx, resolve)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	in.Credential = source
+	for _, ref := range []struct {
+		field, reference string
+		value            *string
+	}{{"proxy.username_ref", entry.usernameRef, &in.ProxyUsername}, {"proxy.password_ref", entry.passwordRef, &in.ProxyPassword}} {
+		if ctx.Err() != nil {
+			return nil, errors.Join(append(errs, ctx.Err())...)
+		}
+		value, err := resolve(ctx, ref.reference)
+		if err != nil {
+			errs = append(errs, fieldError{entry.alias, ref.field, "cannot resolve: " + err.Error()})
+			continue
+		}
+		*ref.value = value
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	a, err := newAccount(entry.alias, in, concurrency)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %v", entry.alias, err)
+	}
+	return a, nil
+}
+
 // newAccount validates one account and builds its outbound side. Errors name the field,
 // never the value.
 func newAccount(alias string, in accountInput, concurrency int) (*account, error) {
 	if !accountAlias.MatchString(alias) {
 		return nil, errors.New("alias: not an account alias")
 	}
-	// The values end up in HTTP headers and the proxy URL, where a line break would
+	// The values end up in the proxy URL and its header, where a line break would
 	// inject a header.
-	for _, value := range []struct{ field, value string }{{"oauth_token", in.Token}, {"proxy.username_ref", in.ProxyUsername}, {"proxy.password_ref", in.ProxyPassword}} {
+	for _, value := range []struct{ field, value string }{{"proxy.username_ref", in.ProxyUsername}, {"proxy.password_ref", in.ProxyPassword}} {
 		if value.value == "" || strings.ContainsAny(value.value, "\r\n\x00") {
 			return nil, errors.New(value.field + ": empty value or line break")
-		}
-	}
-	for _, ch := range in.Token {
-		if ch < 0x21 || ch > 0x7e {
-			return nil, errors.New("oauth_token: not a header value")
 		}
 	}
 	exit, err := parseProxy(in.ProxyURL)
 	if err != nil {
 		return nil, errors.New("proxy: " + err.Error())
 	}
-	a := &account{alias: alias, email: in.Email, token: in.Token, proxyUsername: in.ProxyUsername, proxyPassword: in.ProxyPassword, exit: exit, expectedIP: in.ExpectedIP}
+	a := &account{alias: alias, email: in.Email, credential: in.Credential, proxyUsername: in.ProxyUsername, proxyPassword: in.ProxyPassword, exit: exit, expectedIP: in.ExpectedIP}
 	a.transport = newTransport(concurrency)
 	authenticated := *exit
 	authenticated.User = url.UserPassword(in.ProxyUsername, in.ProxyPassword)
@@ -192,15 +209,6 @@ func (a *account) exitAuthorization() string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(a.proxyUsername+":"+a.proxyPassword))
 }
 
-// replaceClientAuthentication removes every credential the client sent and sets the
-// account's real token, so nothing from the client authenticates upstream.
-func (a *account) replaceClientAuthentication(header http.Header) {
-	header.Del("X-Api-Key")
-	header.Del("Cookie")
-	header.Del("Proxy-Authorization")
-	header.Set("Authorization", "Bearer "+a.token)
-}
-
 // knownCredential replaces the gateway's own credentials in a saved record. It differs
 // from redacted so a reader can tell that a classifier let one of them through.
 const knownCredential = "[KNOWN_CREDENTIAL]"
@@ -241,11 +249,16 @@ func knownValueReplacerFor(accounts []*account) *strings.Replacer {
 		}
 	}
 	for _, a := range accounts {
-		tokenMark, partial := partialToken(a.token)
+		// Only a provider with Capture keeps records, and its accounts hold Claude's tokens.
+		c, ok := a.credential.(claudeCredential)
+		if !ok {
+			continue
+		}
+		tokenMark, partial := partialToken(c.token)
 		if !partial {
 			tokenMark = knownCredential
 		}
-		addValue(a.token, tokenMark)
+		addValue(c.token, tokenMark)
 	}
 	// The proxy accounts come after the tokens so that a form both share is fully hidden.
 	for _, a := range accounts {

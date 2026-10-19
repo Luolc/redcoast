@@ -32,7 +32,7 @@ func newHarness(t *testing.T, aliases ...string) *harness {
 	t.Helper()
 	h := &harness{t: t, path: filepath.Join(t.TempDir(), "gateway.sqlite"), clock: time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)}
 	h.open()
-	h.accounts = NewAccounts(&AccountSet{byAlias: map[string]*account{}}, h.store)
+	h.accounts = NewAccounts(&AccountSet{byAlias: map[string]*account{}, provider: Claude}, h.store)
 	for _, alias := range aliases {
 		h.add(alias, "sk-ant-oat01-synthetic-"+alias+"-token")
 	}
@@ -62,7 +62,7 @@ func (h *harness) add(alias, token string) *account {
 	if err := h.store.SetPlanSchedule(context.Background(), session.PlanPeriod{Alias: alias, Plan: "pro", From: time.UnixMilli(0), Source: "manual"}); err != nil {
 		h.t.Fatal(err)
 	}
-	a := &account{alias: alias, token: token, proxyUsername: "synthetic-user-" + alias, proxyPassword: "Synthetic-Password-" + alias, exit: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}, transport: newTransport(DefaultAccountConcurrency), slots: make(chan struct{}, DefaultAccountConcurrency)}
+	a := &account{alias: alias, credential: claudeCredential{token: token}, proxyUsername: "synthetic-user-" + alias, proxyPassword: "Synthetic-Password-" + alias, exit: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}, transport: newTransport(DefaultAccountConcurrency), slots: make(chan struct{}, DefaultAccountConcurrency)}
 	h.t.Cleanup(a.transport.CloseIdleConnections)
 	h.accounts.set.Load().byAlias[alias] = a
 	return a
@@ -103,7 +103,7 @@ func (h *harness) gateway(upstream string) *httptest.Server {
 // router returns a router on the harness clock, the clock the store runs on, so that
 // Retry-After and pauses are measured where the readings are dated.
 func (h *harness) router(target *url.URL, transport http.RoundTripper) *router {
-	rt := newRouter(h.store, h.accounts, target, transport)
+	rt := newRouter(h.store, h.accounts, target, Claude, transport)
 	rt.now = func() time.Time { return h.clock }
 	return rt
 }
@@ -254,4 +254,14 @@ func newRecordStore(dir string, known *strings.Replacer) *RecordStore {
 		s.known.Store(known)
 	}
 	return s
+}
+
+// tokenOf returns the OAuth token of a Claude account.
+func tokenOf(a *account) string {
+	return claudeOf(a).token
+}
+
+// claudeOf returns the credential of a Claude account.
+func claudeOf(a *account) claudeCredential {
+	return a.credential.(claudeCredential)
 }

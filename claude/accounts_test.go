@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -58,8 +59,11 @@ func TestLoadAccounts(t *testing.T) {
 		"op://example-proxies/proxy-account/password":        "synthetic-value-proxy-password",
 		"op://example-vault/token-shared/section/credential": "sk-ant-oat01-synthetic-value-section",
 	}
-	a := inventoryYAML("sample-a", "active", "gateway", "op://example-vault/token-sample-a/credential", "8001")
+	// sample-a has both client identity fields, sample-b neither.
+	a := inventoryYAML("sample-a", "active", "gateway", "op://example-vault/token-sample-a/credential", "8001") + "device_id: " + syntheticDeviceID + "\naccount_uuid: " + syntheticAccountUUID + "\n"
 	b := inventoryYAML("sample-b", "active", "gateway", "op://example-vault/token-sample-b/credential", "8002")
+	// Malformed identity values; an error must not carry them.
+	badDeviceID, badAccountUUID := strings.ToUpper(syntheticDeviceID), "synthetic-not-a-uuid"
 	for _, test := range []struct {
 		name  string
 		files map[string]string
@@ -89,6 +93,8 @@ func TestLoadAccounts(t *testing.T) {
 		{"host_with_credentials", map[string]string{"sample-a.yaml": a, "sample-b.yaml": strings.Replace(b, "host: proxy.example.test", "host: u:p@proxy.example.test", 1)}, nil, []string{"sample-b: proxy.host"}},
 		// Every failure is reported, not only the first one.
 		{"unresolvable_references", map[string]string{"sample-a.yaml": strings.Replace(a, "op://example-vault/token-sample-a/credential", "op://example-vault/token-missing/credential", 1), "sample-b.yaml": strings.Replace(b, "op://example-proxies/proxy-account/password", "op://example-proxies/proxy-account/missing", 1)}, nil, []string{"sample-a: oauth_token: cannot resolve", "sample-b: proxy.password_ref: cannot resolve"}},
+		{"empty_identity", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b + "device_id: \"\"\naccount_uuid: \"\"\n"}, []string{"sample-a", "sample-b"}, nil},
+		{"identity_malformed", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b + "device_id: " + badDeviceID + "\naccount_uuid: " + badAccountUUID + "\n"}, nil, []string{"sample-b: device_id", "sample-b: account_uuid"}},
 		{"value_with_line_break", map[string]string{"sample-a.yaml": a, "sample-b.yaml": strings.Replace(b, "op://example-vault/token-sample-b/credential", "op://example-vault/token-newline/credential", 1)}, nil, []string{"sample-b: oauth_token"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -101,7 +107,7 @@ func TestLoadAccounts(t *testing.T) {
 				}
 				return value, nil
 			}
-			accounts, err := LoadAccounts(t.Context(), writeInventory(t, test.files), resolve, DefaultAccountConcurrency)
+			accounts, err := LoadAccounts(t.Context(), writeInventory(t, test.files), Claude, resolve, DefaultAccountConcurrency)
 			if test.aliases == nil {
 				if err == nil {
 					t.Fatal("invalid inventory accepted")
@@ -111,7 +117,7 @@ func TestLoadAccounts(t *testing.T) {
 						t.Fatalf("error %q does not name %q", err, mention)
 					}
 				}
-				for _, value := range values {
+				for _, value := range slices.Concat(slices.Collect(maps.Values(values)), []string{badDeviceID, badAccountUUID}) {
 					if strings.Contains(err.Error(), value) {
 						t.Fatalf("error %q carries a resolved value", err)
 					}
@@ -134,6 +140,12 @@ func TestLoadAccounts(t *testing.T) {
 				if a.exit.User != nil {
 					t.Fatal("exit URL carries credentials")
 				}
+			}
+			if got := accounts.lookup("sample-a"); claudeOf(got).deviceID != syntheticDeviceID || claudeOf(got).accountUUID != syntheticAccountUUID {
+				t.Fatalf("sample-a: identity %q %q", claudeOf(got).deviceID, claudeOf(got).accountUUID)
+			}
+			if got := accounts.lookup("sample-b"); claudeOf(got).deviceID != "" || claudeOf(got).accountUUID != "" {
+				t.Fatalf("sample-b: identity %q %q, want empty", claudeOf(got).deviceID, claudeOf(got).accountUUID)
 			}
 			if accounts.lookup("sample-a").transport == accounts.lookup("sample-b").transport {
 				t.Fatal("accounts share a transport")
@@ -159,7 +171,7 @@ func TestLoadAccountsCancellation(t *testing.T) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
-	if accounts, err := LoadAccounts(ctx, dir, resolve, DefaultAccountConcurrency); accounts != nil || err == nil || calls != 1 {
+	if accounts, err := LoadAccounts(ctx, dir, Claude, resolve, DefaultAccountConcurrency); accounts != nil || err == nil || calls != 1 {
 		t.Fatalf("got %v %v after %d calls, want a failure after the first stalled call", accounts, err, calls)
 	}
 }
@@ -170,7 +182,7 @@ func TestLoadAccountsCancellation(t *testing.T) {
 func TestAccountTokenInjection(t *testing.T) {
 	const requestBody = `{"messages":[{"role":"user","content":"Hi"}]}`
 	h := newHarness(t, "sample-a")
-	token := h.accounts.lookup("sample-a").token
+	token := tokenOf(h.accounts.lookup("sample-a"))
 	received := make(chan bool, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -290,7 +302,7 @@ func TestPartialTokenSavedCapture(t *testing.T) {
 			if err := os.Chmod(dir, 0700); err != nil {
 				t.Fatal(err)
 			}
-			entrypoint, err := NewHandler(target, dir, h.store, h.accounts, DefaultLimits)
+			entrypoint, err := NewHandler(target, Claude, dir, h.store, h.accounts, DefaultLimits)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -377,17 +389,17 @@ func TestKnownCredentialsSavedCapture(t *testing.T) {
 	a.proxyPassword = "Synthetic password" + strings.ToLower(rand.Text())
 	h.token, h.sessionID = h.issue()
 	escaped := url.PathEscape(a.proxyPassword)
-	requestBody := `{"model":"` + a.token + `","messages":[{"role":"user","content":"Hi"}]}`
+	requestBody := `{"model":"` + tokenOf(a) + `","messages":[{"role":"user","content":"Hi"}]}`
 	var decoded any
 	if err := json.Unmarshal([]byte(requestBody), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(fmtSafeJSON(safeValue("", decoded)), a.token) || len(safeHeaders(http.Header{escaped: {"x"}})[escaped]) != 1 {
+	if !strings.Contains(fmtSafeJSON(safeValue("", decoded)), tokenOf(a)) || len(safeHeaders(http.Header{escaped: {"x"}})[escaped]) != 1 {
 		t.Fatal("classifiers no longer keep the positions this test relies on")
 	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if _, err := io.WriteString(w, `{"model":"`+a.token+`","content":[{"type":"text","text":"Hi"}]}`); err != nil {
+		if _, err := io.WriteString(w, `{"model":"`+tokenOf(a)+`","content":[{"type":"text","text":"Hi"}]}`); err != nil {
 			return
 		}
 	}))
@@ -400,7 +412,7 @@ func TestKnownCredentialsSavedCapture(t *testing.T) {
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	entrypoint, err := NewHandler(target, dir, h.store, h.accounts, DefaultLimits)
+	entrypoint, err := NewHandler(target, Claude, dir, h.store, h.accounts, DefaultLimits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +449,7 @@ func TestKnownCredentialsSavedCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(artifact), a.token) || strings.Contains(string(artifact), escaped) ||
+	if strings.Contains(string(artifact), tokenOf(a)) || strings.Contains(string(artifact), escaped) ||
 		!strings.Contains(string(artifact), knownCredential) {
 		t.Fatal("saved record kept a known credential")
 	}
@@ -447,9 +459,9 @@ func TestKnownCredentialsSavedCapture(t *testing.T) {
 // record, for each of two accounts. Each arm first saves without the replacer to show
 // that the record carries the form, then saves with it.
 func TestKnownCredentialForms(t *testing.T) {
-	set := &AccountSet{byAlias: map[string]*account{}}
+	set := &AccountSet{byAlias: map[string]*account{}, provider: Claude}
 	for _, alias := range []string{"sample-a", "sample-b"} {
-		set.byAlias[alias] = &account{alias: alias, token: "sk-ant-oat01-synthetic-" + rand.Text(), proxyUsername: "customer-synthetic_" + rand.Text(), proxyPassword: "p@ss word<&" + rand.Text()}
+		set.byAlias[alias] = &account{alias: alias, credential: claudeCredential{token: "sk-ant-oat01-synthetic-" + rand.Text()}, proxyUsername: "customer-synthetic_" + rand.Text(), proxyPassword: "p@ss word<&" + rand.Text()}
 	}
 	for _, a := range set.byAlias {
 		// secret is the part of form that must not reach the file.

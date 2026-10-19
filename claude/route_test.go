@@ -129,7 +129,7 @@ func TestSessionRouting(t *testing.T) {
 		// The row is written after the response; wait for it so the rows keep request order.
 		h.trafficRows(i + 1)
 	}
-	tokenA, tokenB := "Bearer "+h.accounts.lookup("sample-a").token, "Bearer "+h.accounts.lookup("sample-b").token
+	tokenA, tokenB := "Bearer "+tokenOf(h.accounts.lookup("sample-a")), "Bearer "+tokenOf(h.accounts.lookup("sample-b"))
 	if seen := exitA.seen(); len(seen) != 2 || seen[0] != tokenA || seen[1] != tokenA {
 		t.Fatalf("exit A saw %q", seen)
 	}
@@ -294,7 +294,7 @@ func TestInFlightStreamStaysOnAccount(t *testing.T) {
 	if err != nil || string(rest) != "data: last\n\n" {
 		t.Fatalf("stream after the pause: rest=%q err=%v", rest, err)
 	}
-	tokenA, tokenB := "Bearer "+h.accounts.lookup("sample-a").token, "Bearer "+h.accounts.lookup("sample-b").token
+	tokenA, tokenB := "Bearer "+tokenOf(h.accounts.lookup("sample-a")), "Bearer "+tokenOf(h.accounts.lookup("sample-b"))
 	mu.Lock()
 	defer mu.Unlock()
 	if len(tokens) != 2 || tokens[0] != tokenA || tokens[1] != tokenB {
@@ -408,7 +408,7 @@ func TestClaudeIDHeadersCannotCarryCredentials(t *testing.T) {
 	h := newHarness(t, "sample-a")
 	server := h.gateway(upstream.URL)
 	const uuid, agent = "abcdef01-2345-4678-89ab-cdef01234567", "a0a0a0a0a0a0a0a0a"
-	accountToken := h.accounts.lookup("sample-a").token
+	accountToken := tokenOf(h.accounts.lookup("sample-a"))
 	for i, request := range []struct{ session, agent string }{{uuid, agent}, {h.token, h.token}, {accountToken, uuid + " "}} {
 		if status, _ := post(t, h, server, h.token, "", request.session, request.agent); status != 204 {
 			t.Fatalf("status=%d", status)

@@ -48,7 +48,7 @@ func TestReadDirectHosts(t *testing.T) {
 			if test.list != "" {
 				files[directHostsFile] = test.list
 			}
-			set, err := LoadAccounts(t.Context(), writeInventory(t, files), (&reloadHarness{}).resolve, DefaultAccountConcurrency)
+			set, err := LoadAccounts(t.Context(), writeInventory(t, files), Claude, (&reloadHarness{}).resolve, DefaultAccountConcurrency)
 			if test.refused {
 				if err == nil || !strings.Contains(err.Error(), directHostsFile) {
 					t.Fatalf("list accepted or error does not name the file: %v", err)
@@ -327,5 +327,59 @@ func TestReloadDirectHosts(t *testing.T) {
 	}
 	if r, err := h.reload(nil); err != nil || r.Direct != nil || h.accounts.set.Load().direct("github.com:443") {
 		t.Fatalf("reload without the list: %+v %v", r, err)
+	}
+}
+
+// TestForwardProxyDenyList checks that a CONNECT to a host on the deny list, in any
+// case and with a trailing dot, is refused with 403 on both routes, before
+// authentication and without any connection: chatgpt.com is also listed as direct.
+// Control arm: a subdomain of a denied host goes through the exit, and a listed host
+// not denied goes direct.
+func TestForwardProxyDenyList(t *testing.T) {
+	exit := startFakeExit(t, 200)
+	h, forward, dialed := directHarness(t, exit, map[string][]netip.Addr{
+		"github.com":  {netip.MustParseAddr("192.0.2.10")},
+		"chatgpt.com": {netip.MustParseAddr("192.0.2.10")},
+	})
+	h.accounts.set.Load().directHosts["chatgpt.com:443"] = true
+	var records []connectRecord
+	forward.sink = func(record connectRecord) error {
+		records = append(records, record)
+		return nil
+	}
+	server := httptest.NewServer(forward)
+	defer server.Close()
+	for _, test := range []struct{ target, route, authorization string }{
+		{"chatgpt.com:443", "direct", proxyAuthorization(h.token)},
+		{"ChatGPT.com.:443", "direct", proxyAuthorization(h.token)},
+		{"auth.openai.com:443", "account", proxyAuthorization(h.token)},
+		{"o33249.ingest.us.sentry.io:443", "account", proxyAuthorization(h.token)},
+		{"AUTH.OpenAI.com:8443", "account", ""},
+	} {
+		*dialed, records = nil, nil
+		if _, _, response := connect(t, server.Listener.Addr().String(), test.target, test.authorization); response.StatusCode != 403 {
+			t.Fatalf("%s: status %d, want 403", test.target, response.StatusCode)
+		}
+		if err := forward.wait(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if len(*dialed) != 0 || len(records) != 1 || records[0].Result != "refused" || records[0].Route != test.route {
+			t.Fatalf("%s: dialed %q, records %+v", test.target, *dialed, records)
+		}
+	}
+	exit.mu.Lock()
+	heads := len(exit.heads)
+	exit.mu.Unlock()
+	if heads != 0 {
+		t.Fatalf("exit received %d CONNECTs, want 0", heads)
+	}
+	for _, test := range []struct{ target, dialed, route string }{
+		{"ab.chatgpt.com:443", exit.listener.Addr().String(), "account"},
+		{"github.com:443", "192.0.2.10:443", "direct"},
+	} {
+		got := directConnect(t, h, forward, exit, dialed, test.target, 200, true)
+		if len(got.dialed) != 1 || got.dialed[0] != test.dialed || got.route != test.route || got.result != "ok" {
+			t.Fatalf("control arm %s: %+v", test.target, got)
+		}
 	}
 }

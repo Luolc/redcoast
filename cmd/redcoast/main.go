@@ -98,7 +98,7 @@ func main() {
 	}
 	admin := claude.NewAdmin(accounts, store, reloader(cfg, accounts, resolve, egress))
 	admin.Handoff = upg.Upgrade
-	entrypoint, err := claude.NewHandler(cfg.upstream, cfg.captureDir, store, accounts, cfg.limits)
+	entrypoint, err := claude.NewHandler(cfg.upstream, claude.Claude, cfg.captureDir, store, accounts, cfg.limits)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -319,5 +319,5 @@ func newResolver(ctx context.Context, cfg config) (claude.Resolver, error) {
 func loadAccounts(ctx context.Context, cfg config, resolve claude.Resolver) (*claude.AccountSet, error) {
 	loadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
 	defer cancel()
-	return claude.LoadAccounts(loadCtx, cfg.inventory, resolve, cfg.accountConcurrency)
+	return claude.LoadAccounts(loadCtx, cfg.inventory, claude.Claude, resolve, cfg.accountConcurrency)
 }

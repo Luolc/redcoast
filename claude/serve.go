@@ -49,16 +49,20 @@ func (e *Entrypoint) Finish(ctx context.Context) error {
 	return nil
 }
 
-// NewHandler builds the two entrypoints in front of upstream, bounded by limits. With a capture directory
-// every request's record is saved there; the directory must already exist with mode
-// 0700 so records are private to this user, and the accounts' credentials, those of
-// every set a reload brings in included, are removed from every record.
-func NewHandler(upstream *url.URL, captureDir string, store *session.Store, accounts *Accounts, limits Limits) (*Entrypoint, error) {
+// NewHandler builds the two entrypoints of provider in front of upstream, bounded by
+// limits. With a capture directory, which only a provider with Capture allows, every
+// request's record is saved there; the directory must already exist with mode 0700 so
+// records are private to this user, and the accounts' credentials, those of every set a
+// reload brings in included, are removed from every record.
+func NewHandler(upstream *url.URL, provider Provider, captureDir string, store *session.Store, accounts *Accounts, limits Limits) (*Entrypoint, error) {
 	if captureDir == "" {
-		router, forward := newRouter(store, accounts, upstream, accountTransport{}), newForwardProxy(store, accounts, nil)
-		router.limits = limits
+		router, forward := newRouter(store, accounts, upstream, provider, accountTransport{}), newForwardProxy(store, accounts, nil)
+		router.limits, forward.outsider = limits, provider.NotSession
 		forward.setLimits(limits)
 		return &Entrypoint{Reverse: router, Forward: forward, forward: forward, router: router}, nil
+	}
+	if !provider.Capture {
+		return nil, errors.New("capture is not supported for this provider")
 	}
 	info, err := os.Stat(captureDir)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
@@ -66,9 +70,9 @@ func NewHandler(upstream *url.URL, captureDir string, store *session.Store, acco
 	}
 	records := &RecordStore{dir: captureDir}
 	accounts.onSwap(records.learn)
-	router := newRouter(store, accounts, upstream, captureTransport{accountTransport{}})
+	router := newRouter(store, accounts, upstream, provider, captureTransport{accountTransport{}})
 	forward := newForwardProxy(store, accounts, records.writeConnect)
-	router.limits = limits
+	router.limits, forward.outsider = limits, provider.NotSession
 	forward.setLimits(limits)
 	return &Entrypoint{Reverse: newCapturedProxy(router, records.write), Forward: forward, forward: forward, router: router, records: records}, nil
 }

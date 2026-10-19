@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Luolc/redcoast/internal/denylist"
 	"github.com/Luolc/redcoast/session"
 )
 
@@ -27,9 +28,9 @@ import (
 var connectTarget = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}:[0-9]{1,5}$`)
 
 // connectRecord is the saved capture record of one forward-proxy request. Result is
-// one of ok, refused (not a CONNECT, an invalid target, or an account-route target
-// accountTarget rules out), auth_failed, not_session (the credential does not have
-// the shape of a session credential), wrong_source, no_account,
+// one of ok, refused (not a CONNECT, an invalid target, a host the deny list names,
+// or an account-route target accountTarget rules out), auth_failed, not_session (the
+// credential does not have the shape of a session credential), wrong_source, no_account,
 // quota_exhausted, store_failed, limited, egress_failed (the exit could not be reached, answered
 // nothing valid, or refused the tunnel; ExitStatus tells which; on the direct route,
 // the target could not be reached), idle_timeout or
@@ -53,12 +54,13 @@ type connectRecord struct {
 // in Proxy-Authorization, has the session store evaluate the binding and tunnels every
 // CONNECT through the bound account's exit with that account's proxy credentials,
 // except a target listed in the inventory's direct-hosts.yaml, which it connects to
-// from the gateway's own address. Neither route reaches a non-public address. A failed
-// connection on either route is not retried on the other. A tunnel stays on the
-// account it was opened with. Other methods are refused.
+// from the gateway's own address. Neither route reaches a non-public address or a host
+// the deny list names. A failed connection on either route is not retried on the
+// other. A tunnel stays on the account it was opened with. Other methods are refused.
 type forwardProxy struct {
 	store    *session.Store
 	accounts *Accounts
+	outsider string // the answer to a credential that is not a session credential
 	dial     func(ctx context.Context, network, address string) (net.Conn, error)
 	resolve  func(ctx context.Context, network, host string) ([]netip.Addr, error) // a direct target's addresses
 	sink     func(connectRecord) error                                             // nil records nothing beyond the traffic table
@@ -76,6 +78,7 @@ func newForwardProxy(store *session.Store, accounts *Accounts, sink func(connect
 	return &forwardProxy{
 		store:    store,
 		accounts: accounts,
+		outsider: notSessionCredential,
 		dial:     (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		resolve:  net.DefaultResolver.LookupNetIP,
 		sink:     sink,
@@ -121,7 +124,9 @@ func (f *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		row.Route = "direct"
 	}
 	record.Route = row.Route
-	if row.Route == "account" && !accountTarget(r.Host) {
+	// The deny list is checked before authentication: no credential opens a tunnel to
+	// a denied host, so the request needs no binding and takes no tunnel slot.
+	if denylist.Denied(row.Host) || row.Route == "account" && !accountTarget(r.Host) {
 		record.Result = "refused"
 		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
 		return
@@ -135,7 +140,7 @@ func (f *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "session credential required", http.StatusProxyAuthRequired)
 		case "not_session":
 			w.Header().Set("Proxy-Authenticate", `Basic realm="gateway session"`)
-			http.Error(w, notSessionCredential, http.StatusProxyAuthRequired)
+			http.Error(w, f.outsider, http.StatusProxyAuthRequired)
 		case "wrong_source":
 			w.Header().Set("Proxy-Authenticate", `Basic realm="gateway session"`)
 			http.Error(w, "session used from another address", http.StatusProxyAuthRequired)
