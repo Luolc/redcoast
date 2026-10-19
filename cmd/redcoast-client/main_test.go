@@ -160,13 +160,60 @@ func TestPreflight(t *testing.T) {
 				t.Fatal(err)
 			}
 			environ, args := test.setup(t, home, cwd)
-			problems := preflight(environ, cwd, home, args)
+			overrides, conflicts := preflight(environ, cwd, home, args)
+			problems := append(overrides, conflicts...)
 			want := strings.NewReplacer("HOME", home, "CWD", cwd, "ROOT", root).Replace(test.want)
 			switch {
 			case want == "" && len(problems) != 0:
 				t.Fatalf("clean configuration refused: %v", problems)
 			case want != "" && (len(problems) != 1 || !strings.Contains(problems[0], want)):
 				t.Fatalf("problems %v, want exactly one containing %q", problems, want)
+			}
+		})
+	}
+}
+
+// TestPreflightToggles checks that a toggle in a settings env map passes at the
+// launcher's value and is otherwise a conflict naming the variable, both values and the
+// file, and that a gateway variable at the launcher's value is still an override whose
+// value is not shown.
+func TestPreflightToggles(t *testing.T) {
+	tests := []struct {
+		name     string
+		settings string // user settings
+		args     []string
+		override string // substring of exactly one override; empty for none
+		conflict string // substring of exactly one conflict; empty for none
+	}{
+		{"launcher_values", `{"env": {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1"}}`, nil, "", ""},
+		{"other_value", `{"env": {"DISABLE_AUTOUPDATER": "0"}}`, nil, "", `env.DISABLE_AUTOUPDATER is "0" in user settings HOME/.claude/settings.json; the launcher sets "1"`},
+		{"number", "", []string{`--settings={"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}`}, "", `env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is 1 in --settings; the launcher sets "1"`},
+		{"control_characters_cut", `{"env": {"DISABLE_AUTOUPDATER": "\u001b[2J` + strings.Repeat("x", 40) + `"}}`, nil, "", `env.DISABLE_AUTOUPDATER is "\x1b[2J` + strings.Repeat("x", 28) + `"... in user settings`},
+		{"gateway_variable_at_launcher_value", `{"env": {"NO_PROXY": "127.0.0.1"}}`, nil, "env.NO_PROXY in user settings HOME/.claude/settings.json", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeFile(t, filepath.Join(home, ".claude.json"), `{"hasCompletedOnboarding": true}`)
+			if test.settings != "" {
+				writeFile(t, filepath.Join(home, ".claude", "settings.json"), test.settings)
+			}
+			overrides, conflicts := preflight([]string{"HOME=" + home}, t.TempDir(), home, test.args)
+			for _, group := range []struct {
+				name     string
+				problems []string
+				want     string
+			}{{"overrides", overrides, test.override}, {"conflicts", conflicts, test.conflict}} {
+				want := strings.ReplaceAll(group.want, "HOME", home)
+				switch {
+				case want == "" && len(group.problems) != 0:
+					t.Errorf("%s %q, want none", group.name, group.problems)
+				case want != "" && (len(group.problems) != 1 || !strings.Contains(group.problems[0], want)):
+					t.Errorf("%s %q, want exactly one containing %q", group.name, group.problems, want)
+				}
+			}
+			if strings.Contains(strings.Join(overrides, "\n"), "127.0.0.1") {
+				t.Errorf("overrides %q show a gateway variable's value", overrides)
 			}
 		})
 	}
@@ -438,6 +485,20 @@ func TestExits(t *testing.T) {
 		}
 		if msg := stderrOf(t, l); !strings.Contains(msg, "ANTHROPIC_API_KEY in the environment") || strings.Contains(msg, "synthetic") {
 			t.Fatalf("stderr %q: must name the variable and not its value", msg)
+		}
+	})
+	t.Run("toggle_conflict_does_not_start_claude", func(t *testing.T) {
+		_, l, _, out := launch(t, true, "exit0")
+		l.args = append(l.args, `--settings={"env":{"DISABLE_AUTOUPDATER":"0"}}`)
+		if status := l.run(context.Background()); status != exitLauncherFailure {
+			t.Fatalf("exit status %d, want %d", status, exitLauncherFailure)
+		}
+		if _, err := os.Stat(out + ".env"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("claude was started despite the conflicting toggle")
+		}
+		msg := stderrOf(t, l)
+		if !strings.Contains(msg, "settings set a launcher toggle to another value:\n  - env.DISABLE_AUTOUPDATER is \"0\"") || strings.Contains(msg, "overridden") {
+			t.Fatalf("stderr %q: must report a toggle conflict, not an override", msg)
 		}
 	})
 }

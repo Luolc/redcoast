@@ -117,10 +117,18 @@ func (l *launcher) run(ctx context.Context) int {
 		l.report("redcoast-client: %v\n", err)
 		return exitLauncherFailure
 	}
-	if problems := preflight(l.environ, l.cwd, l.home, l.args); len(problems) != 0 {
-		l.report("redcoast-client: refusing to start claude; the session credential would be overridden by:\n")
-		for _, problem := range problems {
-			l.report("  - %s\n", problem)
+	if overrides, conflicts := preflight(l.environ, l.cwd, l.home, l.args); len(overrides)+len(conflicts) != 0 {
+		if len(overrides) != 0 {
+			l.report("redcoast-client: refusing to start claude; the session credential would be overridden by:\n")
+			for _, problem := range overrides {
+				l.report("  - %s\n", problem)
+			}
+		}
+		if len(conflicts) != 0 {
+			l.report("redcoast-client: refusing to start claude; settings set a launcher toggle to another value:\n")
+			for _, problem := range conflicts {
+				l.report("  - %s\n", problem)
+			}
 		}
 		return exitLauncherFailure
 	}
@@ -359,16 +367,22 @@ func exitStatus(err error) int {
 	return exitLauncherFailure
 }
 
-// gatewayVariables are the variables the launcher sets for claude. Any of them in a
-// settings file's env map would override the launcher's value.
+// gatewayVariables are the variables that send claude to the gateway with the session
+// credential. Any of them in a settings file's env map would override the launcher's
+// value, whatever that value is.
 var gatewayVariables = []string{
 	"ANTHROPIC_BASE_URL",
 	"CLAUDE_CODE_OAUTH_TOKEN",
 	"HTTPS_PROXY",
 	"NO_PROXY",
-	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-	"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
-	"DISABLE_AUTOUPDATER",
+}
+
+// toggles are the switches the launcher sets for claude, each to its value. A settings
+// file's env map may set one only to the same value.
+var toggles = []struct{ key, value string }{
+	{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"},
+	{"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1"},
+	{"DISABLE_AUTOUPDATER", "1"},
 }
 
 // clearedProxyVariables are removed from claude's environment: a proxy variable that
@@ -378,7 +392,7 @@ var gatewayVariables = []string{
 var clearedProxyVariables = []string{"ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"}
 
 // childEnvironment returns claude's environment: the parent's, minus the proxy
-// variables, plus the gateway's variables for this session.
+// variables, plus the gateway's variables for this session and the toggles.
 func childEnvironment(parent []string, grant session.Grant) []string {
 	drop := make(map[string]bool)
 	for _, key := range clearedProxyVariables {
@@ -386,6 +400,9 @@ func childEnvironment(parent []string, grant session.Grant) []string {
 	}
 	for _, key := range gatewayVariables {
 		drop[key] = true
+	}
+	for _, toggle := range toggles {
+		drop[toggle.key] = true
 	}
 	var env []string
 	for _, entry := range parent {
@@ -405,17 +422,18 @@ func childEnvironment(parent []string, grant session.Grant) []string {
 		scheme = "https"
 	}
 	proxy := scheme + "://session:" + grant.Token + "@" + grant.ForwardProxy
-	return append(env,
+	env = append(env,
 		"ANTHROPIC_BASE_URL="+grant.ReverseProxy,
 		"CLAUDE_CODE_OAUTH_TOKEN="+grant.Token,
 		"HTTPS_PROXY="+proxy,
 		"https_proxy="+proxy,
 		"NO_PROXY="+noProxy,
 		"no_proxy="+noProxy,
-		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-		"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1",
-		"DISABLE_AUTOUPDATER=1",
 	)
+	for _, toggle := range toggles {
+		env = append(env, toggle.key+"="+toggle.value)
+	}
+	return env
 }
 
 // environment turns KEY=value entries into a map.
