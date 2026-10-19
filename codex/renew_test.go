@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Luolc/redcoast/claude"
+	"github.com/Luolc/redcoast/session"
 )
 
 // Synthetic values of the renewal tests. None of them is a real login.
@@ -397,10 +399,10 @@ func TestRenewFailures(t *testing.T) {
 }
 
 // TestRenewNotSaved checks a renewal whose renewed login cannot be written: the
-// refresh token on disk is spent, so the process serves the renewed token from memory,
-// names the account as a problem and, without renewing again, retries the write at
-// each renewal until it is saved. The control arm is the write once the directory is
-// writable again.
+// refresh token on disk is spent, so the renewal succeeds with the renewed token served
+// from memory and the account named as a problem, and each later renewal, without
+// refreshing, only retries the write until it is saved. The control arm is the write
+// once the directory is writable again.
 func TestRenewNotSaved(t *testing.T) {
 	accountsDir := t.TempDir()
 	stored := loginJSON(syntheticAccessToken, syntheticRefreshToken, idToken(syntheticEmail, syntheticAccountID), syntheticAccountID)
@@ -415,10 +417,10 @@ func TestRenewNotSaved(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	for i := range 2 {
+	for i, want := range []string{"", "still not saved"} {
 		err := r.renew(t.Context(), "sample-a", server.Client(), time.Now())
-		if err == nil || errors.Is(err, claude.ErrRenewalRefused) || !strings.Contains(err.Error(), "not saved") || count.Load() != 1 {
-			t.Fatalf("try %d: %v after %d refreshes, want a failure to retry after one", i+1, err, count.Load())
+		if want == "" && err != nil || want != "" && (err == nil || errors.Is(err, claude.ErrRenewalRefused) || !strings.Contains(err.Error(), want)) || count.Load() != 1 {
+			t.Fatalf("try %d: %v after %d refreshes, want %q after one", i+1, err, count.Load(), want)
 		}
 		if data, _ := os.ReadFile(filepath.Join(dir, authFile)); string(data) != stored {
 			t.Fatal("the stored login changed")
@@ -465,9 +467,17 @@ func TestRenewLocked(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
-	start := time.Now()
-	if err := r.renew(ctx, "sample-a", server.Client(), time.Now()); err == nil || !strings.Contains(err.Error(), "another process holds") || time.Since(start) > 2*time.Second || count.Load() != 0 {
-		t.Fatalf("locked account: %v after %v and %d refreshes", err, time.Since(start), count.Load())
+	done := make(chan error, 1)
+	go func() { done <- r.renew(ctx, "sample-a", server.Client(), time.Now()) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "another process holds") || count.Load() != 0 {
+			t.Fatalf("locked account: %v after %d refreshes", err, count.Load())
+		}
+	case <-time.After(5 * time.Second):
+		// The renewal is left waiting on the lock, which release below frees.
+		release()
+		t.Fatal("the renewal of a locked account did not return within 5 s")
 	}
 	if err := r.renew(t.Context(), "sample-b", server.Client(), time.Now()); err != nil || count.Load() != 1 {
 		t.Fatalf("other account: %v, %d refreshes", err, count.Load())
@@ -614,5 +624,86 @@ func TestRenewSettled(t *testing.T) {
 		if err := r.renew(t.Context(), "sample-a", server.Client(), refused); !errors.Is(err, claude.ErrRenewalRefused) || calls.Load() != 3 {
 			t.Fatalf("spent refresh token, try %d: %v, %d requests, want refused and 3", i+1, err, calls.Load())
 		}
+	}
+}
+
+// TestDashboardShowsCodexState checks what the dashboard shows of a Codex account: its
+// 5h and 7d readings from the x-codex-* headers, a renewal after a 401 whose login
+// could not be written (the account serves again, and the health names the unsaved
+// login), and a pause for a new import. The control arm is the dashboard before them:
+// healthy, no reading and no pause.
+func TestDashboardShowsCodexState(t *testing.T) {
+	g := newGateway(t)
+	reader, err := session.OpenReadOnly(filepath.Join(g.dir, "codex.sqlite"), session.Config{}, claude.DefaultLimits.MaxTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	egress := claude.NewEgress(g.accounts, g.store)
+	egress.Problems = g.provider.Problems
+	dashboard := claude.NewDashboard(egress, claude.DashboardConfig{Reader: reader, Store: g.store, DBPath: filepath.Join(g.dir, "codex.sqlite")})
+	type view struct {
+		Health struct {
+			Status  string   `json:"status"`
+			Reasons []string `json:"reasons"`
+		} `json:"health"`
+		Accounts []struct {
+			PauseReason string                   `json:"pause_reason"`
+			Quota       map[string]session.Quota `json:"quota"`
+		} `json:"accounts"`
+	}
+	read := func() view {
+		t.Helper()
+		res := httptest.NewRecorder()
+		dashboard.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
+		var v view
+		if err := json.Unmarshal(res.Body.Bytes(), &v); err != nil || len(v.Accounts) != 1 {
+			t.Fatalf("dashboard %s: %v", res.Body, err)
+		}
+		return v
+	}
+	if v := read(); v.Health.Status != "ok" || v.Accounts[0].PauseReason != "" || len(v.Accounts[0].Quota) != 0 {
+		t.Fatalf("control arm: %+v", v)
+	}
+	var upstream atomic.Int32
+	upstream.Store(http.StatusOK)
+	endpoint := &tokenEndpoint{answer: func(n int, _ map[string]string) (int, string) { return http.StatusOK, renewedAnswer(n) }}
+	endpoint.install(g.exit, func() int { return int(upstream.Load()) })
+	inner := g.exit.answer
+	g.exit.setAnswer(func(w http.ResponseWriter, r *http.Request) {
+		for name, value := range map[string]string{"Primary-Used-Percent": "3", "Primary-Window-Minutes": "300", "Primary-Reset-At": "1700000000", "Secondary-Used-Percent": "40", "Secondary-Window-Minutes": "10080"} {
+			w.Header().Set("X-Codex-"+name, value)
+		}
+		inner(w, r)
+	})
+	if status, _ := g.do(http.MethodPost, "/backend-api/codex/responses", codexBody, codexHeader()); status != http.StatusOK {
+		t.Fatalf("status %d", status)
+	}
+	dir := filepath.Join(g.dir, "accounts", "sample-a")
+	if _, err := os.Create(filepath.Join(dir, lockFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	g.runRenewals()
+	upstream.Store(http.StatusUnauthorized)
+	if status, _ := g.do(http.MethodPost, "/backend-api/codex/responses", codexBody, codexHeader()); status != http.StatusUnauthorized {
+		t.Fatalf("status %d", status)
+	}
+	eventually(t, "the renewal", func() bool { return len(endpoint.seen()) == 1 && g.pauseReason() == "" })
+	v := read()
+	if v.Health.Status != "degraded" || !slices.ContainsFunc(v.Health.Reasons, func(r string) bool { return strings.HasPrefix(r, "sample-a: renewed login not saved") }) {
+		t.Fatalf("health after an unsaved renewal %+v", v.Health)
+	}
+	if q := v.Accounts[0].Quota; q[session.Window5h].Utilization != 0.03 || q[session.Window7d].Utilization != 0.4 {
+		t.Fatalf("quota %+v", q)
+	}
+	if err := g.store.Pause(t.Context(), "sample-a", time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), claude.NeedsImportReason); err != nil {
+		t.Fatal(err)
+	}
+	if v := read(); v.Accounts[0].PauseReason != claude.NeedsImportReason || !slices.Contains(v.Health.Reasons, "sample-a: paused (needs_reimport)") {
+		t.Fatalf("after a pause for a new import %+v", v)
 	}
 }

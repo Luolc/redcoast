@@ -55,7 +55,8 @@ type renewer struct {
 // refusedAt, only when it is due. It wraps
 // claude.ErrRenewalRefused when only a new import can help: the account has no login,
 // the token endpoint refused the refresh token, or the renewed login fails the
-// identity check. Errors never carry a token.
+// identity check. A renewed login that cannot be written is served, and the renewal
+// succeeds. Errors never carry a token.
 func (r renewer) renew(ctx context.Context, alias string, client *http.Client, refusedAt time.Time) error {
 	st := r.logins.lookup(alias)
 	if st == nil {
@@ -128,11 +129,11 @@ func (r renewer) renewLocked(ctx context.Context, st *loginState, client *http.C
 	}
 	st.tokens.Store(&tokens{access: renewed.AccessToken, accountID: doc.Tokens.AccountID})
 	if err := writeAuth(st.dir, data); err != nil {
-		// The refresh token on disk is spent: the renewed login is served from memory
-		// and its write retried, with no renewal, until it is saved.
+		// The refresh token on disk is spent: the renewed login is served from memory,
+		// so the renewal succeeded and the account serves, and its write is retried, with
+		// no renewal, until it is saved. Problems names it meanwhile.
 		st.unsaved.Store(&unsavedLogin{data: data, spent: doc.Tokens.RefreshToken})
 		log.Printf("renewed login not saved alias=%s: %v; it needs a new import if this process stops first", filepath.Base(st.dir), err)
-		return fmt.Errorf("the renewed login is served but not saved: %v", err)
 	}
 	return nil
 }
