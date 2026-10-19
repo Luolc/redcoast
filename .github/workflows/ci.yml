@@ -47,10 +47,10 @@ jobs:
         uses: Luolc/ci-actions/changes@afb3a5a9525f6153c9ce996c547b0a714115137e # main, 2026-10-11
         with:
           groups: |
-            go: cmd/** claude/** session/** credential/** backup/** internal/** go.mod go.sum redcoast.example.yaml
+            go: cmd/** claude/** codex/** session/** credential/** backup/** internal/** go.mod go.sum redcoast.example.yaml redcoast-codex.example.yaml
             experiments: experiments/**
             dashboard: dashboard/**
-            e2e: cmd/** claude/** session/** credential/** backup/** internal/** go.mod go.sum e2e/** experiments/**
+            e2e: cmd/** claude/** codex/** session/** credential/** backup/** internal/** go.mod go.sum e2e/** experiments/**
             docs: docs/** **/*.md LICENSE .agents/** .claude/**
           run-all-on: .github/** tools/** .golangci.yml
 

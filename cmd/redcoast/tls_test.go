@@ -59,7 +59,7 @@ func TestTLSConfiguration(t *testing.T) {
 		{"private_plain", "  session: '10.0.0.7:7801'\n", "", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cfg, err := parseConfig([]byte(baseConfig + "listen:\n" + test.listen))
+			cfg, err := parseConfig("claude", []byte(baseConfig+"listen:\n"+test.listen))
 			if test.problem != "" {
 				if err == nil || !strings.Contains(err.Error(), test.problem) {
 					t.Fatalf("got %v, want an error with %q", err, test.problem)
@@ -90,8 +90,8 @@ func TestListenTLS(t *testing.T) {
 	certs := testtls.New(t)
 	cert, key := writeTLSFiles(t, certs)
 	dir := t.TempDir()
-	cfg, err := parseConfig([]byte(baseConfig + "listen:\n  reverse: 127.0.0.1:0\n  forward: 127.0.0.2:0\n  health: 127.0.0.3:0\n  dashboard: 127.0.0.4:0\n  session: 127.0.0.5:0\n" +
-		"  tls: {cert_file: '" + cert + "', key_file: '" + key + "', server_name: " + testtls.ServerName + "}\n"))
+	cfg, err := parseConfig("claude", []byte(baseConfig+"listen:\n  reverse: 127.0.0.1:0\n  forward: 127.0.0.2:0\n  health: 127.0.0.3:0\n  dashboard: 127.0.0.4:0\n  session: 127.0.0.5:0\n"+
+		"  tls: {cert_file: '"+cert+"', key_file: '"+key+"', server_name: "+testtls.ServerName+"}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestListenTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := openStore(t.Context(), filepath.Join(dir, "gateway.sqlite"))
+	store, err := openStore(t.Context(), filepath.Join(dir, "gateway.sqlite"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

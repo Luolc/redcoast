@@ -34,19 +34,19 @@ type adminCommand struct {
 
 // errAdminUsage is returned when a management subcommand is misused.
 var errAdminUsage = errors.New(`usage:
-  redcoast claude reload --admin-socket <path>
-  redcoast claude handoff --admin-socket <path>
-  redcoast claude status --admin-socket <path>
-  redcoast claude sessions --admin-socket <path> [--since <RFC 3339>] [--until <RFC 3339>]
+  redcoast claude|codex reload --admin-socket <path>
+  redcoast claude|codex handoff --admin-socket <path>
+  redcoast claude|codex status --admin-socket <path>
+  redcoast claude|codex sessions --admin-socket <path> [--since <RFC 3339>] [--until <RFC 3339>]
       [--cwd-prefix <path>] [--machine <name>] [--state ended|all]
-  redcoast claude pause <alias> --admin-socket <path> [--reason <text>] [--until <RFC 3339>]
-  redcoast claude resume <alias> --admin-socket <path>
-  redcoast claude refresh <alias> --admin-socket <path>
-  redcoast claude refresh --all --admin-socket <path>
-  redcoast claude machine add <name> <sha256-of-credential> --admin-socket <path> [--max-sessions <n>]
-  redcoast claude machine revoke <name> --admin-socket <path>
-  redcoast claude machine limit <name> <n> --admin-socket <path>
-  redcoast claude machine list --admin-socket <path>
+  redcoast claude|codex pause <alias> --admin-socket <path> [--reason <text>] [--until <RFC 3339>]
+  redcoast claude|codex resume <alias> --admin-socket <path>
+  redcoast claude|codex refresh <alias> --admin-socket <path>
+  redcoast claude|codex refresh --all --admin-socket <path>
+  redcoast claude|codex machine add <name> <sha256-of-credential> --admin-socket <path> [--max-sessions <n>]
+  redcoast claude|codex machine revoke <name> --admin-socket <path>
+  redcoast claude|codex machine limit <name> <n> --admin-socket <path>
+  redcoast claude|codex machine list --admin-socket <path>
 reload reads the inventory and 1Password again and replaces the accounts; nothing
 changes when it fails; handoff starts the binary at the path the gateway was started
 from (the current release) on the gateway's sockets, and the old process drains once

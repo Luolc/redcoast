@@ -1,0 +1,32 @@
+# Example configuration of redcoast's Codex gateway, started as
+#   redcoast codex serve --config <path>
+# It takes every key of redcoast.example.yaml, with the defaults that file
+# shows, except those below: the upstream and the listen addresses have
+# their own defaults, so that both gateways run on one host; capture_dir is
+# refused; and the codex section is required. Use paths of its own for the
+# sockets, the store and the inventory.
+
+upstream: https://chatgpt.com/backend-api/codex
+
+listen:
+  reverse: 127.0.0.1:8792
+  forward: 127.0.0.1:8793
+  health: 127.0.0.1:7806
+  dashboard: 127.0.0.1:7807
+
+session_socket: /run/redcoast-codex/session.sock # required
+admin_socket: /run/redcoast-codex/admin.sock # required
+session_db: /var/lib/redcoast-codex/sessions.db # required
+inventory: /etc/redcoast-codex/inventory # required
+
+codex:
+  # One directory per account alias, mode 0700, holding the account's
+  # ChatGPT login as auth.json (mode 0600, $CODEX_HOME's format). It is
+  # outside the store, and so outside its backups.
+  accounts_dir: /var/lib/redcoast-codex/accounts
+  # Reference of the key (at least 32 bytes) that signs the session
+  # credentials. Changing it ends every session issued under the old key.
+  session_key: file:///run/credentials/redcoast-codex.service/session-key
+
+credentials:
+  onepassword_token: file:///run/credentials/redcoast-codex.service/op-sa-token

@@ -130,6 +130,32 @@ umask 077 && mkdir -p ~/.config/redcoast-client && head -c 32 /dev/urandom | bas
 
 On the gateway, register the hash with `machine add`, and set `listen.session` so the client can reach the session interface. Then start Claude Code on the client through [`redcoast-client`](../redcoast-client/README.md).
 
+## The Codex gateway
+
+`redcoast codex serve --config <path>` runs the gateway for ChatGPT subscriptions, which Pi and the Codex CLI reach through `redcoast-client`. It is a second process, with its own configuration file, listeners, sockets, database and inventory; the Claude gateway and its sessions are untouched, and a session credential of one gateway is refused by the other. Every command above exists as `redcoast codex …` against the Codex gateway's sockets and database, except `refresh`, which it refuses; register client machines with it separately (the same machine credential may be registered with both).
+
+The configuration takes the keys of [`redcoast.example.yaml`](../../redcoast.example.yaml); [`redcoast-codex.example.yaml`](../../redcoast-codex.example.yaml) shows what differs: the upstream is the Codex API's base URL `https://chatgpt.com/backend-api/codex` (or a loopback URL in tests), the default listen addresses are other ports, `capture_dir` is refused, and a `codex` section is required:
+
+- `codex.accounts_dir`: an absolute path to a directory with one directory per account alias, mode 0700, holding the account's ChatGPT login as `auth.json` in `$CODEX_HOME`'s format, mode 0600. The logins stay outside the database, and so outside its backups.
+- `codex.session_key`: the reference of a key of at least 32 bytes that signs session credentials. They are JWTs carrying a made-up `chatgpt_account_id`, which Pi requires; changing the key ends every session issued under the old one.
+
+An account file of the Codex inventory has the keys of a Claude one without `oauth_token`, `email` is required, and `installation_id` is a lower-case UUID v4 that the account's requests carry in place of the client's:
+
+```yaml
+email: someone@example.test # the ChatGPT login's email
+access: gateway
+status: active
+installation_id: 0b8c7e2a-3f41-4d2e-9a6b-5c1d2e3f4a5b
+proxy:
+  host: proxy.example.test
+  port: 8081
+  expected_egress_ip: 192.0.2.11
+  username_ref: op://example-vault/example-b-proxy/username
+  password_ref: op://example-vault/example-b-proxy/password
+```
+
+The gateway forwards only `POST /backend-api/codex/responses`, answers a WebSocket upgrade with 426 so that the clients stream over HTTP, and reads each account's quota from the `x-codex-primary-*` and `x-codex-secondary-*` headers of its responses. In this release it only reads the logins: putting a login into `accounts_dir` and refreshing it are still to come, and an upstream 401 pauses the account for an hour, as on the Claude gateway.
+
 ## Backups
 
 With a `backup` section the gateway uploads a gzipped snapshot of its database every hour to `<endpoint>/<bucket>/<prefix>/hourly/`, and the first one of each UTC day also to `daily/`. It only creates objects; expire them with the bucket's lifecycle rules. To restore, stop the service, move the database and its `-wal` and `-shm` files aside, put the gunzipped snapshot at `session_db` and start it again. Sessions issued after the snapshot are unknown; their clients start again.

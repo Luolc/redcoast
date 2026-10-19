@@ -28,7 +28,7 @@ type EgressCheck func(ctx context.Context, a *account) error
 type Reload struct {
 	Added    []string `json:"added"`
 	Removed  []string `json:"removed"`
-	Changed  []string `json:"changed"`  // same alias, new token or exit; served by a new outbound object
+	Changed  []string `json:"changed"`  // same alias, new credential (token or client identity) or exit; served by a new outbound object
 	Rejected []string `json:"rejected"` // refused by the egress check; not in the new set
 	Moved    int      `json:"moved"`
 	Unplaced int      `json:"unplaced"`

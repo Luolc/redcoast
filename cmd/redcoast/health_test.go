@@ -40,7 +40,7 @@ func TestHealthAndEgressConfiguration(t *testing.T) {
 		{"dashboard_wildcard", "listen: {dashboard: '0.0.0.0:7805'}\n", "", 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cfg, err := parseConfig([]byte(baseConfig + test.yaml))
+			cfg, err := parseConfig("claude", []byte(baseConfig+test.yaml))
 			if test.health == "" {
 				if err == nil {
 					t.Fatal("invalid configuration accepted")
@@ -72,7 +72,7 @@ func TestReadOnlyHosts(t *testing.T) {
 		{"tls", withTLS, []string{testtls.ServerName + ":7804", "127.0.0.1:7805"}, []string{"gateway-a:7804"}},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
-			cfg, err := parseConfig([]byte(baseConfig + arm.yaml))
+			cfg, err := parseConfig("claude", []byte(baseConfig+arm.yaml))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -100,7 +100,7 @@ func TestReadOnlyHosts(t *testing.T) {
 		})
 	}
 	for _, name := range []string{"Gateway-A", "gateway-a:7805", "*.example.test", "", "-gateway"} {
-		_, err := parseConfig([]byte(baseConfig + "listen: {host_names: ['" + name + "']}\n"))
+		_, err := parseConfig("claude", []byte(baseConfig+"listen: {host_names: ['"+name+"']}\n"))
 		if err == nil || !strings.Contains(err.Error(), "config: listen.host_names: ") {
 			t.Errorf("host name %q: %v; want refused, naming listen.host_names", name, err)
 		}

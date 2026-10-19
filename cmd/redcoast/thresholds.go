@@ -17,7 +17,7 @@ type thresholdsCommand struct {
 
 // errThresholdsUsage is returned when the thresholds subcommand is misused.
 var errThresholdsUsage = errors.New(`usage:
-  redcoast claude thresholds --session-db <path> <soft> <hard>
+  redcoast claude|codex thresholds --session-db <path> <soft> <hard>
 both are fractions in [0, 1] (for example 0.9 0.95), soft not above hard; the gateway
 reads them on its next request`)
 
