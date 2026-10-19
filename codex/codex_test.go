@@ -75,6 +75,54 @@ func TestForwarding(t *testing.T) {
 	}
 }
 
+// TestBodyInstallationID checks requests whose turn metadata carries no installation
+// ID, as the Codex CLI's memory requests do: the client's ID in the body's
+// client_metadata reaches the upstream as the account's, at the same length. A body
+// whose ID the gateway cannot read gets 502 and the client's ID does not reach the
+// upstream; a compressed body gets 400 unless it comes from Pi, whose compressed body
+// goes upstream unchanged.
+func TestBodyInstallationID(t *testing.T) {
+	g := newGateway(t)
+	memoryBody := `{"model":"gpt-synthetic","input":[],"client_metadata":{"x-codex-installation-id":"` + clientInstallation + `"},"stream":true}`
+	memoryHeader := http.Header{"X-Codex-Turn-Metadata": {`{"turn_id":"t2"}`}}
+	for _, test := range []struct {
+		name, body string
+		header     http.Header
+		status     int
+		upstream   string // the body the upstream gets, when it gets one
+	}{
+		{"memory", memoryBody, memoryHeader, http.StatusOK, strings.ReplaceAll(memoryBody, clientInstallation, accountInstallation)},
+		{"no_turn_metadata", memoryBody, nil, http.StatusOK, strings.ReplaceAll(memoryBody, clientInstallation, accountInstallation)},
+		{"id_upper_case", strings.ReplaceAll(memoryBody, clientInstallation, strings.ToUpper(clientInstallation)), memoryHeader, http.StatusBadGateway, ""},
+		{"not_json", "synthetic " + memoryBody, memoryHeader, http.StatusBadGateway, ""},
+		{"compressed", memoryBody, http.Header{"Content-Encoding": {"zstd"}}, http.StatusBadRequest, ""},
+		{"compressed_pi", "synthetic-zstd-frame", http.Header{"Content-Encoding": {"zstd"}, "Originator": {"pi"}}, http.StatusOK, "synthetic-zstd-frame"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := len(g.exit.exchanges())
+			status, body := g.do(http.MethodPost, "/backend-api/codex/responses", test.body, test.header)
+			seen := g.exit.exchanges()[before:]
+			for _, e := range seen {
+				if strings.Contains(strings.ToLower(e.body), clientInstallation) {
+					t.Fatalf("the client's installation ID reached the upstream: %q", e.body)
+				}
+			}
+			if status != test.status {
+				t.Fatalf("status %d %q, want %d", status, body, test.status)
+			}
+			if test.upstream == "" {
+				if len(seen) != 0 && status != http.StatusBadGateway {
+					t.Fatalf("%d requests upstream, want none", len(seen))
+				}
+				return
+			}
+			if len(seen) != 1 || seen[0].body != test.upstream || seen[0].header.Get("Content-Length") != strconv.Itoa(len(test.body)) {
+				t.Fatalf("upstream got %+v, want body %q", seen, test.upstream)
+			}
+		})
+	}
+}
+
 // TestScreen checks the requests answered before anything goes upstream: a WebSocket
 // upgrade (426), turn metadata the gateway cannot rewrite (400), a compressed body with
 // an installation ID (400), a request line off the list (403) and one that would leave
@@ -392,6 +440,7 @@ func TestAccountInventory(t *testing.T) {
 		{"missing", "", login, 0o600, "sample-a: installation_id: missing"},
 		{"no_email", "installation_id: " + accountInstallation + "\n", login, 0o600, "sample-a: email: missing"},
 		{"null", "installation_id: null\n", login, 0o600, "sample-a: installation_id: missing"},
+		{"not_a_document", "installation_id: [" + accountInstallation + "]\n", login, 0o600, "sample-a: file: not a Codex account document"},
 		{"upper_case", "installation_id: " + strings.ToUpper(accountInstallation) + "\n", login, 0o600, "sample-a: installation_id: not a lower-case UUID v4"},
 		{"version_1", "installation_id: 0b8c7e2a-3f41-1d2e-9a6b-5c1d2e3f4a5b\n", login, 0o600, "sample-a: installation_id: not a lower-case UUID v4"},
 		{"readable_login", "installation_id: " + accountInstallation + "\n", login, 0o644, "sample-a: auth.json: must be a regular file"},

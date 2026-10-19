@@ -38,7 +38,7 @@ func account(accountsDir, alias string, document []byte) (claude.CredentialSourc
 	}
 	switch {
 	case yaml.NewDecoder(bytes.NewReader(document)).Decode(&file) != nil:
-		return nil, fmt.Errorf("%s: installation_id: not a string", alias)
+		return nil, fmt.Errorf("%s: file: not a Codex account document", alias)
 	case file.Email == "":
 		return nil, fmt.Errorf("%s: email: missing", alias)
 	case file.InstallationID == nil:
