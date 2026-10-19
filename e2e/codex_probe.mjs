@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 // The stand-in client of the Codex rehearsal's cross-provider arms, run in the client
 // container (node, no curl or python). Started by redcoast-client in place of claude or
-// codex, with PROBE_HOLD set to claude or codex, it writes the session credential it was
-// given to /client/out/<PROBE_HOLD>.token and holds the session until the container is
-// removed. As "codex_probe.mjs probe <base URL> <path> <proxy host:port>" it reads a
-// credential on stdin, so that it is in no command line, sends one inference to the
-// reverse proxy and one CONNECT to the forward proxy with it, and prints both statuses.
+// codex, with PROBE_HOLD set to claude or to the name of a Codex process, it writes the
+// session credential it was given to /client/out/<PROBE_HOLD>.token and holds the session
+// until the container is removed. As "codex_probe.mjs probe <base URL> <path> <proxy
+// host:port>" it reads a credential on stdin, so that it is in no command line, sends one
+// inference to the reverse proxy and one CONNECT to the forward proxy with it, and prints
+// both statuses.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 
-const holdVariables = { claude: "CLAUDE_CODE_OAUTH_TOKEN", codex: "CODEX_GATEWAY_TOKEN" };
 
 function post(base, path, token) {
   const body = path.endsWith("/responses")
@@ -61,6 +61,6 @@ if (process.argv[2] === "probe") {
 } else {
   const name = process.env.PROBE_HOLD;
   mkdirSync("/client/out", { recursive: true });
-  writeFileSync(`/client/out/${name}.token`, process.env[holdVariables[name]] ?? "", { mode: 0o600 });
+  writeFileSync(`/client/out/${name}.token`, process.env[name === "claude" ? "CLAUDE_CODE_OAUTH_TOKEN" : "CODEX_GATEWAY_TOKEN"] ?? "", { mode: 0o600 });
   setInterval(() => {}, 60000);
 }

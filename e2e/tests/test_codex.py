@@ -72,3 +72,17 @@ def test_installation_ids_of_a_body_without_metadata_are_none():
     "body": None,
     "body_turn_metadata": None,
   }
+
+
+def test_refresh_issues_once_then_answers_a_presented_token_as_reused(monkeypatch):
+  monkeypatch.setattr(codex_fake, "REFRESH_SECONDS", 0)
+  monkeypatch.setattr(
+    codex_fake, "tokens", {"in_flight": 0, "presented": {}, "accepted": None}
+  )
+  body = json.dumps({"grant_type": "refresh_token", "refresh_token": "r-1"}).encode()
+  status, answer, entry = codex_fake.refresh(body)
+  assert (status, entry["presented_before"], entry["in_flight"]) == (200, 0, 1)
+  assert codex_fake.tokens["accepted"] == answer["access_token"]
+  status, answer, entry = codex_fake.refresh(body)
+  assert (status, entry["presented_before"]) == (401, 1)
+  assert answer == {"error": {"code": "refresh_token_reused"}}
