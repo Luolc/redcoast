@@ -226,7 +226,7 @@ func TestNoAccountRowsCarryTheSession(t *testing.T) {
 			if err := h.store.Pause(context.Background(), "sample-a", indefinitePause, "upstream_401"); err != nil {
 				t.Fatal(err)
 			}
-			for _, token := range []string{h.token, "sk-ant-gws-unknown"} {
+			for _, token := range []string{h.token, "sk-ant-gws-" + strings.Repeat("U", 43)} {
 				switch entry {
 				case "inference":
 					server := h.gateway("http://127.0.0.1:1")

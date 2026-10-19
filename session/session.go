@@ -30,6 +30,11 @@ const maxLaunchMeta = 4096
 var (
 	// ErrUnknownSession means the credential is malformed, unknown, revoked or expired.
 	ErrUnknownSession = errors.New("unknown session")
+	// ErrNotSessionCredential means the credential does not have the shape of one the
+	// gateway issues, such as an Anthropic token sent by a client started without
+	// redcoast-client. It wraps ErrUnknownSession, so every check for that error
+	// refuses it too.
+	ErrNotSessionCredential = fmt.Errorf("not a session credential: %w", ErrUnknownSession)
 	// ErrNoAccount means no candidate account is available for a binding.
 	ErrNoAccount = errors.New("no account available")
 	// ErrLaunchMeta means the launch metadata is not a JSON object within the size limit.
@@ -285,12 +290,12 @@ type rowQuerier interface {
 }
 
 // liveSession returns the ID of the session token identifies and the source it was
-// issued to, or ErrUnknownSession when the token is malformed, unknown or the session
-// has ended. idle reports that the session has had no request for the idle expiry;
+// issued to, ErrNotSessionCredential when the token is malformed, or ErrUnknownSession
+// when it is unknown or the session has ended. idle reports that the session has had no request for the idle expiry;
 // the caller ends it and commits, then treats it as unknown.
 func (s *Store) liveSession(ctx context.Context, tx rowQuerier, token string, now int64) (id, source string, idle bool, err error) {
 	if !tokenPattern.MatchString(token) {
-		return "", "", false, ErrUnknownSession
+		return "", "", false, ErrNotSessionCredential
 	}
 	var lastActivity int64
 	err = tx.QueryRowContext(ctx,

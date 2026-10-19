@@ -133,6 +133,7 @@ func TestForwardProxy(t *testing.T) {
 		{"not_connect", 200, false, "session", 405, "refused"},
 		{"no_credential", 200, true, "", 407, "auth_failed"},
 		{"unknown_credential", 200, true, "sk-ant-gws-" + strings.Repeat("C", 43), 407, "auth_failed"},
+		{"not_session_credential", 200, true, "sk-ant-oat01-" + strings.Repeat("C", 43), 407, "not_session"},
 		{"not_basic", 200, true, "bearer", 407, "auth_failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -499,17 +500,21 @@ func TestForwardRefusedRowsAreLimitedPerSource(t *testing.T) {
 	defer server.Close()
 	address := server.Listener.Addr().String()
 	unknown := proxyAuthorization("sk-ant-gws-" + strings.Repeat("B", 43))
-	refuse := func() {
+	refuse := func(authorization string) {
 		t.Helper()
-		if _, _, response := connect(t, address, "api.example.test:443", unknown); response.StatusCode != 407 {
+		if _, _, response := connect(t, address, "api.example.test:443", authorization); response.StatusCode != 407 {
 			t.Fatalf("status=%d", response.StatusCode)
 		}
 		if err := forward.wait(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for range refusalRowsPerSource + 2 {
-		refuse()
+	for range refusalRowsPerSource {
+		refuse(unknown)
+	}
+	// Not of the session shape: counted against the same limit.
+	for range 2 {
+		refuse(proxyAuthorization("sk-ant-oat01-" + strings.Repeat("B", 43)))
 	}
 	conn, _, response := connect(t, address, "api.example.test:443", proxyAuthorization(h.token))
 	if response.StatusCode != 200 {
@@ -532,7 +537,7 @@ func TestForwardRefusedRowsAreLimitedPerSource(t *testing.T) {
 	if recorder.Code != 407 {
 		t.Fatalf("other address: status=%d", recorder.Code)
 	}
-	refuse()
+	refuse(unknown)
 	rows = h.traffic()
 	if len(rows) != refusalRowsPerSource+2 || rows[len(rows)-1].result != "auth_failed" {
 		t.Fatalf("other address: rows=%+v", rows)

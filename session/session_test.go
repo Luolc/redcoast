@@ -45,7 +45,7 @@ func TestRefusedCredentialTakesNoWriteLock(t *testing.T) {
 		token, source string
 		want          error
 	}{
-		{"not-a-session", LocalSource, ErrUnknownSession},
+		{"not-a-session", LocalSource, ErrNotSessionCredential},
 		{TokenPrefix + strings.Repeat("B", 43), LocalSource, ErrUnknownSession},
 		{revoked.Token, LocalSource, ErrUnknownSession},
 		{issued.Token, "198.51.100.9", ErrWrongSource},

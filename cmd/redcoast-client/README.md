@@ -20,10 +20,17 @@ A release has these files:
 dir=$HOME/.local/libexec/redcoast-client
 install -D -m 0755 redcoast-client-linux-amd64 "$dir/redcoast-client"
 install -m 0755 redcoast-client-shim "$dir/claude"   # or redcoast-client-shim-full
-export PATH="$dir:$PATH"                             # in the shell's startup file
 ```
 
-`command -v claude` then prints `$dir/claude`. From source: `CGO_ENABLED=0 go build -trimpath -o redcoast-client ./cmd/redcoast-client`; the shims are the files of the same names in this directory.
+Put the `PATH` line in a startup file the shell reads even when it is not interactive, so that a `claude` started by `zsh -c`, by tmux or over ssh finds the shim too; for zsh that is `~/.zshenv`, not `~/.zshrc`. Put it after every other line that prepends to `PATH`, such as one adding `~/.local/bin`, where the real `claude` often lives:
+
+```sh
+export PATH="$HOME/.local/libexec/redcoast-client:$PATH"
+```
+
+`zsh -c 'command -v claude'` then prints `$dir/claude`. When a `claude` started without the launcher sends the gateway a credential of its own, such as the person's Claude login, the gateway answers `401 not a redcoast session credential; start claude through redcoast-client`.
+
+From source: `CGO_ENABLED=0 go build -trimpath -o redcoast-client ./cmd/redcoast-client`; the shims are the files of the same names in this directory.
 
 ## The shims
 

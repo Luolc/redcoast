@@ -28,7 +28,8 @@ var connectTarget = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}:[0-9]{1,5}$`)
 
 // connectRecord is the saved capture record of one forward-proxy request. Result is
 // one of ok, refused (not a CONNECT, an invalid target, or an account-route target
-// accountTarget rules out), auth_failed, wrong_source, no_account,
+// accountTarget rules out), auth_failed, not_session (the credential does not have
+// the shape of a session credential), wrong_source, no_account,
 // quota_exhausted, store_failed, limited, egress_failed (the exit could not be reached, answered
 // nothing valid, or refused the tunnel; ExitStatus tells which; on the direct route,
 // the target could not be reached), idle_timeout or
@@ -132,6 +133,9 @@ func (f *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "auth_failed":
 			w.Header().Set("Proxy-Authenticate", `Basic realm="gateway session"`)
 			http.Error(w, "session credential required", http.StatusProxyAuthRequired)
+		case "not_session":
+			w.Header().Set("Proxy-Authenticate", `Basic realm="gateway session"`)
+			http.Error(w, notSessionCredential, http.StatusProxyAuthRequired)
 		case "wrong_source":
 			w.Header().Set("Proxy-Authenticate", `Basic realm="gateway session"`)
 			http.Error(w, "session used from another address", http.StatusProxyAuthRequired)
@@ -221,7 +225,7 @@ func (f *forwardProxy) open(w http.ResponseWriter, r *http.Request, a *account, 
 
 // authenticate reads the session credential from Proxy-Authorization and evaluates the
 // binding. It returns the bound account and binding, or the result to record:
-// auth_failed, no_account, quota_exhausted or store_failed. With no_account and
+// auth_failed, not_session, no_account, quota_exhausted or store_failed. With no_account and
 // quota_exhausted the binding still carries the recognised session's ID.
 func (f *forwardProxy) authenticate(r *http.Request) (*account, session.Binding, string) {
 	token, ok := proxyCredential(r.Header.Get("Proxy-Authorization"))
@@ -231,6 +235,8 @@ func (f *forwardProxy) authenticate(r *http.Request) (*account, session.Binding,
 	binding, a, err := f.accounts.bind(r.Context(), token, session.SourceOf(r.RemoteAddr))
 	var exhausted *session.QuotaExhausted
 	switch {
+	case errors.Is(err, session.ErrNotSessionCredential):
+		return nil, session.Binding{}, "not_session"
 	case errors.Is(err, session.ErrUnknownSession):
 		return nil, session.Binding{}, "auth_failed"
 	case errors.Is(err, session.ErrWrongSource):
