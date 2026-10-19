@@ -60,6 +60,7 @@ type connectRecord struct {
 type forwardProxy struct {
 	store    *session.Store
 	accounts *Accounts
+	outsider string // the answer to a credential that is not a session credential
 	dial     func(ctx context.Context, network, address string) (net.Conn, error)
 	resolve  func(ctx context.Context, network, host string) ([]netip.Addr, error) // a direct target's addresses
 	sink     func(connectRecord) error                                             // nil records nothing beyond the traffic table
@@ -77,6 +78,7 @@ func newForwardProxy(store *session.Store, accounts *Accounts, sink func(connect
 	return &forwardProxy{
 		store:    store,
 		accounts: accounts,
+		outsider: notSessionCredential,
 		dial:     (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		resolve:  net.DefaultResolver.LookupNetIP,
 		sink:     sink,
@@ -138,7 +140,7 @@ func (f *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "session credential required", http.StatusProxyAuthRequired)
 		case "not_session":
 			w.Header().Set("Proxy-Authenticate", `Basic realm="gateway session"`)
-			http.Error(w, notSessionCredential, http.StatusProxyAuthRequired)
+			http.Error(w, f.outsider, http.StatusProxyAuthRequired)
 		case "wrong_source":
 			w.Header().Set("Proxy-Authenticate", `Basic realm="gateway session"`)
 			http.Error(w, "session used from another address", http.StatusProxyAuthRequired)

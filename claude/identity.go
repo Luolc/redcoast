@@ -14,14 +14,14 @@ import (
 // a larger body anyway, so it is forwarded as it came.
 const maxRewriteBody = 32 << 20
 
-// rewriteIdentity puts a's device ID and account UUID into the device_id and
+// rewriteIdentity puts the account's deviceID and accountUUID into the device_id and
 // account_uuid of out's metadata.user_id, so that each account reaches the upstream as
 // a client of its own. Claude Code writes user_id as a JSON object encoded into a JSON
 // string. Only the bytes of those two values change; every other byte of the body is
 // kept, key order and escapes included, so the body still reads as the client wrote
 // it. A body that is encoded, too large, unreadable, not a JSON object or without a
 // user_id of that shape is forwarded unchanged.
-func rewriteIdentity(out *http.Request, a *account) {
+func rewriteIdentity(out *http.Request, deviceID, accountUUID string) {
 	if out.Body == nil || out.Body == http.NoBody {
 		return
 	}
@@ -38,7 +38,7 @@ func rewriteIdentity(out *http.Request, a *account) {
 		}{io.MultiReader(bytes.NewReader(head), body), body}
 		return
 	}
-	rewritten := withIdentity(head, a.deviceID, a.accountUUID)
+	rewritten := withIdentity(head, deviceID, accountUUID)
 	out.Body = struct {
 		io.Reader
 		io.Closer

@@ -67,7 +67,7 @@ func TestFourPointCapture(t *testing.T) {
 		t.Fatal("capture changed response")
 	}
 	// The client's credentials are replaced by the account's token; the query is forwarded as sent.
-	if got := <-received; got != requestBody+"|Bearer "+h.accounts.lookup("sample-a").token+"|private-query||" {
+	if got := <-received; got != requestBody+"|Bearer "+tokenOf(h.accounts.lookup("sample-a"))+"|private-query||" {
 		t.Fatalf("forwarded=%q", got)
 	}
 	var record captureRecord

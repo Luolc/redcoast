@@ -28,7 +28,7 @@ type EgressCheck func(ctx context.Context, a *account) error
 type Reload struct {
 	Added    []string `json:"added"`
 	Removed  []string `json:"removed"`
-	Changed  []string `json:"changed"`  // same alias, new token, exit or client identity; served by a new outbound object
+	Changed  []string `json:"changed"`  // same alias, new token or exit; served by a new outbound object
 	Rejected []string `json:"rejected"` // refused by the egress check; not in the new set
 	Moved    int      `json:"moved"`
 	Unplaced int      `json:"unplaced"`
@@ -123,7 +123,8 @@ func (c *Accounts) Reload(ctx context.Context, dir string, resolve Resolver, ver
 	case <-ctx.Done():
 		return Reload{}, fmt.Errorf("reload: another reload in progress, this one abandoned: %v", ctx.Err())
 	}
-	next, err := LoadAccounts(ctx, dir, resolve, c.set.Load().concurrency)
+	current := c.set.Load()
+	next, err := LoadAccounts(ctx, dir, current.provider, resolve, current.concurrency)
 	if err != nil {
 		return Reload{}, fmt.Errorf("reload: inventory not loaded, accounts unchanged: %w", err)
 	}
@@ -198,11 +199,9 @@ func diff(ctx context.Context, old, next *AccountSet, verify EgressCheck) Reload
 	return r
 }
 
-// sameConfig reports whether b has a's token, exit, expected exit IP, proxy credentials
-// and client identity.
+// sameConfig reports whether b has a's credential, exit, expected exit IP and proxy credentials.
 func (a *account) sameConfig(b *account) bool {
-	return a.token == b.token && a.exit.String() == b.exit.String() && a.expectedIP == b.expectedIP && a.proxyUsername == b.proxyUsername && a.proxyPassword == b.proxyPassword &&
-		a.deviceID == b.deviceID && a.accountUUID == b.accountUUID
+	return a.credential.Same(b.credential) && a.exit.String() == b.exit.String() && a.expectedIP == b.expectedIP && a.proxyUsername == b.proxyUsername && a.proxyPassword == b.proxyPassword
 }
 
 // lock takes the exclusive lock, waiting at most reloadWait for the binding sections

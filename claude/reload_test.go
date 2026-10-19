@@ -114,7 +114,7 @@ func newReloadHarness(t *testing.T, accounts map[string]string) *reloadHarness {
 		}
 	}
 	h.rewrite(accounts)
-	set, err := LoadAccounts(t.Context(), h.dir, h.resolve, DefaultAccountConcurrency)
+	set, err := LoadAccounts(t.Context(), h.dir, Claude, h.resolve, DefaultAccountConcurrency)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,8 +354,8 @@ func TestReloadChangesIdentity(t *testing.T) {
 	if err != nil || !slices.Equal(r.Changed, []string{"sample-a", "sample-b"}) {
 		t.Fatalf("reload adding the identity: %+v, %v", r, err)
 	}
-	if a := h.accounts.lookup("sample-a"); a.deviceID != syntheticDeviceID || a.accountUUID != syntheticAccountUUID {
-		t.Fatalf("sample-a serves identity %q %q", a.deviceID, a.accountUUID)
+	if a := h.accounts.lookup("sample-a"); claudeOf(a).deviceID != syntheticDeviceID || claudeOf(a).accountUUID != syntheticAccountUUID {
+		t.Fatalf("sample-a serves identity %q %q", claudeOf(a).deviceID, claudeOf(a).accountUUID)
 	}
 	if r, err := h.reload(nil); err != nil || r.Changed != nil {
 		t.Fatalf("control arm: %+v, %v", r, err)
@@ -597,7 +597,7 @@ func TestReloadKeepsOldRedaction(t *testing.T) {
 				t.Fatal(err)
 			}
 			target, _ := url.Parse("http://127.0.0.1:1")
-			entry, err := NewHandler(target, captureDir, h.store, h.accounts, DefaultLimits)
+			entry, err := NewHandler(target, Claude, captureDir, h.store, h.accounts, DefaultLimits)
 			if err != nil {
 				t.Fatal(err)
 			}

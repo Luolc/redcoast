@@ -64,7 +64,7 @@ func TestIdentityRewrite(t *testing.T) {
 		{"not_json", syntheticDeviceID, syntheticAccountUUID, `{"metadata":{"user_id":` + clientUserID + `}`, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			a.deviceID, a.accountUUID = test.deviceID, test.accountUUID
+			a.credential = claudeCredential{token: tokenOf(a), deviceID: test.deviceID, accountUUID: test.accountUUID}
 			want := test.want
 			if want == "" {
 				want = test.body

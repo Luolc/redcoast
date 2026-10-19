@@ -109,9 +109,10 @@ func (t touchWriter) Write(p []byte) (int, error) {
 }
 
 // refusedBeforeBinding are the results of requests refused before a session was
-// recognised: forbidden on the reverse proxy, refused on the forward proxy, and
-// auth_failed, not_session and wrong_source on both. Anyone who can reach an entrypoint
-// can produce them, so their rows are limited per source address.
+// recognised: forbidden on the reverse proxy, refused by the provider's screen there
+// or by the forward proxy, and auth_failed, not_session and wrong_source on both.
+// Anyone who can reach an entrypoint can produce them, so their rows are limited per
+// source address.
 var refusedBeforeBinding = map[string]bool{"forbidden": true, "refused": true, "auth_failed": true, "not_session": true, "wrong_source": true}
 
 // Limits of refusalRows: rows per source address and window, and the number of

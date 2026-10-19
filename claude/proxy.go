@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -62,16 +63,20 @@ func (b *declaredLength) Read(p []byte) (int, error) {
 
 // newReverseProxy configures the standard library reverse proxy that does the actual
 // forwarding to target through transport, which dispatches by the request's account.
-// inspect sees every upstream response, including one that is then rejected.
-func newReverseProxy(target *url.URL, transport http.RoundTripper, inspect func(*http.Response) error) *httputil.ReverseProxy {
+// The client's path loses prefix, which target's path stands for. inspect sees every
+// upstream response, including one that is then rejected.
+func newReverseProxy(target *url.URL, prefix string, transport http.RoundTripper, inspect func(*http.Response) error) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(p *httputil.ProxyRequest) {
 			p.SetURL(target)
+			if prefix != "" {
+				// The allowlist matched the escaped path exactly, so it starts with prefix.
+				p.Out.URL.Path = target.Path + strings.TrimPrefix(p.In.URL.Path, prefix)
+				p.Out.URL.RawPath = ""
+			}
 			// Rewrite receives a cleaned query; retain the original query encoding.
 			p.Out.URL.RawQuery = p.In.URL.RawQuery
-			a := accountFrom(p.In.Context())
-			a.replaceClientAuthentication(p.Out.Header)
-			rewriteIdentity(p.Out, a)
+			accountFrom(p.In.Context()).credential.Authorize(p.Out)
 			// Transport may retry idempotent requests only when their body is replayable.
 			// Every forwarded request gets a non-replayable body, including empty ones.
 			if p.Out.Body == nil || p.Out.Body == http.NoBody {
@@ -94,6 +99,24 @@ func newReverseProxy(target *url.URL, transport http.RoundTripper, inspect func(
 			return rejectUpgrade(res)
 		},
 	}
+}
+
+// guarded runs a provider's Guard on every request before it leaves; a request the
+// guard refuses fails without reaching the upstream.
+type guarded struct {
+	next  http.RoundTripper
+	guard func(*http.Request) error
+}
+
+// RoundTrip sends r when the guard lets it pass.
+func (g guarded) RoundTrip(r *http.Request) (*http.Response, error) {
+	if err := g.guard(r); err != nil {
+		if r.Body != nil {
+			_ = r.Body.Close()
+		}
+		return nil, err
+	}
+	return g.next.RoundTrip(r)
 }
 
 // respondUpstreamUnavailable answers 502 when the upstream cannot be reached, times

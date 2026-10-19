@@ -29,7 +29,7 @@ func TestAccountConcurrency(t *testing.T) {
 	for _, concurrency := range []int{2, DefaultAccountConcurrency} {
 		t.Run(map[int]string{2: "two", DefaultAccountConcurrency: "default"}[concurrency], func(t *testing.T) {
 			h := newReloadHarness(t, onlyA)
-			set, err := LoadAccounts(t.Context(), h.dir, h.resolve, concurrency)
+			set, err := LoadAccounts(t.Context(), h.dir, Claude, h.resolve, concurrency)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -94,7 +94,7 @@ var indefinitePause = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 const credentialPause = time.Hour
 
 // allowedRequests are the only method and escaped path pairs the reverse proxy
-// forwards; anything else is answered 403 without reaching the upstream. Claude Code's
+// forwards for Claude; anything else is answered 403 without reaching the upstream. Claude Code's
 // LLM gateway protocol names /v1/messages and the optional count_tokens as the
 // endpoints behind ANTHROPIC_BASE_URL, plus a HEAD /api/hello at startup that may be
 // refused; the gateway's own Claude Code runs sent nothing else to the base URL. The
@@ -132,6 +132,7 @@ func requestLine(r *http.Request) string {
 type router struct {
 	store    *session.Store
 	accounts *Accounts
+	provider Provider
 	upstream *url.URL
 	port     int
 	proxy    *httputil.ReverseProxy
@@ -140,17 +141,20 @@ type router struct {
 	now      func() time.Time // the clock Retry-After and pauses are measured on; tests inject the store's
 }
 
-// newRouter returns the entrypoint in front of upstream. transport carries the
-// outgoing requests; it must end in accountTransport.
-func newRouter(store *session.Store, accounts *Accounts, upstream *url.URL, transport http.RoundTripper) *router {
-	rt := &router{store: store, accounts: accounts, upstream: upstream, port: 443, limits: DefaultLimits, now: time.Now}
+// newRouter returns the entrypoint in front of upstream for provider. transport carries
+// the outgoing requests; it must end in accountTransport.
+func newRouter(store *session.Store, accounts *Accounts, upstream *url.URL, provider Provider, transport http.RoundTripper) *router {
+	rt := &router{store: store, accounts: accounts, provider: provider, upstream: upstream, port: 443, limits: DefaultLimits, now: time.Now}
 	if port := upstream.Port(); port != "" {
 		// parseOrigin accepted the URL, so the port is numeric.
 		rt.port, _ = strconv.Atoi(port)
 	} else if upstream.Scheme == "http" {
 		rt.port = 80
 	}
-	rt.proxy = newReverseProxy(upstream, transport, rt.inspectUpstream)
+	if provider.Guard != nil {
+		transport = guarded{transport, provider.Guard}
+	}
+	rt.proxy = newReverseProxy(upstream, provider.Prefix, transport, rt.inspectUpstream)
 	return rt
 }
 
@@ -184,7 +188,14 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			panic(aborted)
 		}
 	}()
-	if !allowedRequests[line] {
+	if rt.provider.Screen != nil {
+		if status, message := rt.provider.Screen(r); status != 0 {
+			row.Result, row.Request = "refused", truncate(line, maxRequestLine)
+			http.Error(down, message, status)
+			return
+		}
+	}
+	if !rt.provider.Requests[line] {
 		row.Result, row.Request = "forbidden", truncate(line, maxRequestLine)
 		http.Error(down, "redcoast: request not allowed", http.StatusForbidden)
 		return
@@ -202,7 +213,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, session.ErrNotSessionCredential):
 		row.Result = "not_session"
-		http.Error(down, notSessionCredential, http.StatusUnauthorized)
+		http.Error(down, rt.provider.NotSession, http.StatusUnauthorized)
 		return
 	case errors.Is(err, session.ErrUnknownSession):
 		row.Result = "auth_failed"
@@ -304,13 +315,13 @@ func (rt *router) recordUpstream(res *http.Response, source string) []session.Re
 	a := accountFrom(ctx)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), captureWriteTimeout)
 	defer cancel()
-	readings := quotaReadings(res.Header, source)
+	readings := rt.provider.Readings(res.Header, source)
 	if err := rt.store.RecordQuota(ctx, a.alias, readings); err != nil {
 		log.Printf("quota record failed alias=%s", a.alias)
 	}
 	switch res.StatusCode {
 	case http.StatusUnauthorized:
-		if !tokenRefused(res) {
+		if !rt.provider.Refused(res) {
 			break
 		}
 		if err := rt.store.Pause(ctx, a.alias, rt.now().Add(credentialPause), "upstream_401"); err != nil {
