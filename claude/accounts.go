@@ -39,6 +39,8 @@ type accountInput struct {
 	ProxyUsername string
 	ProxyPassword string
 	ExpectedIP    netip.Addr // the exit IP the inventory expects
+	DeviceID      string     // put into upstream requests' metadata.user_id; may be empty
+	AccountUUID   string     // put into upstream requests' metadata.user_id; may be empty
 }
 
 // account is one inventory account with its own outbound side: the real token, the
@@ -51,6 +53,8 @@ type account struct {
 	proxyPassword string
 	exit          *url.URL        // http://host:port of the account's proxy, without credentials
 	expectedIP    netip.Addr      // the inventory's expected_egress_ip
+	deviceID      string          // the inventory's device_id, or ""
+	accountUUID   string          // the inventory's account_uuid, or ""
 	transport     *http.Transport // every connection goes through exit
 	slots         chan struct{}   // a buffered channel used as a semaphore
 }
@@ -106,7 +110,7 @@ func LoadAccounts(ctx context.Context, dir string, resolve Resolver, concurrency
 		if !complete {
 			continue
 		}
-		in.Email, in.ProxyURL, in.ExpectedIP = entry.email, entry.exit, entry.expectedIP
+		in.Email, in.ProxyURL, in.ExpectedIP, in.DeviceID, in.AccountUUID = entry.email, entry.exit, entry.expectedIP, entry.deviceID, entry.accountUUID
 		a, err := newAccount(entry.alias, in, concurrency)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %v", entry.alias, err))
@@ -142,7 +146,7 @@ func newAccount(alias string, in accountInput, concurrency int) (*account, error
 	if err != nil {
 		return nil, errors.New("proxy: " + err.Error())
 	}
-	a := &account{alias: alias, email: in.Email, token: in.Token, proxyUsername: in.ProxyUsername, proxyPassword: in.ProxyPassword, exit: exit, expectedIP: in.ExpectedIP}
+	a := &account{alias: alias, email: in.Email, token: in.Token, proxyUsername: in.ProxyUsername, proxyPassword: in.ProxyPassword, exit: exit, expectedIP: in.ExpectedIP, deviceID: in.DeviceID, accountUUID: in.AccountUUID}
 	a.transport = newTransport(concurrency)
 	authenticated := *exit
 	authenticated.User = url.UserPassword(in.ProxyUsername, in.ProxyPassword)
