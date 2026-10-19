@@ -48,7 +48,7 @@ func TestReadDirectHosts(t *testing.T) {
 			if test.list != "" {
 				files[directHostsFile] = test.list
 			}
-			set, err := LoadAccounts(t.Context(), writeInventory(t, files), (&reloadHarness{}).resolve, DefaultAccountConcurrency)
+			set, err := LoadAccounts(t.Context(), writeInventory(t, files), Claude, (&reloadHarness{}).resolve, DefaultAccountConcurrency)
 			if test.refused {
 				if err == nil || !strings.Contains(err.Error(), directHostsFile) {
 					t.Fatalf("list accepted or error does not name the file: %v", err)

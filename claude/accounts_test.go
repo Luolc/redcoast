@@ -101,7 +101,7 @@ func TestLoadAccounts(t *testing.T) {
 				}
 				return value, nil
 			}
-			accounts, err := LoadAccounts(t.Context(), writeInventory(t, test.files), resolve, DefaultAccountConcurrency)
+			accounts, err := LoadAccounts(t.Context(), writeInventory(t, test.files), Claude, resolve, DefaultAccountConcurrency)
 			if test.aliases == nil {
 				if err == nil {
 					t.Fatal("invalid inventory accepted")
@@ -159,7 +159,7 @@ func TestLoadAccountsCancellation(t *testing.T) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
-	if accounts, err := LoadAccounts(ctx, dir, resolve, DefaultAccountConcurrency); accounts != nil || err == nil || calls != 1 {
+	if accounts, err := LoadAccounts(ctx, dir, Claude, resolve, DefaultAccountConcurrency); accounts != nil || err == nil || calls != 1 {
 		t.Fatalf("got %v %v after %d calls, want a failure after the first stalled call", accounts, err, calls)
 	}
 }
@@ -170,7 +170,7 @@ func TestLoadAccountsCancellation(t *testing.T) {
 func TestAccountTokenInjection(t *testing.T) {
 	const requestBody = `{"messages":[{"role":"user","content":"Hi"}]}`
 	h := newHarness(t, "sample-a")
-	token := h.accounts.lookup("sample-a").token
+	token := tokenOf(h.accounts.lookup("sample-a"))
 	received := make(chan bool, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -290,7 +290,7 @@ func TestPartialTokenSavedCapture(t *testing.T) {
 			if err := os.Chmod(dir, 0700); err != nil {
 				t.Fatal(err)
 			}
-			entrypoint, err := NewHandler(target, dir, h.store, h.accounts, DefaultLimits)
+			entrypoint, err := NewHandler(target, Claude, dir, h.store, h.accounts, DefaultLimits)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -377,17 +377,17 @@ func TestKnownCredentialsSavedCapture(t *testing.T) {
 	a.proxyPassword = "Synthetic password" + strings.ToLower(rand.Text())
 	h.token, h.sessionID = h.issue()
 	escaped := url.PathEscape(a.proxyPassword)
-	requestBody := `{"model":"` + a.token + `","messages":[{"role":"user","content":"Hi"}]}`
+	requestBody := `{"model":"` + tokenOf(a) + `","messages":[{"role":"user","content":"Hi"}]}`
 	var decoded any
 	if err := json.Unmarshal([]byte(requestBody), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(fmtSafeJSON(safeValue("", decoded)), a.token) || len(safeHeaders(http.Header{escaped: {"x"}})[escaped]) != 1 {
+	if !strings.Contains(fmtSafeJSON(safeValue("", decoded)), tokenOf(a)) || len(safeHeaders(http.Header{escaped: {"x"}})[escaped]) != 1 {
 		t.Fatal("classifiers no longer keep the positions this test relies on")
 	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if _, err := io.WriteString(w, `{"model":"`+a.token+`","content":[{"type":"text","text":"Hi"}]}`); err != nil {
+		if _, err := io.WriteString(w, `{"model":"`+tokenOf(a)+`","content":[{"type":"text","text":"Hi"}]}`); err != nil {
 			return
 		}
 	}))
@@ -400,7 +400,7 @@ func TestKnownCredentialsSavedCapture(t *testing.T) {
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	entrypoint, err := NewHandler(target, dir, h.store, h.accounts, DefaultLimits)
+	entrypoint, err := NewHandler(target, Claude, dir, h.store, h.accounts, DefaultLimits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestKnownCredentialsSavedCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(artifact), a.token) || strings.Contains(string(artifact), escaped) ||
+	if strings.Contains(string(artifact), tokenOf(a)) || strings.Contains(string(artifact), escaped) ||
 		!strings.Contains(string(artifact), knownCredential) {
 		t.Fatal("saved record kept a known credential")
 	}
@@ -447,9 +447,9 @@ func TestKnownCredentialsSavedCapture(t *testing.T) {
 // record, for each of two accounts. Each arm first saves without the replacer to show
 // that the record carries the form, then saves with it.
 func TestKnownCredentialForms(t *testing.T) {
-	set := &AccountSet{byAlias: map[string]*account{}}
+	set := &AccountSet{byAlias: map[string]*account{}, provider: Claude}
 	for _, alias := range []string{"sample-a", "sample-b"} {
-		set.byAlias[alias] = &account{alias: alias, token: "sk-ant-oat01-synthetic-" + rand.Text(), proxyUsername: "customer-synthetic_" + rand.Text(), proxyPassword: "p@ss word<&" + rand.Text()}
+		set.byAlias[alias] = &account{alias: alias, credential: bearer("sk-ant-oat01-synthetic-" + rand.Text()), proxyUsername: "customer-synthetic_" + rand.Text(), proxyPassword: "p@ss word<&" + rand.Text()}
 	}
 	for _, a := range set.byAlias {
 		// secret is the part of form that must not reach the file.

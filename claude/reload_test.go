@@ -113,7 +113,7 @@ func newReloadHarness(t *testing.T, accounts map[string]string) *reloadHarness {
 		}
 	}
 	h.rewrite(accounts)
-	set, err := LoadAccounts(t.Context(), h.dir, h.resolve, DefaultAccountConcurrency)
+	set, err := LoadAccounts(t.Context(), h.dir, Claude, h.resolve, DefaultAccountConcurrency)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +577,7 @@ func TestReloadKeepsOldRedaction(t *testing.T) {
 				t.Fatal(err)
 			}
 			target, _ := url.Parse("http://127.0.0.1:1")
-			entry, err := NewHandler(target, captureDir, h.store, h.accounts, DefaultLimits)
+			entry, err := NewHandler(target, Claude, captureDir, h.store, h.accounts, DefaultLimits)
 			if err != nil {
 				t.Fatal(err)
 			}
