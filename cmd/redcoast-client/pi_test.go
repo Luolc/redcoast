@@ -15,9 +15,13 @@ import (
 
 // TestPiLaunch checks pi's environment and its models.json: the agent directory,
 // PI_OFFLINE, the openai-codex provider at the gateway with the credential named by
-// its variable, never written to a file, and the arguments unchanged.
+// its variable, never written to a file, no other provider's credential variable, and
+// the arguments unchanged.
 func TestPiLaunch(t *testing.T) {
 	store, l, out := launchClient(t, "pi", "-p", "Hi there")
+	for _, key := range piProviderVariables {
+		l.environ = append(l.environ, key+"=synthetic-value")
+	}
 	dir := filepath.Join(l.home, ".config", "pi")
 	writeFile(t, filepath.Join(dir, "models.json"), `{"providers": {"openai-codex": {"apiKey": "stale"}}}`)
 	if err := os.Chmod(dir, 0o700); err != nil {
@@ -30,6 +34,11 @@ func TestPiLaunch(t *testing.T) {
 	token := checkCommonEnvironment(t, env)
 	if env["PI_CODING_AGENT_DIR"] != dir || env["PI_OFFLINE"] != "1" {
 		t.Fatalf("PI_CODING_AGENT_DIR = %q, PI_OFFLINE = %q", env["PI_CODING_AGENT_DIR"], env["PI_OFFLINE"])
+	}
+	for _, key := range piProviderVariables {
+		if _, present := env[key]; present {
+			t.Errorf("%s reached pi", key)
+		}
 	}
 	if !slices.Equal(args, []string{"-p", "Hi there"}) {
 		t.Fatalf("pi got %q", args)
@@ -54,9 +63,9 @@ func TestPiLaunch(t *testing.T) {
 	}
 }
 
-// TestPiPreflight checks that a login pi would use or send instead of the session
-// credential, an auth.json pi cannot read as an object, and --api-key are refused
-// without showing a value, and that other logins and arguments are not.
+// TestPiPreflight checks that any login in auth.json, an auth.json pi cannot read as
+// an object, --api-key, and a --provider or --model for another provider are refused
+// without showing a credential, and that openai-codex and other arguments are not.
 func TestPiPreflight(t *testing.T) {
 	tests := []struct {
 		name string
@@ -66,10 +75,13 @@ func TestPiPreflight(t *testing.T) {
 	}{
 		{"no_auth_file", "", []string{"-p", "Hi"}, ""},
 		{"empty_auth_file", "{}", nil, ""},
-		{"other_login", `{"anthropic": {"type": "api_key", "key": "synthetic-value"}}`, nil, ""},
-		{"codex_login", `{"openai-codex": {"type": "oauth", "access": "synthetic-value"}}`, nil, "openai-codex login in HOME/.config/pi/auth.json"},
-		{"openai_login", `{"openai": {"type": "api_key", "key": "synthetic-value"}}`, nil, "openai login in HOME/.config/pi/auth.json"},
-		{"radius_login", `{"radius": {"type": "oauth", "access": "synthetic-value"}}`, nil, "radius login in HOME/.config/pi/auth.json"},
+		{"codex_login", `{"openai-codex": {"type": "oauth", "access": "synthetic-value"}}`, nil, `"openai-codex" login in HOME/.config/pi/auth.json`},
+		{"other_login", `{"anthropic": {"type": "api_key", "key": "synthetic-value"}}`, nil, `"anthropic" login in HOME/.config/pi/auth.json`},
+		{"pinned_provider", "", []string{"--provider", "openai-codex", "--model", "gpt-5.5", "-p", "Hi"}, ""},
+		{"pinned_model", "", []string{"--model=openai-codex/gpt-5.5"}, ""},
+		{"other_provider", "", []string{"--provider", "anthropic", "--model", "claude-x"}, "--provider for another provider than openai-codex on the command line"},
+		{"other_provider_attached", "", []string{"--provider=openai"}, "--provider for another provider than openai-codex"},
+		{"other_model", "", []string{"--model", "anthropic/claude-x"}, "--model for another provider than openai-codex on the command line"},
 		{"not_an_object", `["synthetic-value"]`, nil, "HOME/.config/pi/auth.json is not a JSON object"},
 		{"api_key", "", []string{"--api-key", "synthetic-value"}, "--api-key on the command line"},
 		{"api_key_attached", "", []string{"--api-key=synthetic-value"}, "--api-key on the command line"},
@@ -105,7 +117,7 @@ func TestPiRefusesLogin(t *testing.T) {
 	if status := l.run(context.Background()); status != exitLauncherFailure {
 		t.Fatalf("exit status %d, want %d", status, exitLauncherFailure)
 	}
-	if msg := stderrOf(t, l); !strings.Contains(msg, "refusing to start pi; the session credential would be overridden by:\n  - openai-codex login in ") {
+	if msg := stderrOf(t, l); !strings.Contains(msg, "refusing to start pi; the session credential would be overridden by:\n  - \"openai-codex\" login in ") {
 		t.Fatalf("stderr %q", msg)
 	}
 	if _, err := os.Stat(out + ".env"); !errors.Is(err, os.ErrNotExist) {
