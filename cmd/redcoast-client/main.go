@@ -1,20 +1,24 @@
-// redcoast-client starts claude through the gateway: it checks that nothing on this
-// machine would override the session credential, asks the gateway for a session, starts
-// claude with the gateway's environment variables and nothing else changed, forwards
-// termination signals, and revokes the session when claude exits.
+// redcoast-client starts claude, pi or codex through the gateway: it checks that nothing
+// on this machine would override the session credential, asks the gateway for a
+// session, starts the client with the gateway's settings and nothing else changed,
+// forwards termination signals, and revokes the session when the client exits.
 //
-// Usage is "redcoast-client claude [claude's arguments]": every argument after "claude"
-// is passed through unchanged. The launcher is configured by environment variables. On
-// the gateway's machine, REDCOAST_CLIENT_SOCKET (the gateway's session socket). On
-// another machine, REDCOAST_CLIENT_ADDRESS (the gateway's session address: host:port,
-// or https://host:port when the gateway serves TLS with a certificate the system
-// trusts) and REDCOAST_CLIENT_CREDENTIAL_FILE (the file holding this machine's
-// credential, mode 0600); the two modes exclude each other. Also
-// REDCOAST_CLIENT_CLAUDE (the claude executable, default: claude in PATH) and
+// Usage is "redcoast-client claude|pi|codex [the client's arguments]": every argument
+// after the client's name is passed through unchanged; pi and codex also get the
+// launcher's own settings (pi.go, codex.go). The launcher is configured by environment
+// variables. claude talks to the gateway's Claude process, pi and codex to its Codex
+// process; each process has its own session interface, named by variables with the
+// prefix REDCOAST_CLIENT_ for Claude and REDCOAST_CLIENT_CODEX_ for Codex. On the
+// gateway's machine, <prefix>SOCKET (the process's session socket). On another
+// machine, <prefix>ADDRESS (the process's session address: host:port, or
+// https://host:port when the gateway serves TLS with a certificate the system trusts)
+// and <prefix>CREDENTIAL_FILE (the file holding this machine's credential, mode 0600);
+// the two modes exclude each other. Also REDCOAST_CLIENT_CLAUDE, REDCOAST_CLIENT_PI and
+// REDCOAST_CLIENT_CODEX (the client's executable, default: its name in PATH) and
 // REDCOAST_CLIENT_MACHINE (the client machine name reported over the socket, default:
 // the host name; over the network the gateway knows the machine by its credential).
-// Exit status is claude's; a failure before claude starts, a wrong command line
-// included, exits with 3.
+// Exit status is the client's; a failure before the client starts, a wrong command
+// line included, exits with 3.
 package main
 
 import (
@@ -36,22 +40,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// exitLauncherFailure is the exit status for failures before claude starts; claude's
-// own statuses are passed through unchanged.
+// exitLauncherFailure is the exit status for failures before the client starts; the
+// client's own statuses are passed through unchanged.
 const exitLauncherFailure = 3
 
-// termGrace is how long claude gets after a forwarded SIGTERM before its process group
-// is killed. Tests shorten it.
+// termGrace is how long the client gets after a forwarded SIGTERM before its process
+// group is killed. Tests shorten it.
 var termGrace = 15 * time.Second
 
-// descendantGrace is how long claude's remaining descendants get after claude itself
-// has exited before they are killed.
+// descendantGrace is how long the client's remaining descendants get after the client
+// itself has exited before they are killed.
 const descendantGrace = 2 * time.Second
 
 // reapWait bounds the wait for killed descendants to disappear.
 const reapWait = 2 * time.Second
 
-// revokeTimeout bounds the revocation after claude exits.
+// revokeTimeout bounds the revocation after the client exits.
 const revokeTimeout = 5 * time.Second
 
 // launcher is one run's configuration.
@@ -59,7 +63,8 @@ type launcher struct {
 	socket     string
 	address    string // the gateway's session address, in the network mode
 	credential string // this machine's credential, in the network mode
-	claude     string // resolved path of the claude executable
+	client     *client
+	executable string // resolved path of the client's executable
 	machine    string
 	stdin      io.Reader
 	stdout     io.Writer
@@ -69,29 +74,51 @@ type launcher struct {
 	cwd        string
 	home       string
 	args       []string
-	launched   func(int) // called with claude's PID once it runs; tests use it
+	launched   func(int) // called with the client's PID once it runs; tests use it
 }
 
-// usage is printed when the command line does not start with "claude".
-const usage = "usage: redcoast-client claude [claude's arguments]"
+// client is what the launcher does differently for each program it starts.
+type client struct {
+	name string
+	// sessionPrefix starts the names of the variables that locate the session interface
+	// of the gateway process serving this client.
+	sessionPrefix string
+	// preflight returns everything that would override the session credential, and each
+	// setting that conflicts with one the launcher makes.
+	preflight func(environ []string, cwd, home string, args []string) (overrides, conflicts []string)
+	// prepare returns the client's environment and arguments for the session, after
+	// writing whatever files they refer to.
+	prepare func(l *launcher, grant session.Grant) (env, args []string, err error)
+}
 
-// claudeArgs returns the arguments to pass to claude, the ones after "claude".
-func claudeArgs(arguments []string) ([]string, bool) {
-	if len(arguments) == 0 || arguments[0] != "claude" {
-		return nil, false
+// clients are the programs the launcher starts, by the name on its command line.
+var clients = map[string]*client{
+	"claude": {name: "claude", sessionPrefix: "REDCOAST_CLIENT_", preflight: preflight, prepare: prepareClaude},
+	"pi":     {name: "pi", sessionPrefix: "REDCOAST_CLIENT_CODEX_", preflight: piPreflight, prepare: preparePi},
+	"codex":  {name: "codex", sessionPrefix: "REDCOAST_CLIENT_CODEX_", preflight: codexPreflight, prepare: prepareCodex},
+}
+
+// usage is printed when the command line does not start with a client's name.
+const usage = "usage: redcoast-client claude|pi|codex [the client's arguments]"
+
+// commandLine returns the client the command line names and the arguments after its
+// name.
+func commandLine(arguments []string) (*client, []string, bool) {
+	if len(arguments) == 0 || clients[arguments[0]] == nil {
+		return nil, nil, false
 	}
-	return arguments[1:], true
+	return clients[arguments[0]], arguments[1:], true
 }
 
 func main() {
-	args, ok := claudeArgs(os.Args[1:])
+	c, args, ok := commandLine(os.Args[1:])
 	if !ok {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(exitLauncherFailure)
 	}
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	// claude's process group becomes the terminal's foreground group, which leaves the
+	// The client's process group becomes the terminal's foreground group, which leaves the
 	// launcher in the background: it still writes its messages to the terminal and
 	// must not be stopped for that.
 	signal.Ignore(syscall.SIGTTOU, syscall.SIGTTIN)
@@ -101,7 +128,7 @@ func main() {
 		os.Exit(exitLauncherFailure)
 	}
 	home, _ := os.UserHomeDir()
-	l := &launcher{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, signals: signals, environ: os.Environ(), cwd: cwd, home: home, args: args}
+	l := &launcher{client: c, stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, signals: signals, environ: os.Environ(), cwd: cwd, home: home, args: args}
 	os.Exit(l.run(context.Background()))
 }
 
@@ -117,15 +144,15 @@ func (l *launcher) run(ctx context.Context) int {
 		l.report("redcoast-client: %v\n", err)
 		return exitLauncherFailure
 	}
-	if overrides, conflicts := preflight(l.environ, l.cwd, l.home, l.args); len(overrides)+len(conflicts) != 0 {
+	if overrides, conflicts := l.client.preflight(l.environ, l.cwd, l.home, l.args); len(overrides)+len(conflicts) != 0 {
 		if len(overrides) != 0 {
-			l.report("redcoast-client: refusing to start claude; the session credential would be overridden by:\n")
+			l.report("redcoast-client: refusing to start %s; the session credential would be overridden by:\n", l.client.name)
 			for _, problem := range overrides {
 				l.report("  - %s\n", problem)
 			}
 		}
 		if len(conflicts) != 0 {
-			l.report("redcoast-client: refusing to start claude; settings set a launcher toggle to another value:\n")
+			l.report("redcoast-client: refusing to start %s; settings set a launcher toggle to another value:\n", l.client.name)
 			for _, problem := range conflicts {
 				l.report("  - %s\n", problem)
 			}
@@ -154,18 +181,19 @@ func (l *launcher) run(ctx context.Context) int {
 	return status
 }
 
-// configure reads the launcher's own variables and resolves the claude executable.
+// configure reads the launcher's own variables and resolves the client's executable.
 func (l *launcher) configure() error {
 	env := environment(l.environ)
-	l.socket, l.address = env["REDCOAST_CLIENT_SOCKET"], env["REDCOAST_CLIENT_ADDRESS"]
-	credentialFile := env["REDCOAST_CLIENT_CREDENTIAL_FILE"]
+	socketVar, addressVar, credentialVar := l.client.sessionPrefix+"SOCKET", l.client.sessionPrefix+"ADDRESS", l.client.sessionPrefix+"CREDENTIAL_FILE"
+	l.socket, l.address = env[socketVar], env[addressVar]
+	credentialFile := env[credentialVar]
 	switch {
 	case l.socket == "" && l.address == "":
-		return errors.New("neither REDCOAST_CLIENT_SOCKET nor REDCOAST_CLIENT_ADDRESS is set")
+		return fmt.Errorf("neither %s nor %s is set", socketVar, addressVar)
 	case l.socket != "" && (l.address != "" || credentialFile != ""):
-		return errors.New("REDCOAST_CLIENT_SOCKET excludes REDCOAST_CLIENT_ADDRESS and REDCOAST_CLIENT_CREDENTIAL_FILE")
+		return fmt.Errorf("%s excludes %s and %s", socketVar, addressVar, credentialVar)
 	case l.address != "" && credentialFile == "":
-		return errors.New("REDCOAST_CLIENT_ADDRESS needs REDCOAST_CLIENT_CREDENTIAL_FILE")
+		return fmt.Errorf("%s needs %s", addressVar, credentialVar)
 	case l.address != "":
 		credential, err := readCredential(credentialFile)
 		if err != nil {
@@ -181,18 +209,19 @@ func (l *launcher) configure() error {
 		}
 		l.machine = host
 	}
-	claude := env["REDCOAST_CLIENT_CLAUDE"]
-	if claude == "" {
-		claude = "claude"
+	executableVar := "REDCOAST_CLIENT_" + strings.ToUpper(l.client.name)
+	executable := env[executableVar]
+	if executable == "" {
+		executable = l.client.name
 	}
-	path, err := exec.LookPath(claude)
+	path, err := exec.LookPath(executable)
 	if err != nil {
-		return fmt.Errorf("claude executable: %v", err)
+		return fmt.Errorf("%s executable: %v", l.client.name, err)
 	}
 	if self, err := os.Executable(); err == nil && sameFile(self, path) {
-		return errors.New("REDCOAST_CLIENT_CLAUDE resolves to redcoast-client itself")
+		return fmt.Errorf("%s resolves to redcoast-client itself", executableVar)
 	}
-	l.claude = path
+	l.executable = path
 	return nil
 }
 
@@ -240,21 +269,27 @@ func (l *launcher) launchMeta() json.RawMessage {
 	return data
 }
 
-// start runs claude with the session's environment until it exits and returns its
-// exit status. claude runs in its own process group, which is the terminal's
+// start runs the client with the session's environment until it exits and returns its
+// exit status. The client runs in its own process group, which is the terminal's
 // foreground group when stdin is a terminal, so that the terminal's signals reach
-// claude and not the launcher. The launcher adopts orphaned descendants (on Linux),
-// so claude's whole tree stays visible, and reaps them as they exit. Signals the launcher receives go to the whole
-// tree; after a SIGTERM the tree is killed when termGrace passes. When claude has
+// the client and not the launcher. The launcher adopts orphaned descendants (on Linux),
+// so the client's whole tree stays visible, and reaps them as they exit. Signals the launcher receives go to the whole
+// tree; after a SIGTERM the tree is killed when termGrace passes. When the client has
 // exited, whatever it left behind gets descendantGrace after a SIGTERM and is then
-// killed, so nothing claude started outlives the launcher.
+// killed, so nothing the client started outlives the launcher.
 func (l *launcher) start(ctx context.Context, grant session.Grant) int {
-	if err := adoptOrphans(); err != nil {
-		l.report("redcoast-client: cannot adopt claude's orphans: %v\n", err)
+	name := l.client.name
+	env, args, err := l.client.prepare(l, grant)
+	if err != nil {
+		l.report("redcoast-client: cannot prepare %s: %v\n", name, err)
 		return exitLauncherFailure
 	}
-	cmd := exec.CommandContext(ctx, l.claude, l.args...)
-	cmd.Env = childEnvironment(l.environ, grant)
+	if err := adoptOrphans(); err != nil {
+		l.report("redcoast-client: cannot adopt %s's orphans: %v\n", name, err)
+		return exitLauncherFailure
+	}
+	cmd := exec.CommandContext(ctx, l.executable, args...)
+	cmd.Env = env
 	cmd.Dir = l.cwd
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = l.stdin, l.stdout, l.stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -268,7 +303,7 @@ func (l *launcher) start(ctx context.Context, grant session.Grant) int {
 	signal.Notify(children, syscall.SIGCHLD)
 	defer signal.Stop(children)
 	if err := cmd.Start(); err != nil {
-		l.report("redcoast-client: cannot start claude: %v\n", err)
+		l.report("redcoast-client: cannot start %s: %v\n", name, err)
 		return exitLauncherFailure
 	}
 	tree := processTree{group: cmd.Process.Pid} // Setpgid without Pgid makes the child's PID its group ID
@@ -297,7 +332,7 @@ func (l *launcher) start(ctx context.Context, grant session.Grant) int {
 	}
 }
 
-// processTree is claude's process group plus every descendant of the launcher that
+// processTree is the client's process group plus every descendant of the launcher that
 // left the group (claude's Bash tool detaches its commands into new sessions).
 type processTree struct {
 	group int
@@ -321,7 +356,7 @@ func (t processTree) alive() bool {
 	return syscall.Kill(-t.group, 0) == nil || len(descendants()) != 0
 }
 
-// reap ends whatever is left in the tree after claude exited: SIGTERM,
+// reap ends whatever is left in the tree after the client exited: SIGTERM,
 // descendantGrace, then SIGKILL, and waits briefly for the killed to disappear.
 func (t processTree) reap() {
 	if !t.alive() {
@@ -385,7 +420,7 @@ var toggles = []struct{ key, value string }{
 	{"DISABLE_AUTOUPDATER", "1"},
 }
 
-// clearedProxyVariables are removed from claude's environment: a proxy variable that
+// clearedProxyVariables are removed from the client's environment: a proxy variable that
 // outranks or duplicates HTTPS_PROXY would send traffic past the gateway's forward
 // proxy. The lower-case forms of HTTPS_PROXY and NO_PROXY are set to the same values
 // for programs that read only those.
@@ -394,15 +429,33 @@ var clearedProxyVariables = []string{"ALL_PROXY", "all_proxy", "HTTP_PROXY", "ht
 // childEnvironment returns claude's environment: the parent's, minus the proxy
 // variables, plus the gateway's variables for this session and the toggles.
 func childEnvironment(parent []string, grant session.Grant) []string {
+	set := []string{"ANTHROPIC_BASE_URL=" + grant.ReverseProxy, "CLAUDE_CODE_OAUTH_TOKEN=" + grant.Token}
+	for _, toggle := range toggles {
+		set = append(set, toggle.key+"="+toggle.value)
+	}
+	noProxy := ""
+	if reverse, err := url.Parse(grant.ReverseProxy); err == nil {
+		noProxy = reverse.Hostname()
+	}
+	return proxiedEnvironment(parent, grant, noProxy, set)
+}
+
+// prepareClaude starts claude with childEnvironment and the arguments unchanged.
+func prepareClaude(l *launcher, grant session.Grant) ([]string, []string, error) {
+	return childEnvironment(l.environ, grant), l.args, nil
+}
+
+// proxiedEnvironment returns the parent's environment minus every proxy variable and
+// every variable set assigns, then the forward proxy with the session credential,
+// noProxy, and set.
+func proxiedEnvironment(parent []string, grant session.Grant, noProxy string, set []string) []string {
 	drop := make(map[string]bool)
 	for _, key := range clearedProxyVariables {
 		drop[key] = true
 	}
-	for _, key := range gatewayVariables {
+	for _, entry := range set {
+		key, _, _ := strings.Cut(entry, "=")
 		drop[key] = true
-	}
-	for _, toggle := range toggles {
-		drop[toggle.key] = true
 	}
 	var env []string
 	for _, entry := range parent {
@@ -411,29 +464,14 @@ func childEnvironment(parent []string, grant session.Grant) []string {
 			env = append(env, entry)
 		}
 	}
-	reverse, err := url.Parse(grant.ReverseProxy)
-	noProxy := ""
-	if err == nil {
-		noProxy = reverse.Hostname()
-	}
 	// The forward proxy speaks TLS exactly when the reverse proxy does.
 	scheme := "http"
-	if err == nil && reverse.Scheme == "https" {
+	if reverse, err := url.Parse(grant.ReverseProxy); err == nil && reverse.Scheme == "https" {
 		scheme = "https"
 	}
 	proxy := scheme + "://session:" + grant.Token + "@" + grant.ForwardProxy
-	env = append(env,
-		"ANTHROPIC_BASE_URL="+grant.ReverseProxy,
-		"CLAUDE_CODE_OAUTH_TOKEN="+grant.Token,
-		"HTTPS_PROXY="+proxy,
-		"https_proxy="+proxy,
-		"NO_PROXY="+noProxy,
-		"no_proxy="+noProxy,
-	)
-	for _, toggle := range toggles {
-		env = append(env, toggle.key+"="+toggle.value)
-	}
-	return env
+	env = append(env, "HTTPS_PROXY="+proxy, "https_proxy="+proxy, "NO_PROXY="+noProxy, "no_proxy="+noProxy)
+	return append(env, set...)
 }
 
 // environment turns KEY=value entries into a map.
