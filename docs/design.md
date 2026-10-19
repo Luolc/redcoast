@@ -112,8 +112,8 @@ Codex (planned; none is built or tested yet, and each implementation PR links it
 33. A Codex token is sent only to `https://auth.openai.com` (refresh) and `https://chatgpt.com/backend-api/codex` (inference), or to a loopback origin in tests. Planned; untested.
 34. The Codex reverse proxy forwards only `POST /backend-api/codex/responses`; anything else gets 403, except a WebSocket upgrade (invariant 35). Planned; untested.
 35. A WebSocket upgrade request to the Codex reverse proxy gets 426 and nothing goes upstream. Planned; untested.
-36. A session credential works only at the process that issued it: a Claude session credential at the Codex process gets 401, a Codex one at the Claude process gets 401, and nothing goes upstream. Planned; untested.
-37. In a forwarded Codex request, the installation ID in the `x-codex-turn-metadata` header and in the two places of the body's `client_metadata` is rewritten, at the same length, to the serving account's `installation_id` from the inventory. Planned; untested.
+36. A session credential works only at the process that issued it: at the other provider's process inference gets 401 and CONNECT 407, and nothing goes upstream. Planned; untested.
+37. In a forwarded request that carries an installation ID (the Codex CLI's do, Pi's do not), the installation ID in the `x-codex-turn-metadata` header and in the two places of the body's `client_metadata` is rewritten, at the same length, to the serving account's `installation_id` from the inventory. Planned; untested.
 38. The Codex forward proxy refuses CONNECT to `chatgpt.com`, `auth.openai.com` and `o33249.ingest.us.sentry.io` (exact names) without dialing any exit, using the deny list it shares with the Claude forward proxy. Planned; untested.
 
 ## 4. Interfaces
