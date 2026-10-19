@@ -50,3 +50,56 @@ The session arms read the gateway's database (`sessions` table) read-only with t
 ## Not covered
 
 A real Tailscale link and ACLs; a real `claude` on the client (the fake one sends one inference and one CONNECT); several machines asking for sessions at once.
+
+# Codex gateway rehearsal with the real Pi and Codex CLI
+
+`codex.py` runs `redcoast codex serve` and `redcoast claude serve` in two containers that share one network namespace, with a fake upstream and fake exits (`codex_fake.py`) behind both, and a client container that runs Pi 1.2.0 and Codex CLI 0.159.3 through `redcoast-client pi` and `redcoast-client codex`. The script downloads both clients from the npm registry at those versions and checks each tarball against the SHA-256 it pins before anything runs; Pi runs on Node (`node:24-slim`), the Codex CLI is its static binary. Everything else is synthetic: the two inventories, the ChatGPT login (a made-up JWT with an email and a `chatgpt_account_id`, in an `auth.json` of mode 0600), the Claude token, the proxy credentials, the session key and the machine credential, all handed to the gateways' stdin test entry. Nothing reaches chatgpt.com, api.anthropic.com, 1Password or Tailscale: the containers share one Docker network created with `--internal`, which has no route out.
+
+The fake upstream answers `POST …/responses` with a short SSE stream that carries `x-codex-primary-*` quota headers and no `Content-Type`, as the ChatGPT backend does, and `POST /v1/messages` with a Claude message. It records each request and each CONNECT at the exits as one JSON line; credentials only as their SHA-256.
+
+## Running
+
+Needs Docker, Go, network access to registry.npmjs.org and Python 3.12 or later (standard library only). From the directory that holds `go.mod`:
+
+```sh
+out=$(mktemp -d)
+CGO_ENABLED=0 go build -o "$out/redcoast" ./cmd/redcoast
+CGO_ENABLED=0 go build -o "$out/redcoast-client" ./cmd/redcoast-client
+python3 e2e/codex.py --gateway-binary "$out/redcoast" --launcher-binary "$out/redcoast-client"
+```
+
+Output, exit status, `--out`, `--keep` and `--subnet` (default `172.30.78.0/24`) work as for `xmachine.py`. `--pi-tarball` and `--codex-tarball` take tarballs fetched earlier instead of the network; their SHA-256 is checked all the same. CI runs the same command.
+
+## Arms
+
+Pi and Codex CLI through the gateway. Each client first runs straight against the fake upstream with a made-up bearer, which shows what the client itself sends; then through the launcher.
+
+1. `pi_direct_control`: Pi with a `models.json` that points `openai-codex` at the fake upstream: exit 0, prints the fake reply, and the upstream sees the bearer's own `chatgpt-account-id`.
+2. `pi_through_gateway`: `redcoast-client pi --provider openai-codex --model gpt-5.5 --no-session -p Hi`: exit 0, prints the fake reply, and every inference reaches the upstream through the account's exit with the account's access token and account ID.
+3. `codex_direct_control`: Codex CLI with a provider at the fake upstream and a `CODEX_HOME` whose `installation_id` is the client's: the upstream sees the client's installation ID in the turn metadata header and in both places of the body's `client_metadata`.
+4. `codex_through_gateway`: `redcoast-client codex exec … Hi` with the same client installation ID: exit 0, prints the fake reply, the account's token and account ID upstream.
+5. `codex_installation_id_rewritten`: in those requests all three places hold the inventory's `installation_id`, while the client's `CODEX_HOME` still holds its own.
+6. `codex_quota_read_without_content_type`: `redcoast codex status` shows the 5-hour utilization the upstream sent (0.12).
+
+A session credential of one gateway at the other. Two stand-ins (`codex_probe.mjs`), started by `redcoast-client claude` and `redcoast-client codex`, hold one session each; the probes run from the same client address, since a session credential only counts from the address it was issued to. Each probe sends one inference to the reverse proxy and one CONNECT to the forward proxy, and the arm counts what reached the fake upstream and exits meanwhile.
+
+7. `claude_credential_at_codex`: 401 and 407; nothing reaches the upstream or an exit.
+8. `codex_credential_at_claude`: 401 and 407; nothing reaches the upstream or an exit.
+9. `codex_credential_at_codex_control`: 200 and 200; one request and one CONNECT arrive.
+10. `claude_credential_at_claude_control`: 200 and 200; one request and one CONNECT arrive.
+
+Arms 7 and 8 pass while either of two protections holds: each process keeps its own session store, and the Codex process takes only JWTs signed with its own key. They do not tell the two apart.
+
+Hygiene.
+
+11. `network_has_no_way_out`: `docker network inspect` reports the run's network as internal, and the client container cannot resolve `registry.npmjs.org`.
+12. `upstream_saw_only_account_credentials`: every request the upstream received carried the Codex account's token, the Claude account's token or the direct arms' made-up bearer; never a session credential, and never an `x-api-key`.
+13. `no_credential_in_codex_gateway_log`, `no_credential_in_claude_gateway_log`: no token, key, password or credential of the run appears in either log, which counts as read only when it holds the gateway's startup line for its account.
+
+The script's own guards are those of `xmachine.py`: no secret value goes into a Docker command line (the session credentials stay in the client container and reach the probes on stdin), and a SIGTERM runs the cleanup.
+
+## Not covered
+
+Importing and renewing a login; the gateway's 426 to a WebSocket upgrade; tool calls; a real Tailscale link.
+
+The unit tests of both scripts: `cd e2e && uv run --no-project --python 3.14 --with pytest==9.1.1 python -m pytest -q tests`.
