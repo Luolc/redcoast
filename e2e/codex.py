@@ -473,8 +473,9 @@ class Run:
       RuntimeError: When a gateway does not come up in time.
     """
     self.sh(
-      ["docker", "network", "create", "--label", self.label, "--subnet",
-       self.subnet, self.name],
+      # Internal: no container of the run can reach anything outside it.
+      ["docker", "network", "create", "--internal", "--label", self.label,
+       "--subnet", self.subnet, self.name],
       "create network",
     )  # fmt: skip
     uid = os.getuid()
@@ -870,7 +871,22 @@ class Run:
       )  # fmt: skip
 
   def hygiene_arms(self) -> None:
-    """Check what the upstream saw as credentials and what the logs hold."""
+    """Check the network, what the upstream saw and what the logs hold."""
+    internal = self.sh(
+      ["docker", "network", "inspect", "--format", "{{.Internal}}", self.name],
+      "inspect network",
+    )
+    lookup = self.client_exec(
+      ["node", "-e", "require('dns').lookup('registry.npmjs.org',"
+       " (e) => console.log(e ? 'unresolved' : 'resolved'))"],
+      "resolve an outside name",
+    )  # fmt: skip
+    self.record(
+      "network_has_no_way_out",
+      {"internal": "true", "outside_name": "unresolved"},
+      {"internal": internal.stdout.strip(),
+       "outside_name": lookup.stdout.strip()},
+    )  # fmt: skip
     allowed = {
       hashlib.sha256(f"Bearer {token}".encode()).hexdigest()
       for token in [self.access_token, self.claude_token, self.direct_token]

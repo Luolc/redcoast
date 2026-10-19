@@ -53,7 +53,7 @@ A real Tailscale link and ACLs; a real `claude` on the client (the fake one send
 
 # Codex gateway rehearsal with the real Pi and Codex CLI
 
-`codex.py` runs `redcoast codex serve` and `redcoast claude serve` in two containers that share one network namespace, with a fake upstream and fake exits (`codex_fake.py`) behind both, and a client container that runs Pi 1.2.0 and Codex CLI 0.159.3 through `redcoast-client pi` and `redcoast-client codex`. The script downloads both clients from the npm registry at those versions and checks each tarball against the SHA-256 it pins before anything runs; Pi runs on Node (`node:24-slim`), the Codex CLI is its static binary. Everything else is synthetic: the two inventories, the ChatGPT login (a made-up JWT with an email and a `chatgpt_account_id`, in an `auth.json` of mode 0600), the Claude token, the proxy credentials, the session key and the machine credential, all handed to the gateways' stdin test entry. Nothing reaches chatgpt.com, api.anthropic.com, 1Password or Tailscale.
+`codex.py` runs `redcoast codex serve` and `redcoast claude serve` in two containers that share one network namespace, with a fake upstream and fake exits (`codex_fake.py`) behind both, and a client container that runs Pi 1.2.0 and Codex CLI 0.159.3 through `redcoast-client pi` and `redcoast-client codex`. The script downloads both clients from the npm registry at those versions and checks each tarball against the SHA-256 it pins before anything runs; Pi runs on Node (`node:24-slim`), the Codex CLI is its static binary. Everything else is synthetic: the two inventories, the ChatGPT login (a made-up JWT with an email and a `chatgpt_account_id`, in an `auth.json` of mode 0600), the Claude token, the proxy credentials, the session key and the machine credential, all handed to the gateways' stdin test entry. Nothing reaches chatgpt.com, api.anthropic.com, 1Password or Tailscale: the containers share one Docker network created with `--internal`, which has no route out.
 
 The fake upstream answers `POST …/responses` with a short SSE stream that carries `x-codex-primary-*` quota headers and no `Content-Type`, as the ChatGPT backend does, and `POST /v1/messages` with a Claude message. It records each request and each CONNECT at the exits as one JSON line; credentials only as their SHA-256.
 
@@ -88,10 +88,13 @@ A session credential of one gateway at the other. Two stand-ins (`codex_probe.mj
 9. `codex_credential_at_codex_control`: 200 and 200; one request and one CONNECT arrive.
 10. `claude_credential_at_claude_control`: 200 and 200; one request and one CONNECT arrive.
 
+Arms 7 and 8 pass while either of two protections holds: each process keeps its own session store, and the Codex process takes only JWTs signed with its own key. They do not tell the two apart.
+
 Hygiene.
 
-11. `upstream_saw_only_account_credentials`: every request the upstream received carried the Codex account's token, the Claude account's token or the direct arms' made-up bearer; never a session credential, and never an `x-api-key`.
-12. `no_credential_in_codex_gateway_log`, `no_credential_in_claude_gateway_log`: no token, key, password or credential of the run appears in either log, which counts as read only when it holds the gateway's startup line for its account.
+11. `network_has_no_way_out`: `docker network inspect` reports the run's network as internal, and the client container cannot resolve `registry.npmjs.org`.
+12. `upstream_saw_only_account_credentials`: every request the upstream received carried the Codex account's token, the Claude account's token or the direct arms' made-up bearer; never a session credential, and never an `x-api-key`.
+13. `no_credential_in_codex_gateway_log`, `no_credential_in_claude_gateway_log`: no token, key, password or credential of the run appears in either log, which counts as read only when it holds the gateway's startup line for its account.
 
 The script's own guards are those of `xmachine.py`: no secret value goes into a Docker command line (the session credentials stay in the client container and reach the probes on stdin), and a SIGTERM runs the cleanup.
 

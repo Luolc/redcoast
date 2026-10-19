@@ -2,11 +2,11 @@
 // The stand-in client of the Codex rehearsal's cross-provider arms, run in the client
 // container (node, no curl or python). Started by redcoast-client in place of claude or
 // codex, with PROBE_HOLD set to claude or codex, it writes the session credential it was
-// given to /client/out/<PROBE_HOLD>.token and holds the session until /client/stop
-// appears. As "codex_probe.mjs probe <base URL> <path> <proxy host:port>" it reads a
+// given to /client/out/<PROBE_HOLD>.token and holds the session until the container is
+// removed. As "codex_probe.mjs probe <base URL> <path> <proxy host:port>" it reads a
 // credential on stdin, so that it is in no command line, sends one inference to the
 // reverse proxy and one CONNECT to the forward proxy with it, and prints both statuses.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 
@@ -62,7 +62,5 @@ if (process.argv[2] === "probe") {
   const name = process.env.PROBE_HOLD;
   mkdirSync("/client/out", { recursive: true });
   writeFileSync(`/client/out/${name}.token`, process.env[holdVariables[name]] ?? "", { mode: 0o600 });
-  while (!existsSync("/client/stop")) {
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
+  setInterval(() => {}, 60000);
 }
