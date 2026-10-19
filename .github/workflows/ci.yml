@@ -5,7 +5,8 @@
 # its group need not run (see L7 in AGENTS.md). `e2e` and `govulncheck`
 # also run only when their paths changed; `check` does not need them. No
 # step uses a credential: the rehearsals run on made-up accounts, a fake
-# upstream and a fake exit; only the hi rehearsal runs the real Claude CLI.
+# upstream and a fake exit; the hi rehearsal runs the real Claude CLI, and
+# the Codex rehearsal the real Pi and Codex CLI.
 
 name: CI
 
@@ -212,6 +213,15 @@ jobs:
           --gateway-binary "$RUNNER_TEMP/bin/redcoast"
           --launcher-binary "$RUNNER_TEMP/bin/redcoast-client"
           --out "$RUNNER_TEMP/xmachine"
+
+      # Pi and the Codex CLI at pinned versions through the Codex gateway, and
+      # each gateway's session credential at the other; see e2e/README.md.
+      - name: Codex rehearsal (real Pi and Codex CLI)
+        run: >-
+          python3 e2e/codex.py
+          --gateway-binary "$RUNNER_TEMP/bin/redcoast"
+          --launcher-binary "$RUNNER_TEMP/bin/redcoast-client"
+          --out "$RUNNER_TEMP/codex"
 
       - uses: astral-sh/setup-uv@v6
 
