@@ -86,7 +86,7 @@ If the launcher itself is killed with SIGKILL, its session stays live, and keeps
 
 ## Pi and Codex CLI
 
-Each client gets a configuration directory of its own, which must hold no login: `~/.config/pi` as Pi's `PI_CODING_AGENT_DIR`, `~/.config/codex` as Codex CLI's `CODEX_HOME`. The launcher creates the directory with mode 0700 and refuses (exit 3) one that others can enter, since Codex CLI writes its environment, the session credential included, into shell snapshots there. Your own `~/.pi/agent` and `~/.codex` are not used; copy any settings or skills you want into the new directory.
+Each client gets a configuration directory of its own, which must hold no login: `~/.config/pi` as Pi's `PI_CODING_AGENT_DIR`, `~/.config/codex` as Codex CLI's `CODEX_HOME`. The launcher creates the directory with mode 0700 and refuses (exit 3) one that others can enter. Your own `~/.pi/agent` and `~/.codex` are not used; copy any settings or skills you want into the new directory.
 
 Both get the session credential in `CODEX_GATEWAY_TOKEN`, `HTTPS_PROXY` set to the gateway's forward proxy with the session credential, and `NO_PROXY` for the gateway's host, `127.0.0.1` and `localhost`. Every other proxy variable is removed.
 
@@ -102,10 +102,10 @@ codex --no-daemon \
   -c 'model_providers.gateway.wire_api="responses"' \
   -c 'model_providers.gateway.env_key="CODEX_GATEWAY_TOKEN"' \
   -c 'model_providers.gateway.supports_websockets=false' \
-  -c features.plugins=false -c analytics.enabled=false -c 'otel.metrics_exporter="none"' \
+  -c features.plugins=false -c features.shell_snapshot=false -c analytics.enabled=false -c 'otel.metrics_exporter="none"' \
   -c check_for_update_on_startup=false -c feedback.enabled=false \
   -c 'cli_auth_credentials_store="file"' \
   [your arguments]
 ```
 
-`-c` outranks `config.toml` and a trusted project's `.codex/config.toml`, so neither can turn these back on. Your own `-c` or `--enable` for one of the last six may set it only to the launcher's value; any other value exits 3. `--no-daemon` keeps a shared background server from outliving the session with its credential; `codex agents`, which needs that server, does not run through the launcher.
+`-c` outranks `config.toml` and a trusted project's `.codex/config.toml`, so neither can turn these back on. Your own `-c` or `--enable` for one of the last seven may set it only to the launcher's value; any other value exits 3. `features.shell_snapshot=false` keeps Codex CLI from writing its environment, the session credential included, into the directory. `--no-daemon` keeps a shared background server from outliving the session with its credential; `codex agents`, which needs that server, does not run through the launcher.

@@ -21,10 +21,13 @@ const codexProvider = "gateway"
 
 // codexSettings are the switches the launcher passes to codex with -c, each at its
 // value as TOML. -c outranks every configuration file but the managed ones, so a
-// trusted project's .codex/config.toml cannot turn one back on. Storing logins in a
-// file keeps a login made through the launcher where codexPreflight sees it.
+// trusted project's .codex/config.toml cannot turn one back on. Shell snapshots would
+// write the environment, the session credential included, into the CODEX_HOME.
+// Storing logins in a file keeps a login made through the launcher where
+// codexPreflight sees it.
 var codexSettings = []struct{ key, value string }{
 	{"features.plugins", "false"},
+	{"features.shell_snapshot", "false"},
 	{"analytics.enabled", "false"},
 	{"otel.metrics_exporter", `"none"`},
 	{"check_for_update_on_startup", "false"},
@@ -68,8 +71,12 @@ func codexPreflight(_ []string, _, home string, args []string) (overrides, confl
 			o, c := codexOverrideProblems(value)
 			overrides, conflicts = append(overrides, o...), append(conflicts, c...)
 		case "--enable":
-			if strings.TrimSpace(value) == "plugins" {
-				conflicts = append(conflicts, "--enable plugins on the command line; the launcher sets features.plugins=false")
+			// --enable X is -c features.X=true.
+			feature := strings.TrimSpace(value)
+			for _, setting := range codexSettings {
+				if setting.key == "features."+feature {
+					conflicts = append(conflicts, "--enable "+feature+" on the command line; the launcher sets "+setting.key+"="+setting.value)
+				}
 			}
 		case "--oss", "--local-provider", "--remote", "--remote-auth-token-env":
 			overrides = append(overrides, name+" on the command line")
@@ -189,8 +196,7 @@ func codexEnvironment(parent []string, grant session.Grant, origin string, set [
 }
 
 // dedicatedDir creates dir, private to its owner, when it is missing and returns it. An
-// existing dir must be private too: codex writes its environment, the session
-// credential included, into shell snapshots there.
+// existing dir must be private too: it holds the clients' session logs and history.
 func dedicatedDir(dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("configuration directory: %v", err)
