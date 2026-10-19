@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -18,12 +19,14 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/Luolc/redcoast/claude"
+	"github.com/Luolc/redcoast/codex"
 	"github.com/Luolc/redcoast/credential"
 	"github.com/Luolc/redcoast/session"
 )
 
 // config holds the validated settings of the configuration file.
 type config struct {
+	provider           string   // claude or codex: the command's first word
 	listen             string   // reverse proxy (inference)
 	forwardListen      string   // forward proxy (side traffic)
 	socket             string   // unix socket of the session interface
@@ -47,6 +50,7 @@ type config struct {
 	tls                *tls.Config   // every TCP listener's; nil serves plain HTTP
 	serverName         string        // the name clients reach the TLS listeners by
 	warning            string        // logged at startup; empty for none
+	codex              *codexFile    // the codex section; nil for claude
 }
 
 // tlsFile is listen.tls: one certificate for every TCP listener, all on one machine
@@ -66,6 +70,14 @@ type backupConfig struct {
 	Prefix          string `yaml:"prefix"`
 	AccessKeyID     string `yaml:"access_key_id"`
 	SecretAccessKey string `yaml:"secret_access_key"`
+}
+
+// codexFile is the codex section, which only a Codex gateway takes: the directory of
+// the accounts' logins, one directory per alias, and the reference of the key that
+// signs session credentials.
+type codexFile struct {
+	AccountsDir string `yaml:"accounts_dir"`
+	SessionKey  string `yaml:"session_key"`
 }
 
 // fileConfig is the configuration file. Keys it does not name are refused; keys left
@@ -105,6 +117,7 @@ type fileConfig struct {
 		StdinTestEntry   bool   `yaml:"stdin_test_entry"`
 	} `yaml:"credentials"`
 	Backup *backupConfig `yaml:"backup"`
+	Codex  *codexFile    `yaml:"codex"`
 }
 
 // maxConfigFile bounds the configuration file; a real one is about a kilobyte.
@@ -133,14 +146,23 @@ var accountAlias = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 // cgnat is 100.64.0.0/10, the shared address space tailnets use.
 var cgnat = netip.MustParsePrefix("100.64.0.0/10")
 
-// defaultFileConfig returns the settings a file that leaves a key out runs with.
-func defaultFileConfig() fileConfig {
+// defaultFileConfig returns the settings a file for provider that leaves a key out
+// runs with. The two providers' default addresses differ, so that both gateways run on
+// one host with their defaults.
+func defaultFileConfig(provider string) fileConfig {
 	var f fileConfig
 	f.Upstream = "https://api.anthropic.com"
 	f.Listen.Reverse = "127.0.0.1:8789"
 	f.Listen.Forward = "127.0.0.1:8791"
 	f.Listen.Health = "127.0.0.1:7804"
 	f.Listen.Dashboard = "127.0.0.1:7805"
+	if provider == "codex" {
+		f.Upstream = codex.Upstream
+		f.Listen.Reverse = "127.0.0.1:8792"
+		f.Listen.Forward = "127.0.0.1:8793"
+		f.Listen.Health = "127.0.0.1:7806"
+		f.Listen.Dashboard = "127.0.0.1:7807"
+	}
 	f.EgressInterval = 15 * time.Minute
 	f.Limits.IdleTimeout = claude.DefaultLimits.Idle
 	f.Limits.MaxRequestDuration = claude.DefaultLimits.MaxRequest
@@ -152,16 +174,16 @@ func defaultFileConfig() fileConfig {
 	return f
 }
 
-// loadConfig takes the arguments after "serve", whose only flag is --config <path>,
-// and reads and validates the file it names.
-func loadConfig(arguments []string) (config, error) {
-	flags := flag.NewFlagSet("redcoast claude serve", flag.ContinueOnError)
+// loadConfig takes the arguments after "<provider> serve", whose only flag is --config
+// <path>, and reads and validates the file it names for provider.
+func loadConfig(provider string, arguments []string) (config, error) {
+	flags := flag.NewFlagSet("redcoast "+provider+" serve", flag.ContinueOnError)
 	path := flags.String("config", "", "YAML configuration file (required)")
 	if err := flags.Parse(arguments); err != nil {
 		return config{}, err
 	}
 	if flags.NArg() != 0 || *path == "" {
-		return config{}, errors.New("usage: redcoast claude serve --config <path>")
+		return config{}, errors.New("usage: redcoast " + provider + " serve --config <path>")
 	}
 	file, err := os.Open(*path)
 	if err != nil {
@@ -175,13 +197,13 @@ func loadConfig(arguments []string) (config, error) {
 	if len(data) > maxConfigFile {
 		return config{}, fmt.Errorf("config: larger than %d bytes", maxConfigFile)
 	}
-	return parseConfig(data)
+	return parseConfig(provider, data)
 }
 
-// parseConfig decodes one YAML document strictly, an unknown key being an error, and
-// rejects settings the gateway cannot run with. Each error names the key.
-func parseConfig(data []byte) (config, error) {
-	f := defaultFileConfig()
+// parseConfig decodes one YAML document for provider strictly, an unknown key being an
+// error, and rejects settings the gateway cannot run with. Each error names the key.
+func parseConfig(provider string, data []byte) (config, error) {
+	f := defaultFileConfig(provider)
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&f); err != nil {
@@ -193,10 +215,11 @@ func parseConfig(data []byte) (config, error) {
 	}
 	var errs []error
 	report := func(key, problem string) { errs = append(errs, fmt.Errorf("config: %s: %s", key, problem)) }
-	target, err := parseOrigin(f.Upstream)
+	target, err := parseUpstream(provider, f.Upstream)
 	if err != nil {
 		report("upstream", err.Error())
 	}
+	checkCodex(report, provider, f)
 	public := checkListeners(report, f.Listen.AllowPublic, []setting{
 		{"listen.reverse", f.Listen.Reverse}, {"listen.forward", f.Listen.Forward}, {"listen.health", f.Listen.Health},
 		{"listen.dashboard", f.Listen.Dashboard}, {"listen.session", f.Listen.Session},
@@ -240,7 +263,7 @@ func parseConfig(data []byte) (config, error) {
 	if len(errs) > 0 {
 		return config{}, errors.Join(errs...)
 	}
-	return config{tls: serverTLS, serverName: serverName, warning: warning, listen: f.Listen.Reverse, forwardListen: f.Listen.Forward, socket: f.SessionSocket, sessionListen: f.Listen.Session, adminSocket: f.AdminSocket,
+	return config{provider: provider, codex: f.Codex, tls: serverTLS, serverName: serverName, warning: warning, listen: f.Listen.Reverse, forwardListen: f.Listen.Forward, socket: f.SessionSocket, sessionListen: f.Listen.Session, adminSocket: f.AdminSocket,
 		healthListen: f.Listen.Health, dashboardListen: f.Listen.Dashboard, dashboardDir: f.DashboardDir, hostNames: hostNames, egressInterval: f.EgressInterval, limits: limits,
 		accountConcurrency: f.Limits.AccountConcurrency, upstream: target, sessionDB: f.SessionDB, captureDir: f.CaptureDir, inventory: f.Inventory,
 		tokenRef: token, credentialsStdin: f.Credentials.StdinTestEntry,
@@ -352,6 +375,58 @@ func parseOrigin(raw string) (*url.URL, error) {
 		return nil, errors.New("must be the API origin or a loopback origin")
 	}
 	return target, nil
+}
+
+// parseUpstream checks the upstream of provider: an origin for Claude, a base URL for
+// Codex.
+func parseUpstream(provider, raw string) (*url.URL, error) {
+	if provider == "codex" {
+		return parseCodexBase(raw)
+	}
+	return parseOrigin(raw)
+}
+
+// parseCodexBase accepts only the Codex API's base URL or a loopback URL with any path
+// (synthetic experiments run a fake upstream in the same network namespace). Real
+// tokens go to no other host. The forwarded path is this URL's path followed by the
+// client's path after /backend-api/codex.
+func parseCodexBase(raw string) (*url.URL, error) {
+	target, err := url.Parse(raw)
+	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" ||
+		target.User != nil || target.RawQuery != "" || target.ForceQuery || target.Fragment != "" || target.RawPath != "" {
+		return nil, errors.New("not a base URL")
+	}
+	if raw != codex.Upstream && !isLoopbackAddress(target.Host) {
+		return nil, errors.New("must be " + codex.Upstream + " or a loopback URL")
+	}
+	target.Path = strings.TrimSuffix(target.Path, "/")
+	return target, nil
+}
+
+// checkCodex checks the codex section: a Codex gateway needs it, with an absolute
+// accounts directory and a credential reference for the session key, and keeps no
+// capture records, whose redaction knows only Claude's credentials; a Claude gateway
+// refuses it.
+func checkCodex(report func(key, problem string), provider string, f fileConfig) {
+	if provider != "codex" {
+		if f.Codex != nil {
+			report("codex", "only redcoast codex serve takes this section")
+		}
+		return
+	}
+	if f.CaptureDir != "" {
+		report("capture_dir", "not supported by redcoast codex serve")
+	}
+	if f.Codex == nil {
+		report("codex", "missing")
+		return
+	}
+	if !filepath.IsAbs(f.Codex.AccountsDir) {
+		report("codex.accounts_dir", "must be an absolute path")
+	}
+	if err := credential.Check(f.Codex.SessionKey); err != nil {
+		report("codex.session_key", err.Error())
+	}
 }
 
 // loadTLS reads listen.tls's certificate and key, which must pair, and checks that the

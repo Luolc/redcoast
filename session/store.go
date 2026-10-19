@@ -154,11 +154,13 @@ var seedPlans = []PlanUnit{
 	{Plan: "max-20x", QuotaUnit: 10, MonthlyUSD: 200, From: time.UnixMilli(0).UTC()},
 }
 
-// Config adjusts the store's durations and clock. Zero values take the defaults.
+// Config adjusts the store's durations and clock, and the form of its session
+// credentials. Zero values take the defaults.
 type Config struct {
 	Lease      time.Duration    // how long a binding lasts before it is re-evaluated
 	IdleExpiry time.Duration    // a session with no request for this long is ended
 	Now        func() time.Time // nil uses time.Now; tests inject a clock
+	Form       CredentialForm   // nil hands out the issued credential as it is
 }
 
 // Store is the open SQLite file. Its methods are safe for concurrent use.

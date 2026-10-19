@@ -26,7 +26,7 @@ func TestLimitsConfiguration(t *testing.T) {
 		{"no_account_concurrency", "limits: {account_concurrency: 0}\n", claude.Limits{}, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cfg, err := parseConfig([]byte(baseConfig + test.yaml))
+			cfg, err := parseConfig("claude", []byte(baseConfig+test.yaml))
 			if test.limits == (claude.Limits{}) {
 				if err == nil {
 					t.Fatal("invalid limits accepted")

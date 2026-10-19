@@ -25,8 +25,8 @@ type planCommand struct {
 
 // errPlanUsage is returned when the plan subcommand is misused.
 var errPlanUsage = errors.New(`usage:
-  redcoast claude plan --session-db <path> [--admin-socket <path>] unit <plan> <quota-unit> <monthly-usd> <from> [<to>]
-  redcoast claude plan --session-db <path> [--admin-socket <path>] schedule <alias> <plan> <from> [<to>] [--note <text>]
+  redcoast claude|codex plan --session-db <path> [--admin-socket <path>] unit <plan> <quota-unit> <monthly-usd> <from> [<to>]
+  redcoast claude|codex plan --session-db <path> [--admin-socket <path>] schedule <alias> <plan> <from> [<to>] [--note <text>]
 times are RFC 3339 (for example 2026-10-29T00:00:00Z); an omitted <to> is open-ended;
 with --admin-socket, every account whose quota unit is higher now than before the
 change has its quota read again by the gateway (as with refresh)`)

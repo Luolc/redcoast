@@ -44,6 +44,15 @@ var (
 	ErrWrongSource = errors.New("session used from another address")
 )
 
+// CredentialForm is how a gateway process hands session credentials to its clients:
+// Wrap turns the credential the store issues into the one the client holds, and Unwrap
+// turns that back, reporting false for anything Wrap did not make. The store keeps
+// only the SHA-256 of the issued credential.
+type CredentialForm interface {
+	Wrap(credential string) string
+	Unwrap(presented string) (string, bool)
+}
+
 // LocalSource is the source of a session issued over the unix socket; such a session
 // is used from loopback addresses only.
 const LocalSource = "local"
@@ -99,6 +108,9 @@ func (s *Store) insertSession(ctx context.Context, tx *sql.Tx, clientMachine, so
 		id, hashToken(token), clientMachine, sourceAddr, meta, s.now())
 	if err != nil {
 		return Issued{}, fmt.Errorf("issue session: %v", err)
+	}
+	if s.cfg.Form != nil {
+		token = s.cfg.Form.Wrap(token)
 	}
 	return Issued{ID: id, Token: token}, nil
 }
@@ -290,10 +302,16 @@ type rowQuerier interface {
 }
 
 // liveSession returns the ID of the session token identifies and the source it was
-// issued to, ErrNotSessionCredential when the token is malformed, or ErrUnknownSession
+// issued to, ErrNotSessionCredential when the token is malformed or not of the store's form, or ErrUnknownSession
 // when it is unknown or the session has ended. idle reports that the session has had no request for the idle expiry;
 // the caller ends it and commits, then treats it as unknown.
 func (s *Store) liveSession(ctx context.Context, tx rowQuerier, token string, now int64) (id, source string, idle bool, err error) {
+	if s.cfg.Form != nil {
+		var ok bool
+		if token, ok = s.cfg.Form.Unwrap(token); !ok {
+			return "", "", false, ErrNotSessionCredential
+		}
+	}
 	if !tokenPattern.MatchString(token) {
 		return "", "", false, ErrNotSessionCredential
 	}

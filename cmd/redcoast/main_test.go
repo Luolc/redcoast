@@ -85,7 +85,7 @@ func TestConfiguration(t *testing.T) {
 		{"backup_unknown_key", baseConfig + backup + "  path_style: true\n", "", "field path_style not found"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cfg, err := parseConfig([]byte(test.yaml))
+			cfg, err := parseConfig("claude", []byte(test.yaml))
 			if test.upstream == "" {
 				if err == nil || !strings.Contains(err.Error(), test.problem) {
 					t.Fatalf("got %v, want an error with %q", err, test.problem)
@@ -118,11 +118,11 @@ func TestLoadConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte(baseConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if cfg, err := loadConfig([]string{"--config", path}); err != nil || cfg.sessionDB != "gateway.sqlite" {
+	if cfg, err := loadConfig("claude", []string{"--config", path}); err != nil || cfg.sessionDB != "gateway.sqlite" {
 		t.Fatalf("got %+v %v", cfg, err)
 	}
 	for _, arguments := range [][]string{nil, {"--config", path, "--listen", "127.0.0.1:8789"}, {"--config", path, "extra"}, {"--config", path + ".missing"}} {
-		if _, err := loadConfig(arguments); err == nil {
+		if _, err := loadConfig("claude", arguments); err == nil {
 			t.Errorf("%q accepted", arguments)
 		}
 	}
@@ -134,7 +134,7 @@ func TestLoadConfig(t *testing.T) {
 func TestOpenStoreRefusesCorruptFile(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "gateway.sqlite")
-	store, err := openStore(ctx, path)
+	store, err := openStore(ctx, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestOpenStoreRefusesCorruptFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Control arm: the same file, intact, opens.
-	store, err = openStore(ctx, path)
+	store, err = openStore(ctx, path, nil)
 	if err != nil {
 		t.Fatalf("intact file refused: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestOpenStoreRefusesCorruptFile(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if store, err := openStore(ctx, path); err == nil {
+	if store, err := openStore(ctx, path, nil); err == nil {
 		_ = store.Close()
 		t.Fatal("a corrupt file was accepted")
 	} else if !strings.Contains(err.Error(), "quick_check") {
@@ -183,11 +183,11 @@ func TestExampleConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := parseConfig(data)
+	cfg, err := parseConfig("claude", data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defaults, err := parseConfig([]byte(basePaths))
+	defaults, err := parseConfig("claude", []byte(basePaths))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,11 +201,108 @@ func TestExampleConfig(t *testing.T) {
 	}
 }
 
+// TestCodexConfiguration checks the Codex gateway's configuration: its own defaults,
+// the upstream (the Codex API's base URL or a loopback URL, nothing else), the codex
+// section it requires and a Claude gateway refuses, and capture, which it refuses. The
+// example file parses with the defaults it shows.
+func TestCodexConfiguration(t *testing.T) {
+	const section = "codex: {accounts_dir: /var/lib/redcoast-codex/accounts, session_key: 'env://SESSION_KEY'}\n"
+	for _, test := range []struct {
+		name, provider, yaml string
+		upstream             string // expected when accepted
+		problem              string // part of the error when refused
+	}{
+		{"defaults", "codex", baseConfig + section, "https://chatgpt.com/backend-api/codex", ""},
+		{"loopback_upstream", "codex", baseConfig + section + "upstream: http://127.0.0.1:8790/backend-api/codex\n", "http://127.0.0.1:8790/backend-api/codex", ""},
+		{"loopback_origin", "codex", baseConfig + section + "upstream: http://127.0.0.1:8790\n", "http://127.0.0.1:8790", ""},
+		{"other_host", "codex", baseConfig + section + "upstream: https://chatgpt.example/backend-api/codex\n", "", "upstream: must be https://chatgpt.com/backend-api/codex"},
+		{"other_path", "codex", baseConfig + section + "upstream: https://chatgpt.com/backend-api\n", "", "upstream: must be"},
+		{"claude_upstream", "codex", baseConfig + section + "upstream: https://api.anthropic.com\n", "", "upstream: must be"},
+		{"query", "codex", baseConfig + section + "upstream: http://127.0.0.1:8790/x?a=b\n", "", "upstream: not a base URL"},
+		{"no_section", "codex", baseConfig, "", "codex: missing"},
+		{"relative_accounts_dir", "codex", baseConfig + "codex: {accounts_dir: accounts, session_key: 'env://SESSION_KEY'}\n", "", "codex.accounts_dir: must be an absolute path"},
+		{"key_not_a_reference", "codex", baseConfig + "codex: {accounts_dir: /accounts, session_key: plain-text-key}\n", "", "codex.session_key"},
+		{"capture", "codex", baseConfig + section + "capture_dir: /var/lib/capture\n", "", "capture_dir: not supported"},
+		{"section_at_claude", "claude", baseConfig + section, "", "codex: only redcoast codex serve"},
+		{"path_at_claude", "claude", baseConfig + "upstream: https://chatgpt.com/backend-api/codex\n", "", "upstream: not an origin"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, err := parseConfig(test.provider, []byte(test.yaml))
+			if test.problem != "" {
+				if err == nil || !strings.Contains(err.Error(), test.problem) {
+					t.Fatalf("got %v, want %q", err, test.problem)
+				}
+				return
+			}
+			if err != nil || cfg.upstream.String() != test.upstream || cfg.provider != test.provider {
+				t.Fatalf("got %v %v", cfg.upstream, err)
+			}
+		})
+	}
+	defaults, err := parseConfig("codex", []byte(baseConfig+section))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeDefaults, err := parseConfig("claude", []byte(baseConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range [][2]string{{defaults.listen, claudeDefaults.listen}, {defaults.forwardListen, claudeDefaults.forwardListen}, {defaults.healthListen, claudeDefaults.healthListen}, {defaults.dashboardListen, claudeDefaults.dashboardListen}} {
+		if pair[0] == pair[1] {
+			t.Fatalf("the Codex gateway's default %s is the Claude gateway's", pair[0])
+		}
+	}
+	data, err := os.ReadFile("../../redcoast-codex.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parseConfig("codex", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.listen != defaults.listen || cfg.forwardListen != defaults.forwardListen || cfg.healthListen != defaults.healthListen ||
+		cfg.dashboardListen != defaults.dashboardListen || cfg.upstream.String() != defaults.upstream.String() || cfg.codex == nil {
+		t.Fatalf("example %+v differs from the defaults %+v", cfg, defaults)
+	}
+}
+
+// TestNewProvider checks what serve runs with: Claude with the store's own credentials,
+// and Codex with session credentials signed under the key its section references,
+// which must resolve to at least 32 bytes; the error names the key, never its value.
+func TestNewProvider(t *testing.T) {
+	values := map[string]string{"env://LONG_KEY": strings.Repeat("k", 32), "env://SHORT_KEY": "short-synthetic-key"}
+	resolve := func(_ context.Context, reference string) (string, error) {
+		if value, ok := values[reference]; ok {
+			return value, nil
+		}
+		return "", errors.New("unknown reference")
+	}
+	if provider, form, err := newProvider(t.Context(), config{provider: "claude"}, resolve); err != nil || form != nil || provider.Probe == nil {
+		t.Fatalf("claude: %v %v", form, err)
+	}
+	for key, problem := range map[string]string{"env://LONG_KEY": "", "env://SHORT_KEY": "codex.session_key: session key shorter", "env://MISSING": "codex.session_key: unknown reference"} {
+		cfg := config{provider: "codex", codex: &codexFile{AccountsDir: "/accounts", SessionKey: key}}
+		provider, form, err := newProvider(t.Context(), cfg, resolve)
+		if problem == "" {
+			if err != nil || form == nil || provider.Probe != nil || provider.Prefix != "/backend-api/codex" {
+				t.Fatalf("%s: %v", key, err)
+			}
+			if bare, ok := form.Unwrap(form.Wrap(session.TokenPrefix)); !ok || bare != session.TokenPrefix {
+				t.Fatalf("%s: the form does not give back its credential", key)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), problem) || strings.Contains(err.Error(), values[key]) && values[key] != "" {
+			t.Fatalf("%s: got %v, want %q", key, err, problem)
+		}
+	}
+}
+
 // TestNewBackup takes no backups without a backup section and resolves the writer's key
 // from the two references with one.
 func TestNewBackup(t *testing.T) {
 	ctx := context.Background()
-	store, err := openStore(ctx, filepath.Join(t.TempDir(), "gateway.sqlite"))
+	store, err := openStore(ctx, filepath.Join(t.TempDir(), "gateway.sqlite"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,15 +339,15 @@ func TestBucketURL(t *testing.T) {
 	}
 }
 
-// TestClaudeCommand checks that "claude" and a known command lead every command line.
-func TestClaudeCommand(t *testing.T) {
-	for _, arguments := range [][]string{{"claude", "serve", "--config", "x"}, {"claude", "plan"}, {"claude", "thresholds"}, {"claude", "machine", "list"}} {
-		if command, err := claudeCommand(arguments); err != nil || !slices.Equal(command, arguments[1:]) {
-			t.Errorf("%q: got %q %v", arguments, command, err)
+// TestProviderCommand checks that a provider and a known command lead every command line.
+func TestProviderCommand(t *testing.T) {
+	for _, arguments := range [][]string{{"claude", "serve", "--config", "x"}, {"claude", "plan"}, {"claude", "thresholds"}, {"claude", "machine", "list"}, {"codex", "serve"}, {"codex", "status"}} {
+		if provider, command, err := providerCommand(arguments); err != nil || provider != arguments[0] || !slices.Equal(command, arguments[1:]) {
+			t.Errorf("%q: got %s %q %v", arguments, provider, command, err)
 		}
 	}
-	for _, arguments := range [][]string{nil, {"claude"}, {"serve", "--config", "x"}, {"--config", "x"}, {"claude", "--config", "x"}, {"codex", "serve"}} {
-		if _, err := claudeCommand(arguments); !errors.Is(err, errUsage) {
+	for _, arguments := range [][]string{nil, {"claude"}, {"serve", "--config", "x"}, {"--config", "x"}, {"claude", "--config", "x"}, {"openai", "serve"}, {"codex"}} {
+		if _, _, err := providerCommand(arguments); !errors.Is(err, errUsage) {
 			t.Errorf("%q: got %v, want the usage", arguments, err)
 		}
 	}

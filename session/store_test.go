@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -154,6 +155,66 @@ func TestTokenNotStored(t *testing.T) {
 	}
 	if hits := bytes.Count(content, []byte(hashToken(issued.Token))); hits == 0 {
 		t.Fatal("credential hash does not appear in the file; the search would not have found the credential either")
+	}
+}
+
+// prefixForm is a credential form for tests: the issued credential behind a prefix.
+type prefixForm struct{}
+
+func (prefixForm) Wrap(credential string) string { return "wrapped." + credential }
+
+func (prefixForm) Unwrap(presented string) (string, bool) {
+	return strings.CutPrefix(presented, "wrapped.")
+}
+
+// TestCredentialForm checks that a store with a credential form hands out the wrapped
+// credential, accepts it, refuses the bare one as not a session credential, and keeps
+// only the hash of the bare one; a store without the form refuses the wrapped one.
+func TestCredentialForm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.sqlite")
+	store, err := Open(t.Context(), path, Config{Form: prefixForm{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, store, "sample-a", "pro")
+	issued, err := store.Issue(t.Context(), "machine-a", LocalSource, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bare, wrapped := strings.CutPrefix(issued.Token, "wrapped.")
+	if !wrapped || !regexp.MustCompile(`^sk-ant-gws-[A-Za-z0-9_-]{43}$`).MatchString(bare) {
+		t.Fatal("the issued credential is not the wrapped form of a session credential")
+	}
+	if _, err := store.Bind(t.Context(), issued.Token, accounts); err != nil {
+		t.Fatalf("wrapped credential: %v", err)
+	}
+	if _, err := store.Bind(t.Context(), bare, accounts); !errors.Is(err, ErrNotSessionCredential) {
+		t.Fatalf("bare credential: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var content []byte
+	for _, name := range []string{path, path + "-wal"} {
+		data, err := os.ReadFile(name)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		content = append(content, data...)
+	}
+	if bytes.Contains(content, []byte(bare)) || !bytes.Contains(content, []byte(hashToken(bare))) {
+		t.Fatal("the file does not keep only the hash of the bare credential")
+	}
+	plain, err := Open(t.Context(), path, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = plain.Close() }()
+	if _, err := plain.Bind(t.Context(), issued.Token, accounts); !errors.Is(err, ErrNotSessionCredential) {
+		t.Fatalf("wrapped credential without the form: %v", err)
+	}
+	if _, err := plain.Bind(t.Context(), bare, accounts); err != nil {
+		t.Fatalf("control arm, bare credential without the form: %v", err)
 	}
 }
 

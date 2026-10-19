@@ -1,9 +1,10 @@
 // redcoast is the single entrypoint of the inference gateway. "redcoast claude serve"
-// runs the Claude gateway: it authenticates session credentials, forwards each request
-// through the account its session is bound to and records bounded, redacted
-// observations. The forwarding lives in package claude; this program only parses the
-// configuration and runs it. The other "redcoast claude" commands manage a running
-// gateway or its store.
+// runs the Claude gateway and "redcoast codex serve" the Codex one, each its own
+// process: it authenticates session credentials, forwards each request through the
+// account its session is bound to and records bounded, redacted observations. The
+// forwarding lives in package claude, with package codex as the Codex provider; this
+// program only parses the configuration and runs it. The other "redcoast <provider>"
+// commands manage a running gateway or its store.
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 
 	"github.com/Luolc/redcoast/backup"
 	"github.com/Luolc/redcoast/claude"
+	"github.com/Luolc/redcoast/codex"
 	"github.com/Luolc/redcoast/credential"
 	"github.com/Luolc/redcoast/session"
 	"github.com/cloudflare/tableflip"
@@ -36,17 +38,17 @@ const credentialsInputTimeout = 5 * time.Second
 
 // errUsage is returned when the command line names no provider and command.
 var errUsage = errors.New(`usage:
-  redcoast claude serve --config <path>
-  redcoast claude plan --session-db <path> ...
-  redcoast claude thresholds --session-db <path> <soft> <hard>
-  redcoast claude reload|handoff|status|sessions|pause|resume|refresh|machine ... --admin-socket <path>
+  redcoast claude|codex serve --config <path>
+  redcoast claude|codex plan --session-db <path> ...
+  redcoast claude|codex thresholds --session-db <path> <soft> <hard>
+  redcoast claude|codex reload|handoff|status|sessions|pause|resume|refresh|machine ... --admin-socket <path>
 a command given without its arguments prints its own usage`)
 
-// main runs "redcoast claude serve" until SIGINT or SIGTERM, then waits for capture
+// main runs "redcoast <provider> serve" until SIGINT or SIGTERM, then waits for capture
 // writes still in progress. Any startup or shutdown failure exits with status 1. Any
 // other command runs once and exits.
 func main() {
-	command, err := claudeCommand(os.Args[1:])
+	provider, command, err := providerCommand(os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -56,7 +58,7 @@ func main() {
 		}
 		return
 	}
-	cfg, err := loadConfig(command[1:])
+	cfg, err := loadConfig(provider, command[1:])
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -76,12 +78,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	set, err := loadAccounts(ctx, cfg, resolve)
+	gateway, form, set, err := loadProvider(ctx, cfg, resolve)
 	if err != nil {
 		log.Fatal(err)
 	}
 	log.Printf("accounts: %s", strings.Join(set.Candidates(), " "))
-	store, err := openStore(ctx, cfg.sessionDB)
+	store, err := openStore(ctx, cfg.sessionDB, form)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -98,11 +100,13 @@ func main() {
 	}
 	admin := claude.NewAdmin(accounts, store, reloader(cfg, accounts, resolve, egress))
 	admin.Handoff = upg.Upgrade
-	entrypoint, err := claude.NewHandler(cfg.upstream, claude.Claude, cfg.captureDir, store, accounts, cfg.limits)
+	entrypoint, err := claude.NewHandler(cfg.upstream, gateway, cfg.captureDir, store, accounts, cfg.limits)
 	if err != nil {
 		log.Fatal(err)
 	}
-	admin.Refresh = entrypoint.Refresh
+	if gateway.Probe != nil {
+		admin.Refresh = entrypoint.Refresh
+	}
 	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started)
 	if err != nil {
 		log.Fatal(err)
@@ -168,11 +172,12 @@ func (cfg config) readOnly(handler http.Handler) http.Handler {
 	return claude.HostGuard(cfg.hostNames, handler)
 }
 
-// openStore opens the session database and refuses a file that fails quick_check: the
-// gateway then does not start and waits for a restore from backup, instead of starting
-// over on an empty file that would lose plans, thresholds and account pauses.
-func openStore(ctx context.Context, path string) (*session.Store, error) {
-	store, err := session.Open(ctx, path, session.Config{})
+// openStore opens the session database, handing out session credentials in form (nil
+// for the store's own), and refuses a file that fails quick_check: the gateway then
+// does not start and waits for a restore from backup, instead of starting over on an
+// empty file that would lose plans, thresholds and account pauses.
+func openStore(ctx context.Context, path string, form session.CredentialForm) (*session.Store, error) {
+	store, err := session.Open(ctx, path, session.Config{Form: form})
 	if err != nil {
 		return nil, err
 	}
@@ -256,13 +261,33 @@ func reloader(cfg config, accounts *claude.Accounts, startup claude.Resolver, eg
 	}
 }
 
-// claudeCommand returns the arguments after "redcoast claude", the first of them
-// "serve", "plan", "thresholds" or a management subcommand.
-func claudeCommand(arguments []string) ([]string, error) {
-	if len(arguments) < 2 || arguments[0] != "claude" || arguments[1] != "serve" && arguments[1] != "plan" && arguments[1] != "thresholds" && !adminCommands[arguments[1]] {
-		return nil, errUsage
+// providerCommand returns the provider, claude or codex, and the arguments after it,
+// the first of them "serve", "plan", "thresholds" or a management subcommand.
+func providerCommand(arguments []string) (string, []string, error) {
+	if len(arguments) < 2 || arguments[0] != "claude" && arguments[0] != "codex" || arguments[1] != "serve" && arguments[1] != "plan" && arguments[1] != "thresholds" && !adminCommands[arguments[1]] {
+		return "", nil, errUsage
 	}
-	return arguments[1:], nil
+	return arguments[0], arguments[1:], nil
+}
+
+// newProvider returns what the configured provider does and the form of its session
+// credentials: Claude hands out the store's own credentials; Codex hands out JWTs
+// signed with the key codex.session_key references, read once at startup.
+func newProvider(ctx context.Context, cfg config, resolve claude.Resolver) (claude.Provider, session.CredentialForm, error) {
+	if cfg.provider != "codex" {
+		return claude.Claude, nil, nil
+	}
+	resolveCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
+	defer cancel()
+	key, err := resolve(resolveCtx, cfg.codex.SessionKey)
+	if err != nil {
+		return claude.Provider{}, nil, fmt.Errorf("codex.session_key: %v", err)
+	}
+	form, err := codex.NewSessionForm([]byte(key))
+	if err != nil {
+		return claude.Provider{}, nil, fmt.Errorf("codex.session_key: %v", err)
+	}
+	return codex.New(cfg.codex.AccountsDir), form, nil
 }
 
 // runSubcommand runs "plan", "thresholds" or one of the management subcommands.
@@ -314,10 +339,21 @@ func newResolver(ctx context.Context, cfg config) (claude.Resolver, error) {
 	return credential.New(onePassword), nil
 }
 
-// loadAccounts loads the inventory with resolve. Any failure is reported as a whole;
-// the gateway then does not start.
-func loadAccounts(ctx context.Context, cfg config, resolve claude.Resolver) (*claude.AccountSet, error) {
+// loadProvider builds the configured provider and the form of its session credentials,
+// and loads its inventory.
+func loadProvider(ctx context.Context, cfg config, resolve claude.Resolver) (claude.Provider, session.CredentialForm, *claude.AccountSet, error) {
+	provider, form, err := newProvider(ctx, cfg, resolve)
+	if err != nil {
+		return claude.Provider{}, nil, nil, err
+	}
+	set, err := loadAccounts(ctx, cfg, provider, resolve)
+	return provider, form, set, err
+}
+
+// loadAccounts loads the inventory for provider with resolve. Any failure is reported
+// as a whole; the gateway then does not start.
+func loadAccounts(ctx context.Context, cfg config, provider claude.Provider, resolve claude.Resolver) (*claude.AccountSet, error) {
 	loadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
 	defer cancel()
-	return claude.LoadAccounts(loadCtx, cfg.inventory, claude.Claude, resolve, cfg.accountConcurrency)
+	return claude.LoadAccounts(loadCtx, cfg.inventory, provider, resolve, cfg.accountConcurrency)
 }
