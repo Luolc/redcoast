@@ -53,9 +53,9 @@ A real Tailscale link and ACLs; a real `claude` on the client (the fake one send
 
 # Codex gateway rehearsal with the real Pi and Codex CLI
 
-`codex.py` runs `redcoast codex serve` and `redcoast claude serve` in two containers that share one network namespace, with a fake upstream and fake exits (`codex_fake.py`) behind both, and a client container that runs Pi 1.2.0 and Codex CLI 0.159.3 through `redcoast-client pi` and `redcoast-client codex`. The script downloads both clients from the npm registry at those versions and checks each tarball against the SHA-256 it pins before anything runs; Pi runs on Node (`node:24-slim`), the Codex CLI is its static binary. Everything else is synthetic: the two inventories, the ChatGPT login (a made-up JWT with an email and a `chatgpt_account_id`, in an `auth.json` of mode 0600), the Claude token, the proxy credentials, the session key and the machine credential, all handed to the gateways' stdin test entry. Nothing reaches chatgpt.com, api.anthropic.com, 1Password or Tailscale: the containers share one Docker network created with `--internal`, which has no route out.
+`codex.py` runs `redcoast codex serve` and `redcoast claude serve` in containers that share one network namespace (later two more Codex processes join it for the renewal arms), with a fake upstream and fake exits (`codex_fake.py`) behind both, and a client container that runs Pi 1.2.0 and Codex CLI 0.159.3 through `redcoast-client pi` and `redcoast-client codex`. The script downloads both clients from the npm registry at those versions and checks each tarball against the SHA-256 it pins before anything runs; Pi runs on Node (`node:24-slim`), the Codex CLI is its static binary. Everything else is synthetic: the two inventories, the ChatGPT login (a made-up JWT with an email and a `chatgpt_account_id`, in an `auth.json` of mode 0600), the Claude token, the proxy credentials, the session key and the machine credential, all handed to the gateways' stdin test entry. Nothing reaches chatgpt.com, api.anthropic.com, 1Password or Tailscale: the containers share one Docker network created with `--internal`, which has no route out.
 
-The fake upstream answers `POST …/responses` with a short SSE stream that carries `x-codex-primary-*` quota headers and no `Content-Type`, as the ChatGPT backend does, and `POST /v1/messages` with a Claude message. It records each request and each CONNECT at the exits as one JSON line; credentials only as their SHA-256.
+The fake upstream answers `POST …/responses` with a short SSE stream that carries `x-codex-primary-*` quota headers and no `Content-Type`, as the ChatGPT backend does, and `POST /v1/messages` with a Claude message. It is also the token endpoint the Codex processes renew through (`codex.token_url`): each refresh takes 1.5 seconds, so that overlapping ones show, and a refresh token presented a second time gets `refresh_token_reused`, as from auth.openai.com. Once it has issued an access token, the responses endpoint takes only the latest one. It records each request, each refresh (with how many were in flight when it arrived and how often its refresh token had been presented before) and each CONNECT at the exits as one JSON line; credentials only as their SHA-256.
 
 ## Running
 
@@ -90,16 +90,25 @@ A session credential of one gateway at the other. Two stand-ins (`codex_probe.mj
 
 Arms 7 and 8 pass while either of two protections holds: each process keeps its own session store, and the Codex process takes only JWTs signed with its own key. They do not tell the two apart.
 
+Renewal: one holder per account. A burst revokes the access token the upstream takes, then sends four inferences at each of two Codex processes at once; the upstream's 401s make each process renew.
+
+11. `import_renews_at_once`: `redcoast codex import` of a made-up login exits 0 after exactly one refresh, which spent the imported refresh token, and `auth.json` now holds the refresh token the endpoint issued.
+12. `concurrent_renewals_one_holder`: a burst at the codex process and `codex-b`, which shares its accounts directory as the two processes of a handoff do: inferences were refused, yet the token endpoint got exactly one refresh, never two at once, no refresh token was presented twice, and `auth.json` holds the one issued.
+13. `both_processes_serve_the_renewed_token`: afterwards an inference at each process gets 200, both with the renewed access token.
+14. `separate_accounts_dirs_renew_twice`, the counter-arm: the same burst at the codex process and `codex-c`, which renews from a copy of the accounts directory, so no lock joins the two: two refreshes, and the second presents the refresh token the first already spent. The criterion of arm 12 therefore tells a shared lock from none.
+15. `spent_token_marks_needs_reimport`: the process whose refresh was refused is paused for `needs_reimport`, and its `/health` names it.
+16. `token_endpoint_sees_overlap_and_reuse_control`: two refreshes with one made-up token sent straight to the endpoint at once read as two in flight and one presented twice, so the measure sees overlap and reuse when they happen.
+
 Hygiene.
 
-11. `network_has_no_way_out`: `docker network inspect` reports the run's network as internal, and the client container cannot resolve `registry.npmjs.org`.
-12. `upstream_saw_only_account_credentials`: every request the upstream received carried the Codex account's token, the Claude account's token or the direct arms' made-up bearer; never a session credential, and never an `x-api-key`.
-13. `no_credential_in_codex_gateway_log`, `no_credential_in_claude_gateway_log`: no token, key, password or credential of the run appears in either log, which counts as read only when it holds the gateway's startup line for its account.
+17. `network_has_no_way_out`: `docker network inspect` reports the run's network as internal, and the client container cannot resolve `registry.npmjs.org`.
+18. `upstream_saw_only_account_credentials`: every request the upstream received carried one of the Codex account's access tokens (made up, imported or issued by the token endpoint), the Claude account's token or the direct arms' made-up bearer; never a session credential, and never an `x-api-key`.
+19. `no_credential_in_<process>_gateway_log`, one for each of the four processes: no token, key, password or credential of the run appears in the log, nor anything shaped like a JWT (`eyJ`), which the tokens the endpoint issued and the Codex session credentials are; a log counts as read only when it holds the gateway's startup line for its account.
 
 The script's own guards are those of `xmachine.py`: no secret value goes into a Docker command line (the session credentials stay in the client container and reach the probes on stdin), and a SIGTERM runs the cleanup.
 
 ## Not covered
 
-Importing and renewing a login; the gateway's 426 to a WebSocket upgrade; tool calls; a real Tailscale link.
+Renewal when the access token nears expiry (the rehearsal's tokens expire in 2100, so only upstream 401s set renewals off); the gateway's 426 to a WebSocket upgrade; tool calls; a real Tailscale link.
 
 The unit tests of both scripts: `cd e2e && uv run --no-project --python 3.14 --with pytest==9.1.1 python -m pytest -q tests`.
