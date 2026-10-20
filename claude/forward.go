@@ -50,6 +50,9 @@ type connectRecord struct {
 	BytesDown  int64     `json:"bytes_down"`
 }
 
+// directAccountPort is the only port the account route of a direct account reaches.
+const directAccountPort = 443
+
 // forwardProxy is the side-traffic entrypoint. It authenticates the session credential
 // in Proxy-Authorization, has the session store evaluate the binding and tunnels every
 // CONNECT through the bound account's exit with that account's proxy credentials,
@@ -154,6 +157,12 @@ func (f *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record.Account, row.SessionID, row.Alias = a.alias, binding.SessionID, binding.Alias
+	// From the gateway's own address no exit bounds what a tunnel reaches.
+	if row.Route == "account" && a.direct != "" && row.Port != directAccountPort {
+		record.Result = "refused"
+		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
+		return
+	}
 	select {
 	case f.slots <- struct{}{}:
 		defer func() { <-f.slots }()
@@ -201,12 +210,17 @@ func (f *forwardProxy) recordTraffic(row session.Traffic, source string) {
 }
 
 // open connects to the far side of r's tunnel on record.Route: the target itself on
-// the direct route, a CONNECT through a's exit on the account route. It returns the
+// the direct route and on the account route of a direct account, a CONNECT through a's
+// exit on the account route otherwise. It returns the
 // connection and the reader positioned at the tunnel's first byte, or nil after
 // answering w with 502.
 func (f *forwardProxy) open(w http.ResponseWriter, r *http.Request, a *account, record *connectRecord) (net.Conn, io.Reader) {
-	if record.Route == "direct" {
-		conn, err := f.dialDirect(r.Context(), r.Host)
+	if record.Route == "direct" || a.direct != "" {
+		dialer := publicDialer{dial: f.dial, resolve: f.resolve}
+		if record.Route == "account" {
+			dialer.network = a.direct
+		}
+		conn, err := dialer.dialPublic(r.Context(), r.Host)
 		if err != nil {
 			http.Error(w, "target unavailable", http.StatusBadGateway)
 			return nil, nil

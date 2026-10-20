@@ -2,9 +2,11 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
@@ -381,5 +383,68 @@ func TestForwardProxyDenyList(t *testing.T) {
 		if len(got.dialed) != 1 || got.dialed[0] != test.dialed || got.route != test.route || got.result != "ok" {
 			t.Fatalf("control arm %s: %+v", test.target, got)
 		}
+	}
+}
+
+// TestDirectAccountRoute checks the account route of a session bound to a direct
+// account: the gateway resolves the target and dials only its public addresses of the
+// family of expected_egress_ip, never the exit; a name that resolves only to loopback
+// is not dialed; a port other than 443 gets 403 with nothing dialed. Control arm: a
+// session bound to an account with a proxy reaches another port through its exit.
+func TestDirectAccountRoute(t *testing.T) {
+	origin := startFakeOrigin(t)
+	addresses := map[string][]netip.Addr{
+		"dual.example.test": {netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("192.0.2.10")},
+		"loop.example.test": {netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1")},
+	}
+	exit := startFakeExit(t, http.StatusOK)
+	h := newHarness(t)
+	proxied := h.addWithExit("sample-test", "sk-ant-oat01-synthetic-test-token", &url.URL{Scheme: "http", Host: exit.listener.Addr().String()})
+	h.token, h.sessionID = h.issue()
+	forward := newForwardProxy(h.store, h.accounts, nil)
+	forward.resolve = func(_ context.Context, _, host string) ([]netip.Addr, error) {
+		return addresses[host], nil
+	}
+	dialed := &[]string{}
+	dial := forward.dial
+	forward.dial = func(ctx context.Context, network, target string) (net.Conn, error) {
+		*dialed = append(*dialed, target)
+		if target != exit.listener.Addr().String() {
+			target = origin
+		}
+		return dial(ctx, network, target)
+	}
+	useDirect := func(ip string) {
+		t.Helper()
+		a, err := newAccount("sample-test", accountInput{Credential: claudeCredential{token: "sk-ant-oat01-synthetic-test-token"}, Direct: true, ExpectedIP: netip.MustParseAddr(ip)}, DefaultAccountConcurrency)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.dial = func(context.Context, string, string) (net.Conn, error) {
+			t.Error("the account route dialed through the account's own dialer")
+			return nil, errors.New("not used")
+		}
+		h.accounts.set.Load().byAlias["sample-test"] = a
+	}
+
+	useDirect("192.0.2.7")
+	if got := directConnect(t, h, forward, exit, dialed, "dual.example.test:443", http.StatusOK, true); !slices.Equal(got.dialed, []string{"192.0.2.10:443"}) || got.reachedExit || got.route != "account" || got.result != "ok" {
+		t.Fatalf("direct IPv4 account: %+v", got)
+	}
+	if got := directConnect(t, h, forward, exit, dialed, "loop.example.test:443", http.StatusBadGateway, false); len(got.dialed) != 0 || got.reachedExit || got.result != "egress_failed" {
+		t.Fatalf("loopback name: %+v", got)
+	}
+	if got := directConnect(t, h, forward, exit, dialed, "dual.example.test:8443", http.StatusForbidden, false); len(got.dialed) != 0 || got.reachedExit || got.result != "refused" {
+		t.Fatalf("port 8443: %+v", got)
+	}
+
+	useDirect("2001:db8::7")
+	if got := directConnect(t, h, forward, exit, dialed, "dual.example.test:443", http.StatusOK, true); !slices.Equal(got.dialed, []string{"[2001:db8::10]:443"}) || got.reachedExit {
+		t.Fatalf("direct IPv6 account: %+v", got)
+	}
+
+	h.accounts.set.Load().byAlias["sample-test"] = proxied
+	if got := directConnect(t, h, forward, exit, dialed, "dual.example.test:8443", http.StatusOK, true); !slices.Equal(got.dialed, []string{exit.listener.Addr().String()}) || !got.reachedExit || got.result != "ok" {
+		t.Fatalf("control arm, account with a proxy: %+v", got)
 	}
 }

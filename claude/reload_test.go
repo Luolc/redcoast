@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -822,5 +823,33 @@ func TestReloadCancelledBeforePublish(t *testing.T) {
 				t.Fatalf("live: %+v %v, published=%t", r, err, published)
 			}
 		})
+	}
+}
+
+// TestDirectExitChangesConfig checks that a reload counts switching an account between
+// a proxy and a direct exit, or a direct account's expected IP, as a change, and a
+// direct account read again as the same.
+func TestDirectExitChangesConfig(t *testing.T) {
+	build := func(in accountInput) *account {
+		t.Helper()
+		in.Credential = claudeCredential{token: "sk-ant-oat01-synthetic-d-token"}
+		a, err := newAccount("sample-d", in, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	direct := accountInput{Direct: true, ExpectedIP: netip.MustParseAddr("192.0.2.7")}
+	proxied := accountInput{ProxyURL: "http://proxy.example.test:8080", ProxyUsername: "synthetic-user", ProxyPassword: "synthetic-password", ExpectedIP: netip.MustParseAddr("192.0.2.7")}
+	moved := direct
+	moved.ExpectedIP = netip.MustParseAddr("192.0.2.8")
+	if !build(direct).sameConfig(build(direct)) {
+		t.Fatal("the same direct account counts as changed")
+	}
+	if build(direct).sameConfig(build(proxied)) || build(proxied).sameConfig(build(direct)) {
+		t.Fatal("switching between a proxy and a direct exit counts as unchanged")
+	}
+	if build(direct).sameConfig(build(moved)) {
+		t.Fatal("a new expected IP counts as unchanged")
 	}
 }
