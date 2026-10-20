@@ -13,10 +13,10 @@ import (
 )
 
 // Bounds of what a usage meter holds. A body it reads only at its end, a JSON body or a
-// compressed one, is kept up to usageBodyLimit bytes and decompressed up to
-// usageDecodedLimit; an event stream is read line by line and a line longer than
-// usageLineLimit is skipped. Past a bound the meter reports less or nothing, never
-// more.
+// compressed one, is kept up to usageBodyLimit bytes; a compressed JSON body is
+// decompressed up to usageBodyLimit too, a compressed stream up to usageDecodedLimit.
+// An event stream is read line by line and a line longer than usageLineLimit is
+// skipped. Past a bound the meter reports less or nothing, never more.
 const (
 	usageBodyLimit    = 1 << 20
 	usageDecodedLimit = 8 << 20
@@ -193,15 +193,16 @@ func (m *usageMeter) finish() {
 		if err != nil {
 			return
 		}
-		body = io.LimitReader(reader, usageDecodedLimit)
+		body = reader
 	}
 	if !m.stream {
-		data, err := io.ReadAll(body)
-		if err == nil && len(data) < usageDecodedLimit {
+		data, err := io.ReadAll(io.LimitReader(body, usageBodyLimit+1))
+		if err == nil && len(data) <= usageBodyLimit {
 			m.document(data)
 		}
 		return
 	}
+	body = io.LimitReader(body, usageDecodedLimit)
 	buffer := make([]byte, 32<<10)
 	for {
 		n, err := body.Read(buffer)
