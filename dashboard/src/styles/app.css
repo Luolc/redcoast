@@ -259,7 +259,12 @@ th.n {
 
 .content {
   padding: var(--t-space-6) var(--t-space-6) var(--t-space-12);
+}
+.content > * {
   max-width: var(--t-width-main);
+}
+.content > .wide {
+  max-width: none;
 }
 
 /* Page heading: the serif is used here and in empty states only. */
@@ -563,6 +568,10 @@ th.n {
   border-radius: var(--t-radius-md);
   overflow: hidden;
 }
+/* A table too wide for a narrow screen scrolls inside its frame. */
+.table-wrap.scroll {
+  overflow-x: auto;
+}
 table {
   width: 100%;
   border-collapse: collapse;
@@ -614,6 +623,17 @@ tbody tr.link {
 }
 .mono {
   font-family: var(--t-font-mono);
+}
+/* The quota windows take the room; the account's email and plan wrap. */
+.quota-table th.win {
+  width: 25%;
+}
+.quota-table .meter {
+  min-width: 12rem;
+}
+.quota-table .plan {
+  min-width: 10rem;
+  overflow-wrap: anywhere;
 }
 .client-name {
   display: flex;

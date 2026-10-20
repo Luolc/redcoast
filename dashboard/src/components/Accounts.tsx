@@ -46,7 +46,7 @@ function Pause({ account: a }: { account: Account }) {
 
 function Plan({ account: a }: { account: Account }) {
   return (
-    <div className="small muted">
+    <div className="small muted plan">
       {a.email} · {a.plan?.name ?? "no plan"}
       {a.next_plan === null ? null : (
         <>
@@ -68,14 +68,18 @@ export function AccountsTable({ data, now }: { data: Dashboard; now: Date }) {
       <Empty title="No accounts.">The gateway has no account configured.</Empty>
     );
   return (
-    <div className="table-wrap">
-      <table>
+    <div className="table-wrap scroll">
+      <table className="quota-table">
         <thead>
           <tr>
             <th scope="col">Account</th>
             <th scope="col">Status</th>
-            <th scope="col">5 h window</th>
-            <th scope="col">7 d window</th>
+            <th scope="col" className="win">
+              5 h window
+            </th>
+            <th scope="col" className="win">
+              7 d window
+            </th>
             <th scope="col">Egress IP</th>
             <th scope="col" className="n">
               Sessions
@@ -92,7 +96,7 @@ export function AccountsTable({ data, now }: { data: Dashboard; now: Date }) {
         <tbody>
           {data.accounts.map((a) => (
             <tr key={a.alias}>
-              <td className="two">
+              <td className="two wrap">
                 <div className="client-name">{a.alias}</div>
                 <Plan account={a} />
               </td>

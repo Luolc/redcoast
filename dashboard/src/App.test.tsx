@@ -72,6 +72,17 @@ it("renders each page of the sample", () => {
   }
 });
 
+it("widens only Overview's Account quota past the page's width", () => {
+  const wide = (route: Route) =>
+    [
+      ...renderToStaticMarkup(
+        <Page data={data} now={now} route={route} />,
+      ).matchAll(/<section class="section wide"[^>]*><div[^>]*><h2>([^<]*)/g),
+    ].map((m) => m[1]);
+  expect(wide({ view: "overview" })).toEqual(["Account quota"]);
+  expect(wide({ view: "accounts" })).toEqual([]);
+});
+
 it("filters sessions to one machine", () => {
   const html = page({ view: "sessions", arg: "machine-b" });
   expect(html).not.toContain("P3ZT8WQN");
