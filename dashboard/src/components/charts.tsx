@@ -142,3 +142,57 @@ export function HourBars({
     </div>
   );
 }
+
+/**
+ * A trend line over hours, oldest first, filling its tile's width; each
+ * hour's value is in its tooltip.
+ */
+export function Spark({
+  label,
+  hours,
+  values,
+  format,
+}: {
+  label: string;
+  hours: string[];
+  values: number[];
+  format: (v: number) => string;
+}) {
+  const W = 200;
+  const H = 40;
+  const n = values.length;
+  if (n < 2) return null;
+  const max = Math.max(...values, 1) * 1.1;
+  const x = (i: number) => (i * W) / (n - 1);
+  const y = (v: number) => H - (v / max) * H;
+  const last = values[n - 1] ?? 0;
+  return (
+    <svg
+      className="tile-spark"
+      viewBox={`0 0 ${String(W)} ${String(H)}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label={`${label}, last 24 h`}
+    >
+      {hours.map((iso, i) => (
+        <rect
+          key={iso}
+          className="hit"
+          x={x(i) - W / (n - 1) / 2}
+          y={0}
+          width={W / (n - 1)}
+          height={H}
+        >
+          <title>{`${formatClock(iso)} UTC: ${format(values[i] ?? 0)}`}</title>
+        </rect>
+      ))}
+      <polyline
+        className="l"
+        points={values
+          .map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`)
+          .join(" ")}
+      />
+      <circle className="d" cx={x(n - 1)} cy={y(last)} r={2.5} />
+    </svg>
+  );
+}

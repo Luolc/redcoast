@@ -36,7 +36,16 @@ it("renders each page of the sample", () => {
     [{ view: "sessions", arg: "machine-b" }, ["W8MN4TQC", "on machine-b"]],
     [{ view: "accounts" }, ["ab@example.test", "max-20x from"]],
     [{ view: "exits" }, ["IP not read", "registry.npmjs.org:443", "Direct"]],
-    [{ view: "monitor" }, ["Upstream server error", "Store", "v0.1.0"]],
+    [
+      { view: "monitor" },
+      [
+        "Requests this hour",
+        "tunnels open",
+        "5 h window",
+        "Upstream server error",
+        "v0.1.0",
+      ],
+    ],
   ];
   for (const [route, texts] of expected) {
     const html = page(route);

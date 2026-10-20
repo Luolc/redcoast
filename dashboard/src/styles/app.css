@@ -1173,3 +1173,7 @@ tbody tr.link {
 .client-name a:hover {
   color: var(--t-accent);
 }
+.stats.five {
+  grid-template-columns: 1.25fr repeat(4, 1fr);
+  margin-bottom: 0;
+}
