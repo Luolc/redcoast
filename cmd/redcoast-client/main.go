@@ -296,9 +296,8 @@ var versionPattern = regexp.MustCompile(session.VersionNumber)
 // longer than versionTimeout: knowing the version is not worth delaying or refusing
 // the launch. The run has no session, so it gets only PATH and HOME and a proxy that
 // refuses every connection, and it runs in / rather than in a project whose settings
-// it might read. It gets its own
-// process group, which is killed on the timeout and when a descendant still holds the
-// output.
+// it might read. It gets its own process group, which is killed on the timeout and
+// when a descendant still holds the output.
 func clientVersion(ctx context.Context, executable string, environ []string) string {
 	ctx, cancel := context.WithTimeout(ctx, versionTimeout)
 	defer cancel()

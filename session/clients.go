@@ -19,13 +19,18 @@ var clientVersionPattern = regexp.MustCompile(`^` + VersionNumber + `$`)
 
 // clientColumn is the client program of the session s as SQL: the launch metadata's
 // client when it is one of ClientPrograms, else empty. The metadata comes from the
-// client machine, so nothing else of it reaches the dashboard.
-var clientColumn = `CASE WHEN json_extract(s.launch_meta, '$.client') IN ('` + strings.Join(ClientPrograms, "', '") + `')
+// client machine, so nothing else of it reaches the dashboard. Each column built on
+// it checks json_valid first, in a WHEN of its own because CASE stops at the first
+// match: the store checks the metadata with Go's json.Valid, which allows deeper
+// nesting than SQLite's parser, and json_extract on such a row fails the whole query.
+var clientColumn = `CASE WHEN NOT json_valid(s.launch_meta) THEN ''
+	WHEN json_extract(s.launch_meta, '$.client') IN ('` + strings.Join(ClientPrograms, "', '") + `')
 	THEN json_extract(s.launch_meta, '$.client') ELSE '' END`
 
 // clientVersionColumn is the launch metadata's client_version of the session s when
 // it is a string, else empty; clientVersion checks its form.
-const clientVersionColumn = `CASE WHEN json_type(s.launch_meta, '$.client_version') = 'text' THEN json_extract(s.launch_meta, '$.client_version') ELSE '' END`
+const clientVersionColumn = `CASE WHEN NOT json_valid(s.launch_meta) THEN ''
+	WHEN json_type(s.launch_meta, '$.client_version') = 'text' THEN json_extract(s.launch_meta, '$.client_version') ELSE '' END`
 
 // clientVersion returns version when it has the form VersionNumber and client is
 // known, else empty.

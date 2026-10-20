@@ -11,8 +11,9 @@ import (
 
 // TestDashboardClients checks that live sessions carry the client program and version
 // the launcher reported, that sessions and requests are counted by client machine and
-// client program, and that a missing or malformed report counts as unknown without
-// any of its text, or any other launch metadata, reaching the snapshot.
+// client program, and that a missing or malformed report, or metadata SQLite cannot
+// parse, counts as unknown without any of its text, or any other launch metadata,
+// reaching the snapshot.
 func TestDashboardClients(t *testing.T) {
 	ctx := context.Background()
 	c := newClock()
@@ -42,6 +43,8 @@ func TestDashboardClients(t *testing.T) {
 	forged := issue("devbox-2", `{"client":"<b>forged</b>","client_version":"9.9.9"}`)
 	noisy := issue("devbox-2", `{"client":"codex-cli","client_version":"0.46.0 <b>noise</b>"}`)
 	numeric := issue("devbox-2", `{"client":7,"client_version":1.5}`)
+	// Valid for Go's json.Valid, too deep for SQLite's JSON parser.
+	nested := issue("devbox-2", `{"client":"pi","a":`+strings.Repeat("[", 1500)+strings.Repeat("]", 1500)+`}`)
 	old := issue("devbox-1", `{"client":"claude-code","client_version":"2.0.0"}`)
 	if _, err := store.db.Exec("UPDATE sessions SET created_at = ?, ended_at = ? WHERE id = ?", now.Add(-8*24*time.Hour).UnixMilli(), now.Add(-8*24*time.Hour).UnixMilli(), old.ID); err != nil {
 		t.Fatal(err)
@@ -51,6 +54,7 @@ func TestDashboardClients(t *testing.T) {
 	request(pi, now.Add(-time.Minute))
 	request(forged, now.Add(-time.Minute))
 	request(numeric, now.Add(-time.Minute))
+	request(nested, now.Add(-time.Minute))
 	if err := store.Revoke(ctx, pi.Token, "client_exit"); err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +74,7 @@ func TestDashboardClients(t *testing.T) {
 		forged.ID[:shortID]:     {"", ""},
 		noisy.ID[:shortID]:      {"codex-cli", ""},
 		numeric.ID[:shortID]:    {"", ""},
+		nested.ID[:shortID]:     {"", ""},
 	}
 	if len(live) != len(want) {
 		t.Fatalf("sessions = %+v", snap.Sessions)
@@ -82,7 +87,7 @@ func TestDashboardClients(t *testing.T) {
 	wantCounts := []ClientCount{
 		{Machine: "devbox-1", Client: "claude-code", Live: 1, Sessions: 1},
 		{Machine: "devbox-1", Client: "pi", Live: 0, Sessions: 1},
-		{Machine: "devbox-2", Client: "", Live: 3, Sessions: 3},
+		{Machine: "devbox-2", Client: "", Live: 4, Sessions: 4},
 		{Machine: "devbox-2", Client: "codex-cli", Live: 1, Sessions: 1},
 	}
 	if !slices.Equal(snap.Clients, wantCounts) {
@@ -93,7 +98,7 @@ func TestDashboardClients(t *testing.T) {
 		{Hour: hour.Add(-2 * time.Hour), Machine: "devbox-1", Client: "claude-code", Requests: 1},
 		{Hour: hour.Add(-time.Hour), Machine: "devbox-1", Client: "claude-code", Requests: 1},
 		{Hour: hour.Add(-time.Hour), Machine: "devbox-1", Client: "pi", Requests: 1},
-		{Hour: hour.Add(-time.Hour), Machine: "devbox-2", Client: "", Requests: 2},
+		{Hour: hour.Add(-time.Hour), Machine: "devbox-2", Client: "", Requests: 3},
 	}
 	if !slices.Equal(snap.ClientHourly, wantHourly) {
 		t.Fatalf("client_hourly = %+v, want %+v", snap.ClientHourly, wantHourly)

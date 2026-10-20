@@ -28,6 +28,8 @@ func script(t *testing.T, body string) string {
 // kept, and that a client that fails, prints no version or does not finish in time
 // gives no version, at once, even when a descendant keeps its output open.
 func TestClientVersion(t *testing.T) {
+	old := versionTimeout
+	t.Cleanup(func() { versionTimeout = old })
 	versionTimeout = 500 * time.Millisecond
 	environ := []string{"PATH=/usr/bin:/bin"}
 	for _, test := range []struct{ name, body, want string }{
