@@ -155,6 +155,7 @@ func TestDashboardLinks(t *testing.T) {
 		{"port_name_tls", ":7805", "gateway.example.test:7807", true, "https://gateway.example.test:7805/"},
 		{"port_ipv6", ":7805", "[fd00::7]:7807", false, "http://[fd00::7]:7805/"},
 		{"port_host_without_port", ":7805", "gateway.example.test", false, "http://gateway.example.test:7805/"},
+		{"port_ipv6_without_port", ":7805", "[fd00::7]", false, "http://[fd00::7]:7805/"},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
 			var got []DashboardLink

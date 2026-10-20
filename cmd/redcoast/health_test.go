@@ -181,6 +181,8 @@ func TestDashboardLinksConfiguration(t *testing.T) {
 		{"relative_path", "claude", link("codex", "/codex/"), nil, "dashboard_links[0].url: must be an http or https URL"},
 		{"protocol_relative", "claude", link("codex", "//192.0.2.10:7807/"), nil, "dashboard_links[0].url: must be an http or https URL"},
 		{"empty_url", "claude", link("codex", ""), nil, "dashboard_links[0].url: must be an http or https URL"},
+		{"url_port_too_high", "claude", link("codex", "http://127.0.0.1:99999/"), nil, "dashboard_links[0].url: needs a port between 1 and 65535"},
+		{"url_port_zero", "claude", link("codex", "http://127.0.0.1:0/"), nil, "dashboard_links[0].url: needs a port between 1 and 65535"},
 		{"port_zero", "claude", link("codex", ":0"), nil, "dashboard_links[0].url: :<port> needs a port"},
 		{"port_too_high", "claude", link("codex", ":65536"), nil, "dashboard_links[0].url: :<port> needs a port"},
 		{"port_leading_zero", "claude", link("codex", ":07807"), nil, "dashboard_links[0].url: :<port> needs a port"},

@@ -350,6 +350,11 @@ func dashboardURL(raw string) error {
 	if u.User != nil {
 		return errors.New("must not carry a user name or password")
 	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return errors.New("needs a port between 1 and 65535")
+		}
+	}
 	return nil
 }
 
