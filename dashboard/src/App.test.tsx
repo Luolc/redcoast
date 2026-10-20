@@ -12,6 +12,8 @@ import {
 } from "./lib/format";
 import { durationSeries, hourSeries } from "./lib/stats";
 import type { Route } from "./lib/route";
+import appCss from "./styles/app.css?raw";
+import tokensCss from "./styles/tokens.css?raw";
 
 const now = new Date("2026-10-07T12:20:00Z");
 const data = sampleDashboard(now);
@@ -72,15 +74,121 @@ it("renders each page of the sample", () => {
   }
 });
 
-it("widens only Overview's Account quota past the page's width", () => {
-  const wide = (route: Route) =>
-    [
-      ...renderToStaticMarkup(
-        <Page data={data} now={now} route={route} />,
-      ).matchAll(/<section class="section wide"[^>]*><div[^>]*><h2>([^<]*)/g),
-    ].map((m) => m[1]);
-  expect(wide({ view: "overview" })).toEqual(["Account quota"]);
-  expect(wide({ view: "accounts" })).toEqual([]);
+// The declarations of the rule whose whole selector is exactly sel: it
+// starts after the end of a rule or comment.
+function rule(css: string, sel: string): string {
+  const escaped = sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const at = new RegExp(`(?<=[}/]\\n(?:\\n)?)${escaped} \\{`).exec(css)?.index;
+  if (at === undefined) throw new Error(`no rule ${sel}`);
+  return css.slice(at, css.indexOf("}", at));
+}
+
+it("lets every page fill the main area at any width", () => {
+  // No width cap on the page or what holds it.
+  for (const sel of [".shell", ".main", ".content"])
+    expect(rule(appCss, sel)).not.toContain("max-width");
+  // The topbar's contents and the page share their left and right edges.
+  expect(rule(appCss, ".content")).toContain(
+    "padding: var(--t-space-6) var(--t-space-6) var(--t-space-12);",
+  );
+  expect(rule(appCss, ".topbar")).toContain("padding: 0 var(--t-space-6);");
+  // Nothing in the page is held narrower than the page, and no section is
+  // set apart to be wider than the rest.
+  expect(appCss).not.toMatch(/\.content\s*>/);
+  const views = [
+    "overview",
+    "clients",
+    "sessions",
+    "accounts",
+    "exits",
+    "monitor",
+  ] as const;
+  const classes = (view: (typeof views)[number]) => [
+    ...new Set(
+      [
+        ...renderToStaticMarkup(
+          <Page data={data} now={now} route={{ view }} />,
+        ).matchAll(/<section class="([^"]*)"/g),
+      ].map((m) => m[1]),
+    ),
+  ];
+  expect(Object.fromEntries(views.map((v) => [v, classes(v)]))).toEqual(
+    Object.fromEntries(views.map((v) => [v, ["section"]])),
+  );
+});
+
+it("lays a ranked list out in columns that fill its panel", () => {
+  // Each item stays 32rem or so, its label, bar and count together; the
+  // columns fill the width; a key-value list's values reach its right edge.
+  expect(tokensCss).toContain("--t-width-list: 32rem;");
+  expect(rule(appCss, ".rank")).toContain(
+    "minmax(min(var(--t-width-list), 100%), 1fr)",
+  );
+  // No empty columns past the last item on a very wide screen.
+  expect(rule(appCss, ".rank")).toContain("auto-fit,");
+  expect(rule(appCss, ".kv")).not.toContain("max-width");
+});
+
+it("lines up each quota row on its first line", () => {
+  expect(rule(appCss, ".quota-table td")).toContain("vertical-align: top;");
+  expect(rule(appCss, ".quota-table th")).toContain("vertical-align: bottom;");
+});
+
+it("sets each icon on the baseline of the text beside it", () => {
+  // The pair keeps the text's baseline; the icon is centred on the letters
+  // and adds no height to the line.
+  const pair =
+    /\n\.status,\n\.pace,\n\.stale,\n\.with-icon,\n\.btn,\n\.tools \.item \{[^}]*\}/.exec(
+      appCss,
+    )?.[0] ?? "";
+  expect(pair).toContain("align-items: baseline;");
+  const icon = rule(
+    appCss,
+    ":is(.status, .pace, .stale, .with-icon, .btn, .tools .item, .client-name)\n  > .icon",
+  );
+  expect(icon).toContain("top: calc(var(--icon-size) / 2 - 0.35em);");
+  expect(icon).toContain("margin-top: calc(-1 * var(--icon-size));");
+  // Rows that mix text sizes keep one baseline.
+  for (const sel of [
+    ".client-name",
+    ".red-chart .title",
+    ".red-chart .title .key",
+    ".card-head",
+    ".card .line",
+    ".seg a",
+  ])
+    expect(rule(appCss, sel)).toContain("align-items: baseline;");
+  // Every icon beside a word in the binding history and a stale reading
+  // is in such a pair.
+  const html = renderToStaticMarkup(
+    <Page data={data} now={now} route={{ view: "sessions" }} />,
+  );
+  expect(html).toMatch(/<span class="with-icon"><svg/);
+  expect(
+    renderToStaticMarkup(
+      <Page data={data} now={now} route={{ view: "accounts" }} />,
+    ),
+  ).toMatch(/<span class="stale s-warn"><svg[^]*?<\/svg><span>read /);
+});
+
+it("right-aligns Clients' share and steps the egress check alike", () => {
+  const html = renderToStaticMarkup(
+    <Page data={data} now={now} route={{ view: "clients" }} />,
+  );
+  expect(html.includes('<th scope="col" class="n">Share</th>')).toBe(true);
+  expect(rule(appCss, ".share-cell")).toContain("text-align: right;");
+  // The IP's line has one height in the quota table, on Exits and Monitor.
+  expect(rule(appCss, ".ip")).toContain("line-height: var(--t-height-pill);");
+  expect(rule(appCss, ".ip + *")).toContain("margin-top: 2px;");
+  expect(
+    renderToStaticMarkup(
+      <Page data={data} now={now} route={{ view: "exits" }} />,
+    ),
+  ).toContain('<div class="mono ip">');
+});
+
+it("puts a table row's cells on one baseline", () => {
+  expect(rule(appCss, "td")).toContain("vertical-align: baseline;");
 });
 
 it("filters sessions to one machine", () => {

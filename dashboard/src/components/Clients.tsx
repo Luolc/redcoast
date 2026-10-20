@@ -114,7 +114,9 @@ function ClientTable({ data }: { data: Dashboard }) {
                 <th scope="col" className="n">
                   Requests, 24 h
                 </th>
-                <th scope="col">Share</th>
+                <th scope="col" className="n">
+                  Share
+                </th>
                 <th scope="col">24 h</th>
               </tr>
             </thead>
