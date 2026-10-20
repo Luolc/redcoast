@@ -122,7 +122,7 @@ func TestDashboardLinks(t *testing.T) {
 	t.Cleanup(func() { _ = reader.Close() })
 	read := func(t *testing.T, links []DashboardLink, host string, overTLS bool) json.RawMessage {
 		t.Helper()
-		handler := NewDashboard(NewEgress(h.accounts, h.store), DashboardConfig{Provider: "codex", Links: links, Reader: reader, Store: h.store, DBPath: h.path}).Handler()
+		handler := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "codex", Links: links, Reader: reader, Store: h.store, DBPath: h.path}).Handler()
 		request := httptest.NewRequest(http.MethodGet, "/dashboard.json", nil)
 		request.Host = host
 		if overTLS {
