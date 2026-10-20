@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Luolc/redcoast/claude"
 	"github.com/Luolc/redcoast/internal/testtls"
 )
 
@@ -144,6 +145,67 @@ func TestNotifyReady(t *testing.T) {
 			}
 			if want := fmt.Sprintf("MAINPID=%d\nREADY=1", os.Getpid()); err != nil || string(buffer[:n]) != want {
 				t.Fatalf("received %q, %v; want %q", buffer[:n], err, want)
+			}
+		})
+	}
+}
+
+// TestDashboardLinksConfiguration checks dashboard_links: each entry names the other
+// provider once, with an http or https URL that has a host and no user name or
+// password, or ":<port>"; no key gives no links. A refused URL is not repeated in the
+// error.
+func TestDashboardLinksConfiguration(t *testing.T) {
+	const section = "codex: {accounts_dir: /var/lib/redcoast-codex/accounts, session_key: 'env://SESSION_KEY'}\n"
+	link := func(provider, url string) string {
+		return "dashboard_links:\n  - provider: " + provider + "\n    url: '" + url + "'\n"
+	}
+	for _, test := range []struct {
+		name, provider, yaml string
+		want                 []claude.DashboardLink // expected when accepted
+		problem              string                 // part of the error when refused
+	}{
+		{"none", "claude", "", nil, ""},
+		{"empty", "claude", "dashboard_links: []\n", nil, ""},
+		{"http", "claude", link("codex", "http://127.0.0.1:7807/"), []claude.DashboardLink{{Provider: "codex", URL: "http://127.0.0.1:7807/"}}, ""},
+		{"https_with_path", "codex", link("claude", "https://gateway.example.test/claude/"), []claude.DashboardLink{{Provider: "claude", URL: "https://gateway.example.test/claude/"}}, ""},
+		{"port_only", "claude", link("codex", ":7807"), []claude.DashboardLink{{Provider: "codex", URL: ":7807"}}, ""},
+		{"highest_port", "claude", link("codex", ":65535"), []claude.DashboardLink{{Provider: "codex", URL: ":65535"}}, ""},
+		{"own_provider", "claude", link("claude", ":7805"), nil, "dashboard_links[0].provider: must be another provider"},
+		{"unknown_provider", "claude", link("gemini", ":7809"), nil, "dashboard_links[0].provider: must be claude or codex"},
+		{"twice", "claude", link("codex", ":7807") + "  - {provider: codex, url: ':7808'}\n", nil, "dashboard_links[1].provider: listed twice"},
+		{"userinfo", "claude", link("codex", "http://operator:example-password@127.0.0.1:7807/"), nil, "dashboard_links[0].url: must not carry a user name or password"},
+		{"user_only", "claude", link("codex", "http://operator@127.0.0.1:7807/"), nil, "dashboard_links[0].url: must not carry a user name or password"},
+		{"javascript", "claude", link("codex", "javascript:alert(1)"), nil, "dashboard_links[0].url: must be an http or https URL"},
+		{"ftp", "claude", link("codex", "ftp://192.0.2.10/"), nil, "dashboard_links[0].url: must be an http or https URL"},
+		{"no_host", "claude", link("codex", "http:///dashboard"), nil, "dashboard_links[0].url: must be an http or https URL"},
+		{"relative_path", "claude", link("codex", "/codex/"), nil, "dashboard_links[0].url: must be an http or https URL"},
+		{"protocol_relative", "claude", link("codex", "//192.0.2.10:7807/"), nil, "dashboard_links[0].url: must be an http or https URL"},
+		{"empty_url", "claude", link("codex", ""), nil, "dashboard_links[0].url: must be an http or https URL"},
+		{"url_port_too_high", "claude", link("codex", "http://127.0.0.1:99999/"), nil, "dashboard_links[0].url: needs a port between 1 and 65535"},
+		{"url_port_zero", "claude", link("codex", "http://127.0.0.1:0/"), nil, "dashboard_links[0].url: needs a port between 1 and 65535"},
+		{"port_zero", "claude", link("codex", ":0"), nil, "dashboard_links[0].url: :<port> needs a port"},
+		{"port_too_high", "claude", link("codex", ":65536"), nil, "dashboard_links[0].url: :<port> needs a port"},
+		{"port_leading_zero", "claude", link("codex", ":07807"), nil, "dashboard_links[0].url: :<port> needs a port"},
+		{"port_with_path", "claude", link("codex", ":7807/x"), nil, "dashboard_links[0].url: :<port> needs a port"},
+		{"unknown_key", "claude", "dashboard_links:\n  - {provider: codex, url: ':7807', label: Codex}\n", nil, "field label not found"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			yaml := baseConfig + test.yaml
+			if test.provider == "codex" {
+				yaml += section
+			}
+			cfg, err := parseConfig(test.provider, []byte(yaml))
+			if test.problem != "" {
+				if err == nil || !strings.Contains(err.Error(), test.problem) {
+					t.Fatalf("got %v, want %q", err, test.problem)
+				}
+				if strings.Contains(err.Error(), "example-password") {
+					t.Fatalf("the error repeats the URL: %v", err)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(cfg.dashboardLinks, test.want) {
+				t.Fatalf("got %+v %v, want %+v", cfg.dashboardLinks, err, test.want)
 			}
 		})
 	}

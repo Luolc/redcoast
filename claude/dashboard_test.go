@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"maps"
@@ -51,7 +52,7 @@ func TestDashboardJSON(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reader.Close() })
 	inventoryCommit := strings.Repeat("b", 40)
-	d := NewDashboard(e, DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Version: "1.2.3", Inventory: inventoryTree(t, inventoryCommit),
+	d := NewDashboard(e, DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path, Version: "1.2.3", Inventory: inventoryTree(t, inventoryCommit),
 		Started: h.clock.Add(-time.Hour), Tunnels: func() (int, int) { return 3, 256 }})
 
 	recorder := httptest.NewRecorder()
@@ -85,7 +86,7 @@ func TestDashboardJSON(t *testing.T) {
 		t.Fatalf("health = %+v", view.Health)
 	}
 	g := view.Gateway
-	if g.Version != "1.2.3" || g.InventoryCommit != inventoryCommit || g.OpenTunnels != 3 || g.TunnelLimit != 256 || g.Backup != nil {
+	if g.Provider != "claude" || g.Dashboards == nil || len(g.Dashboards) != 0 || g.Version != "1.2.3" || g.InventoryCommit != inventoryCommit || g.OpenTunnels != 3 || g.TunnelLimit != 256 || g.Backup != nil {
 		t.Fatalf("gateway = %+v", g)
 	}
 	if len(view.Accounts) != 2 {
@@ -105,6 +106,66 @@ func TestDashboardJSON(t *testing.T) {
 		if strings.Contains(body, secret) {
 			t.Fatalf("dashboard shows %q: %s", secret, body)
 		}
+	}
+}
+
+// TestDashboardLinks reads the other providers' dashboards from the JSON: an absolute
+// URL as configured, and ":<port>" as the scheme and Host name the request came with at
+// that port, for an IP, a name, an IPv6 literal and a Host without a port. With no
+// links the list is empty, not null, so the page shows only its own provider.
+func TestDashboardLinks(t *testing.T) {
+	h := newHarness(t, "sample-a")
+	reader, err := session.OpenReadOnly(h.path, session.Config{Now: func() time.Time { return h.clock }}, DefaultLimits.MaxTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	read := func(t *testing.T, links []DashboardLink, host string, overTLS bool) json.RawMessage {
+		t.Helper()
+		handler := NewDashboard(NewEgress(h.accounts, h.store), DashboardConfig{Provider: "codex", Links: links, Reader: reader, Store: h.store, DBPath: h.path}).Handler()
+		request := httptest.NewRequest(http.MethodGet, "/dashboard.json", nil)
+		request.Host = host
+		if overTLS {
+			request.TLS = &tls.ConnectionState{}
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		var view struct {
+			Gateway struct {
+				Provider   string
+				Dashboards json.RawMessage
+			}
+		}
+		if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &view) != nil || view.Gateway.Provider != "codex" {
+			t.Fatalf("dashboard answered %d: %s", recorder.Code, recorder.Body.String())
+		}
+		return view.Gateway.Dashboards
+	}
+	if got := string(read(t, nil, "127.0.0.1:7807", false)); got != "[]" {
+		t.Fatalf("no links gave %s", got)
+	}
+	for _, arm := range []struct {
+		name, link, host string
+		overTLS          bool
+		want             string
+	}{
+		{"absolute", "https://gateway.example.test:7805/", "127.0.0.1:7807", false, "https://gateway.example.test:7805/"},
+		{"absolute_with_path", "http://192.0.2.10/claude/", "127.0.0.1:7807", true, "http://192.0.2.10/claude/"},
+		{"port_ip", ":7805", "127.0.0.1:7807", false, "http://127.0.0.1:7805/"},
+		{"port_name_tls", ":7805", "gateway.example.test:7807", true, "https://gateway.example.test:7805/"},
+		{"port_ipv6", ":7805", "[fd00::7]:7807", false, "http://[fd00::7]:7805/"},
+		{"port_host_without_port", ":7805", "gateway.example.test", false, "http://gateway.example.test:7805/"},
+		{"port_ipv6_without_port", ":7805", "[fd00::7]", false, "http://[fd00::7]:7805/"},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			var got []DashboardLink
+			if err := json.Unmarshal(read(t, []DashboardLink{{Provider: "claude", URL: arm.link}}, arm.host, arm.overTLS), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, []DashboardLink{{Provider: "claude", URL: arm.want}}) {
+				t.Fatalf("dashboards = %+v, want %s", got, arm.want)
+			}
+		})
 	}
 }
 
