@@ -198,9 +198,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if row.Result == "" {
 			row.Result = outcome(state, r.Context().Err() != nil || aborted != nil)
 		}
-		if row.Result == "upstream_failed" && accountFault(state, r.Context()) {
-			rt.upstreamFailed(state.alias)
-		}
+		rt.upstreamFailed(r.Context(), state)
 		if !refusedBeforeBinding[row.Result] || rt.refusals.allow(session.SourceOf(r.RemoteAddr), rt.now()) {
 			rt.record(row)
 		}
@@ -404,20 +402,24 @@ const (
 // failures.
 const upstreamFailedReason = "upstream_failed"
 
-// accountFault reports whether a request the gateway answered for an unreachable
-// upstream counts against its account: no upstream response arrived, and the request
-// was not ended by the client (client is the client's request context, canceled when
-// the client leaves or its connection breaks), by a limit, or by the provider's guard,
-// none of which says anything about the account's route.
-func accountFault(state *requestState, client context.Context) bool {
+// accountFault reports whether a request counts against its account: the gateway
+// answered it for an unreachable upstream (result upstream_failed), no upstream
+// response arrived, and it was not ended by the client (client is the client's request
+// context, canceled when the client leaves or its connection breaks), by a limit, or
+// by the provider's guard, none of which says anything about the account's route.
+func accountFault(client context.Context, state *requestState) bool {
 	return state.upstreamUnavailable && state.upstreamStatus == 0 && state.cut == nil &&
 		client.Err() == nil && !errors.Is(state.upstreamErr, errGuardRefused)
 }
 
-// upstreamFailed counts a failure against account alias and, when it completes a run,
-// pauses the account for upstreamFailurePause. The log line names only the alias.
-func (rt *router) upstreamFailed(alias string) {
-	now := rt.now()
+// upstreamFailed counts a request that accountFault holds against its account and,
+// when it completes a run, pauses the account for upstreamFailurePause. The log line
+// names only the alias.
+func (rt *router) upstreamFailed(client context.Context, state *requestState) {
+	if !accountFault(client, state) {
+		return
+	}
+	alias, now := state.alias, rt.now()
 	if !rt.failures.fail(alias, now) {
 		return
 	}

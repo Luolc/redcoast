@@ -1059,3 +1059,43 @@ func TestFailureRunWindow(t *testing.T) {
 		})
 	}
 }
+
+// TestLimitCutsPauseNothing checks that requests the gateway's own limits end before
+// the upstream answers never count against the account, however many arrive in a row;
+// the next request goes through the same account.
+func TestLimitCutsPauseNothing(t *testing.T) {
+	h := newHarness(t)
+	exit := startFlakyExit(t)
+	exitURL, err := url.Parse(exit.server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.addWithExit("sample-a", "sk-ant-oat01-synthetic-token-a", exitURL)
+	h.add("sample-b", "sk-ant-oat01-synthetic-token-b")
+	h.token, h.sessionID = h.issue()
+	target, err := url.Parse("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := h.router(target, accountTransport{})
+	rt.limits.Idle = 50 * time.Millisecond
+	server := httptest.NewServer(rt)
+	t.Cleanup(server.Close)
+	exit.mode.Store("hold")
+	for i := range upstreamFailureRun {
+		if got, _ := post(t, h, server, h.token, `{"messages":[]}`, "", ""); got != http.StatusBadGateway {
+			t.Fatalf("cut request: status=%d", got)
+		}
+		<-exit.held
+		if rows := h.trafficRows(i + 1); len(rows) != i+1 || rows[i].result != "idle_timeout" {
+			t.Fatalf("rows=%+v", rows)
+		}
+	}
+	if paused := h.paused(); len(paused) != 0 {
+		t.Fatalf("paused=%v", paused)
+	}
+	exit.mode.Store("ok")
+	if got, body := post(t, h, server, h.token, `{"messages":[]}`, "", ""); got != 200 || body != `{"exit":"A"}` {
+		t.Fatalf("next request: status=%d body=%q", got, body)
+	}
+}
