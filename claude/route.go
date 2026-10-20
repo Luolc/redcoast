@@ -195,10 +195,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 	if rt.provider.Screen != nil {
 		if status, message := rt.provider.Screen(r); status != 0 {
-			row.Result, row.Request = "refused", truncate(line, maxRequestLine)
-			if status == http.StatusUpgradeRequired {
-				row.Result = "upgrade_declined"
-			}
+			row.Result, row.Request = screenResult(status), truncate(line, maxRequestLine)
 			http.Error(down, message, status)
 			return
 		}
@@ -264,6 +261,14 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	serveWithLimits(rt.proxy, rt.limits, state, up, down, r.WithContext(context.WithValue(ctx, accountKey{}, a)))
+}
+
+// screenResult is the result of a request the provider's screen answered with status.
+func screenResult(status int) string {
+	if status == http.StatusUpgradeRequired {
+		return "upgrade_declined"
+	}
+	return "refused"
 }
 
 // localRateLimit answers a request no account can serve because every account is at or
