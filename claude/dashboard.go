@@ -1,10 +1,13 @@
 package claude
 
 import (
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Luolc/redcoast/backup"
@@ -17,6 +20,8 @@ var commitName = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // DashboardConfig is what the dashboard reads besides the accounts and the egress
 // checks. Every field is read, none is written.
 type DashboardConfig struct {
+	Provider  string          // this process's provider, claude or codex
+	Links     []DashboardLink // the other providers' dashboards; nil for none
 	Reader    *session.Reader // the store over a read-only connection
 	Store     *session.Store  // only for its last retention run, kept in memory
 	DBPath    string          // the store's file, whose -wal file is measured
@@ -26,6 +31,15 @@ type DashboardConfig struct {
 	Tunnels   func() (open, limit int)
 	Backup    func() backup.Status // nil when no backups are configured
 	Dir       string               // holds the dashboard page, index.html, served at /; empty for none
+}
+
+// DashboardLink is another provider's dashboard, which the page offers as a link: the
+// page navigates there and reads nothing of it. URL is an http or https URL without a
+// user name or password, or ":<port>" for the page's own scheme and host at that port,
+// so that the link follows whatever name or tunnel reached this dashboard.
+type DashboardLink struct {
+	Provider string `json:"provider"`
+	URL      string `json:"url"`
 }
 
 // Dashboard is the read-only view of the gateway: GET /dashboard.json, and the
@@ -54,6 +68,8 @@ type dashboardView struct {
 // gatewayView is the overview. Retention, backup, egress and in-flight figures are this
 // process's memory: they cover the time since it started.
 type gatewayView struct {
+	Provider        string               `json:"provider"`         // claude or codex
+	Dashboards      []DashboardLink      `json:"dashboards"`       // the other providers' dashboards, each URL absolute
 	Version         string               `json:"version"`          // the release this binary was built from
 	InventoryCommit string               `json:"inventory_commit"` // the link's target now; empty when it names no commit
 	Started         time.Time            `json:"started"`
@@ -119,10 +135,15 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 	}
 	view.Health = d.egress.judge(statuses, nil)
 	view.Gateway = gatewayView{
+		Provider:        d.cfg.Provider,
+		Dashboards:      make([]DashboardLink, 0, len(d.cfg.Links)),
 		Version:         d.cfg.Version,
 		InventoryCommit: commitOf(d.cfg.Inventory),
 		Started:         d.cfg.Started.UTC(),
 		Retention:       d.cfg.Store.LastRetention(),
+	}
+	for _, link := range d.cfg.Links {
+		view.Gateway.Dashboards = append(view.Gateway.Dashboards, DashboardLink{Provider: link.Provider, URL: linkURL(link.URL, r)})
 	}
 	if info, err := os.Stat(d.cfg.DBPath + "-wal"); err == nil {
 		view.Gateway.WALBytes = info.Size()
@@ -135,6 +156,25 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 		view.Gateway.OpenTunnels, view.Gateway.TunnelLimit = d.cfg.Tunnels()
 	}
 	return view, nil
+}
+
+// linkURL returns link as it is, or for ":<port>" the root of r's scheme and Host
+// name at that port. The Host has passed the dashboard's host check before r reaches
+// here.
+func linkURL(link string, r *http.Request) string {
+	port, ok := strings.CutPrefix(link, ":")
+	if !ok {
+		return link
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Host
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	return (&url.URL{Scheme: scheme, Host: net.JoinHostPort(strings.Trim(host, "[]"), port), Path: "/"}).String()
 }
 
 // page serves dir/index.html for / and nothing else. The deploy account writes the

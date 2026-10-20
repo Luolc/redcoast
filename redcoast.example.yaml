@@ -35,6 +35,16 @@ admin_socket: /run/redcoast/admin.sock # required
 session_db: /var/lib/redcoast/sessions.db # required
 inventory: /etc/redcoast/inventory # required
 dashboard_dir: "" # built dashboard frontend; empty serves only /dashboard.json
+# The other providers' dashboards, which the page links to for switching;
+# empty shows only this one. Each url is an http or https URL without a user
+# name or password, or :<port> for the page's own scheme and host at that
+# port, which follows whatever name or ssh tunnel reached this dashboard (the
+# tunnel must then keep the remote ports). The page only navigates there;
+# that dashboard checks the Host itself, so the name must be one it answers.
+dashboard_links: []
+# dashboard_links:
+#   - provider: codex
+#     url: ":7807"
 capture_dir: ""
 
 egress_interval: 15m

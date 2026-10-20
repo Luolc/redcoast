@@ -227,7 +227,7 @@ func newDashboard(cfg config, store *session.Store, backups *backup.Backup, egre
 	if err != nil {
 		return dashboard{}, err
 	}
-	dc := claude.DashboardConfig{Reader: reader, Store: store, DBPath: cfg.sessionDB, Version: version, Inventory: cfg.inventory, Started: started, Tunnels: entrypoint.Tunnels, Dir: cfg.dashboardDir}
+	dc := claude.DashboardConfig{Provider: cfg.provider, Links: cfg.dashboardLinks, Reader: reader, Store: store, DBPath: cfg.sessionDB, Version: version, Inventory: cfg.inventory, Started: started, Tunnels: entrypoint.Tunnels, Dir: cfg.dashboardDir}
 	if cfg.dashboardDir != "" {
 		if info, err := os.Stat(filepath.Join(cfg.dashboardDir, "index.html")); err != nil || !info.Mode().IsRegular() {
 			log.Printf("dashboard: %s has no index.html; / answers 404, /dashboard.json is served", cfg.dashboardDir)

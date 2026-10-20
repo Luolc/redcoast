@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,16 +27,17 @@ import (
 
 // config holds the validated settings of the configuration file.
 type config struct {
-	provider           string   // claude or codex: the command's first word
-	listen             string   // reverse proxy (inference)
-	forwardListen      string   // forward proxy (side traffic)
-	socket             string   // unix socket of the session interface
-	sessionListen      string   // TCP address of the session interface for other machines; empty for none
-	adminSocket        string   // unix socket of the management interface
-	healthListen       string   // health endpoint
-	dashboardListen    string   // read-only dashboard
-	dashboardDir       string   // the dashboard frontend's built files; empty for none
-	hostNames          []string // the Host names /health and the dashboard answer
+	provider           string                 // claude or codex: the command's first word
+	listen             string                 // reverse proxy (inference)
+	forwardListen      string                 // forward proxy (side traffic)
+	socket             string                 // unix socket of the session interface
+	sessionListen      string                 // TCP address of the session interface for other machines; empty for none
+	adminSocket        string                 // unix socket of the management interface
+	healthListen       string                 // health endpoint
+	dashboardListen    string                 // read-only dashboard
+	dashboardDir       string                 // the dashboard frontend's built files; empty for none
+	dashboardLinks     []claude.DashboardLink // the other providers' dashboards; nil for none
+	hostNames          []string               // the Host names /health and the dashboard answer
 	egressInterval     time.Duration
 	limits             claude.Limits
 	accountConcurrency int
@@ -82,6 +84,13 @@ type codexFile struct {
 	TokenURL    string `yaml:"token_url"`
 }
 
+// dashboardLink is one entry of dashboard_links: the dashboard of another provider's
+// gateway, which this dashboard's page links to.
+type dashboardLink struct {
+	Provider string `yaml:"provider"`
+	URL      string `yaml:"url"`
+}
+
 // fileConfig is the configuration file. Keys it does not name are refused; keys left
 // out keep the defaults defaultFileConfig sets.
 type fileConfig struct {
@@ -96,13 +105,14 @@ type fileConfig struct {
 		AllowPublic bool     `yaml:"allow_public"`
 		TLS         *tlsFile `yaml:"tls"`
 	} `yaml:"listen"`
-	SessionSocket  string        `yaml:"session_socket"`
-	AdminSocket    string        `yaml:"admin_socket"`
-	SessionDB      string        `yaml:"session_db"`
-	Inventory      string        `yaml:"inventory"`
-	DashboardDir   string        `yaml:"dashboard_dir"`
-	CaptureDir     string        `yaml:"capture_dir"`
-	EgressInterval time.Duration `yaml:"egress_interval"`
+	SessionSocket  string          `yaml:"session_socket"`
+	AdminSocket    string          `yaml:"admin_socket"`
+	SessionDB      string          `yaml:"session_db"`
+	Inventory      string          `yaml:"inventory"`
+	DashboardDir   string          `yaml:"dashboard_dir"`
+	DashboardLinks []dashboardLink `yaml:"dashboard_links"`
+	CaptureDir     string          `yaml:"capture_dir"`
+	EgressInterval time.Duration   `yaml:"egress_interval"`
 	Limits         struct {
 		IdleTimeout        time.Duration `yaml:"idle_timeout"`
 		MaxRequestDuration time.Duration `yaml:"max_request_duration"`
@@ -262,11 +272,12 @@ func parseConfig(provider string, data []byte) (config, error) {
 		warning = "listen: " + strings.Join(public, ", ") + " on a public IP without listen.tls; session credentials cross the network in plain text"
 	}
 	hostNames := readOnlyHosts(report, f.Listen.Health, f.Listen.Dashboard, serverName, f.Listen.HostNames)
+	links := checkDashboardLinks(report, provider, f.DashboardLinks)
 	if len(errs) > 0 {
 		return config{}, errors.Join(errs...)
 	}
 	return config{provider: provider, codex: f.Codex, tls: serverTLS, serverName: serverName, warning: warning, listen: f.Listen.Reverse, forwardListen: f.Listen.Forward, socket: f.SessionSocket, sessionListen: f.Listen.Session, adminSocket: f.AdminSocket,
-		healthListen: f.Listen.Health, dashboardListen: f.Listen.Dashboard, dashboardDir: f.DashboardDir, hostNames: hostNames, egressInterval: f.EgressInterval, limits: limits,
+		healthListen: f.Listen.Health, dashboardListen: f.Listen.Dashboard, dashboardDir: f.DashboardDir, dashboardLinks: links, hostNames: hostNames, egressInterval: f.EgressInterval, limits: limits,
 		accountConcurrency: f.Limits.AccountConcurrency, upstream: target, sessionDB: f.SessionDB, captureDir: f.CaptureDir, inventory: f.Inventory,
 		tokenRef: token, credentialsStdin: f.Credentials.StdinTestEntry,
 		retention: session.Retention{Traffic: time.Duration(f.Retention.TrafficDays) * 24 * time.Hour, Sessions: time.Duration(f.Retention.SessionDays) * 24 * time.Hour},
@@ -296,6 +307,50 @@ func readOnlyHosts(report func(key, problem string), health, dashboard, serverNa
 		hosts = append(hosts, name)
 	}
 	return hosts
+}
+
+// checkDashboardLinks checks dashboard_links: each names another provider than
+// provider, once, and a URL that dashboardURL accepts. The errors do not repeat a URL,
+// which could carry a password.
+func checkDashboardLinks(report func(key, problem string), provider string, links []dashboardLink) []claude.DashboardLink {
+	seen := make(map[string]bool, len(links))
+	var checked []claude.DashboardLink
+	for i, link := range links {
+		key := fmt.Sprintf("dashboard_links[%d]", i)
+		switch {
+		case link.Provider != "claude" && link.Provider != "codex":
+			report(key+".provider", "must be claude or codex")
+		case link.Provider == provider:
+			report(key+".provider", "must be another provider than this gateway's")
+		case seen[link.Provider]:
+			report(key+".provider", "listed twice")
+		}
+		seen[link.Provider] = true
+		if err := dashboardURL(link.URL); err != nil {
+			report(key+".url", err.Error())
+		}
+		checked = append(checked, claude.DashboardLink{Provider: link.Provider, URL: link.URL})
+	}
+	return checked
+}
+
+// dashboardURL accepts an absolute http or https URL with a host and without a user name
+// or password, or ":<port>", the page's own scheme and host at another port.
+func dashboardURL(raw string) error {
+	if port, ok := strings.CutPrefix(raw, ":"); ok {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+			return errors.New(":<port> needs a port between 1 and 65535")
+		}
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || u.Hostname() == "" {
+		return errors.New("must be an http or https URL with a host, or :<port>")
+	}
+	if u.User != nil {
+		return errors.New("must not carry a user name or password")
+	}
+	return nil
 }
 
 // checkBackup checks that every backup key is set and has a plausible shape: an origin

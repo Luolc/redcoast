@@ -26,7 +26,16 @@ interface RetentionRun {
   error?: string | undefined;
 }
 
+// Another provider's gateway's dashboard. The page only links to it, and
+// reads nothing from it: its Host and Origin checks refuse this page.
+interface DashboardLink {
+  provider: string; // claude or codex
+  url: string; // absolute, http or https
+}
+
 interface Gateway {
+  provider?: string | undefined; // claude or codex; absent from a gateway older than this page
+  dashboards?: DashboardLink[] | undefined; // the other providers'; absent from an older gateway
   version?: string | undefined; // absent from a gateway older than this page
   inventory_commit: string;
   started: string;
@@ -165,6 +174,10 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
     reasons: optional(arrayOf(isString)),
   }),
   gateway: object<Gateway>({
+    provider: optional(isString),
+    dashboards: optional(
+      arrayOf(object<DashboardLink>({ provider: isString, url: isString })),
+    ),
     version: optional(isString),
     inventory_commit: isString,
     started: isString,
