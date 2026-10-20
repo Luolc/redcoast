@@ -218,6 +218,8 @@ func failureOf(ctx context.Context, err error, phases *upstreamPhases, proxied b
 			return "shutdown"
 		}
 		return "client_canceled"
+	case errors.Is(err, errClientBody):
+		return "client_body"
 	case errors.As(err, &refused):
 		return "egress_connect_" + strconv.Itoa(refused.status)
 	case errors.As(err, &op) && op.Op == "proxyconnect":

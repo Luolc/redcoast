@@ -155,6 +155,33 @@ func sendFailing(ctx context.Context, t *testing.T, h *harness, server *httptest
 	return res.StatusCode
 }
 
+// sendRaw writes head, with the session credential in place of {token}, on a new
+// connection to server, closes the connection's write side and returns the status of
+// the response, or 0 when none came.
+func sendRaw(t *testing.T, h *harness, server *httptest.Server, head string) int {
+	t.Helper()
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeQuietly(conn)
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(conn, strings.ReplaceAll(head, "{token}", h.token)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		return 0
+	}
+	_ = res.Body.Close()
+	return res.StatusCode
+}
+
 // expectFailureLog checks that logged holds exactly one upstream-failure line, naming
 // a's alias and exit and failure, and that none of the request's parts, the upstream's
 // address or any credential is in the log.
@@ -178,12 +205,13 @@ func expectFailureLog(t *testing.T, logged *lockedLog, h *harness, a *account, t
 }
 
 // failureSetup is what an arm of TestUpstreamFailureIsNamed set up: the upstream's URL,
-// a change to the router before it serves and the client's context; nil changes
-// nothing and uses the test's context.
+// a change to the router before it serves, the client's context and a raw request;
+// zero values change nothing, use the test's context and send with sendFailing.
 type failureSetup struct {
 	upstream string
 	adjust   func(*router)
 	ctx      context.Context
+	head     string // when set, sent as the raw request in place of sendFailing's
 }
 
 // TestUpstreamFailureIsNamed makes each kind of upstream failure happen against a fake
@@ -289,6 +317,20 @@ func TestUpstreamFailureIsNamed(t *testing.T) {
 			upstream, _ := blockingUpstream(t)
 			return failureSetup{upstream: upstream.URL, adjust: func(rt *router) { rt.limits = Limits{Idle: 100 * time.Millisecond, MaxRequest: time.Minute} }}
 		}},
+		{name: "malformed_chunked_body", failure: "client_body", setup: func(t *testing.T, h *harness) failureSetup {
+			h.add("sample-a", token)
+			upstream, _ := blockingUpstream(t)
+			return failureSetup{upstream: upstream.URL, head: "POST " + failurePath + " HTTP/1.1\r\nHost: gateway.example.test\r\nAuthorization: Bearer {token}\r\n" +
+				"X-Synthetic-Marker: " + failureHeaderValue + "\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"}
+		}},
+		// The client's half-close ends its connection's context before the body read
+		// fails, so the client counts as gone.
+		{name: "truncated_body", failure: "client_canceled", setup: func(t *testing.T, h *harness) failureSetup {
+			h.add("sample-a", token)
+			upstream, _ := blockingUpstream(t)
+			return failureSetup{upstream: upstream.URL, head: "POST " + failurePath + " HTTP/1.1\r\nHost: gateway.example.test\r\nAuthorization: Bearer {token}\r\n" +
+				"X-Synthetic-Marker: " + failureHeaderValue + "\r\nContent-Length: 1000\r\n\r\n{\"synthetic\": \"prompt"}
+		}},
 		{name: "client_cancels", failure: "client_canceled", setup: func(t *testing.T, h *harness) failureSetup {
 			h.add("sample-a", token)
 			upstream, received := blockingUpstream(t)
@@ -313,22 +355,29 @@ func TestUpstreamFailureIsNamed(t *testing.T) {
 			if setup.adjust != nil {
 				setup.adjust(rt)
 			}
-			if setup.ctx == nil {
+			ownContext := setup.ctx != nil
+			if !ownContext {
 				setup.ctx = t.Context()
 			}
 			server := httptest.NewServer(rt)
 			t.Cleanup(server.Close)
 			logged := captureLog(t)
-			status := sendFailing(setup.ctx, t, h, server)
+			var status int
+			if setup.head != "" {
+				status = sendRaw(t, h, server, setup.head)
+			} else {
+				status = sendFailing(setup.ctx, t, h, server)
+			}
 			result := arm.result
 			if result == "" {
 				result = "upstream_failed"
 			}
 			wantStatus := http.StatusBadGateway
-			switch arm.failure {
-			case "":
+			switch {
+			case arm.failure == "":
 				wantStatus = http.StatusOK
-			case "client_canceled":
+			case ownContext:
+				// The client canceled before any response.
 				wantStatus = 0
 			}
 			if status != wantStatus {

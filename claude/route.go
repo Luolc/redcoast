@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -488,8 +489,13 @@ func claudeID(header http.Header, name string) string {
 	return ""
 }
 
+// errClientBody wraps an error reading the client's request body, so that the failed
+// forward it causes is not taken for the upstream's failure.
+var errClientBody = errors.New("client request body")
+
 // countingReader counts the bytes read from a request body and reports them to the
-// request's watchdog once it has one.
+// request's watchdog once it has one. An error other than io.EOF comes wrapped in
+// errClientBody.
 type countingReader struct {
 	io.ReadCloser
 	count int64
@@ -502,6 +508,9 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	c.count += int64(n)
 	if n > 0 && c.dog != nil {
 		c.dog.touch()
+	}
+	if err != nil && err != io.EOF {
+		err = fmt.Errorf("%w: %w", errClientBody, err)
 	}
 	return n, err
 }
