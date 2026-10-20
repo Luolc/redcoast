@@ -143,7 +143,7 @@ Codex:
 - IPv6 CONNECT targets are refused by the syntax check.
 - The hi rehearsal's `cancel` case sometimes fails its hygiene check because the gateway container is killed at shutdown; CI leaves it out until the cause is known.
 - None of the three clients (Claude Code, Pi, the Codex CLI) has its session IDs or the client machine's content (working directory, user name, `AGENTS.md`, git repositories, OS version and the like) rewritten. A session moved to another account shows the same session ID under both, and an account shared by several machines shows that many environments.
-- Codex accounts must not share an exit with a Claude account; nothing checks this yet.
+- Two accounts of the same provider must not share an exit, since that provider's upstream would see them as one origin; an account of one provider may share an exit with an account of another. Nothing checks either inventory for a repeated exit yet.
 - A Codex login that needs a new import, or a renewed one that could not be written, is only flagged on `/health`, the dashboard and the status command; nobody is notified.
 - While a renewed Codex login is not yet written, a 401 to its token only retries the write; the account takes one more 401 before it refreshes again.
 - An account paused with no end shows an end time in the year 9999 on the dashboard (its format there is unchecked).
