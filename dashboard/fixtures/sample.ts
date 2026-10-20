@@ -288,38 +288,6 @@ export function sampleDashboard(now: Date): Dashboard {
         reason: "unavailable",
       },
     ],
-    latency: {
-      hourly: [
-        {
-          hour: day(0),
-          requests: 405,
-          duration_p50_ms: 8_420,
-          duration_p95_ms: 41_900,
-        },
-      ],
-      accounts: [
-        {
-          alias: "sample-ab",
-          requests: 405,
-          duration_p50_ms: 8_420,
-          duration_p95_ms: 41_900,
-        },
-      ],
-      machines: [
-        {
-          client_machine: "local",
-          requests: 112,
-          duration_p50_ms: 6_150,
-          duration_p95_ms: 30_200,
-        },
-        {
-          client_machine: "machine-a",
-          requests: 293,
-          duration_p50_ms: 9_310,
-          duration_p95_ms: 44_800,
-        },
-      ],
-    },
   };
 }
 
@@ -328,7 +296,10 @@ export function sampleDashboard(now: Date): Dashboard {
 // table of the sample adds up to the others.
 function traffic(
   now: Date,
-): Pick<Dashboard, "usage" | "result_sources" | "hourly" | "results"> {
+): Pick<
+  Dashboard,
+  "usage" | "result_sources" | "hourly" | "results" | "latency"
+> {
   const last = Math.floor(now.getTime() / 3_600_000) * 3_600_000;
   const sources = [
     { alias: "sample-ab", machine: "machine-a", kind: "inference", base: 220 },
@@ -342,7 +313,8 @@ function traffic(
     const daytime =
       0.35 + 0.65 * Math.max(0, Math.sin(((i - 2) / 24) * 2 * Math.PI));
     for (const s of sources) {
-      const requests = Math.round(s.base * daytime);
+      // The current hour has only begun.
+      const requests = Math.round(s.base * daytime * (i === 24 ? 0.4 : 1));
       if (requests === 0) continue;
       const failing =
         s.machine === ""
@@ -430,7 +402,47 @@ function traffic(
       into.bytes_down += u.bytes_down;
     }
   }
+  // Durations count the inference requests that are no error, as the
+  // gateway's do; their percentiles are made up per group.
+  const answered = (keep: (u: (typeof usage)[number]) => boolean) =>
+    usage
+      .filter((u) => u.kind === "inference" && keep(u))
+      .reduce((n, u) => n + u.requests - u.errors, 0);
+  const latency: NonNullable<Dashboard["latency"]> = {
+    hourly: [...new Set(usage.map((u) => u.hour))].flatMap((hour, i) => {
+      const requests = answered((u) => u.hour === hour);
+      if (requests === 0) return [];
+      const spike = i % 7 === 3 ? 1.6 : 1;
+      return [
+        {
+          hour,
+          requests,
+          duration_p50_ms: Math.round((6_000 + 150 * (i % 5)) * spike),
+          duration_p95_ms: Math.round((28_000 + 900 * (i % 6)) * spike),
+        },
+      ];
+    }),
+    accounts: [
+      { alias: "sample-ab", p50: 8_420, p95: 41_900 },
+      { alias: "sample-ad", p50: 7_100, p95: 36_500 },
+    ].map((a) => ({
+      alias: a.alias,
+      requests: answered((u) => u.alias === a.alias),
+      duration_p50_ms: a.p50,
+      duration_p95_ms: a.p95,
+    })),
+    machines: [
+      { machine: "machine-a", p50: 9_310, p95: 44_800 },
+      { machine: "machine-b", p50: 6_150, p95: 30_200 },
+    ].map((m) => ({
+      client_machine: m.machine,
+      requests: answered((u) => u.client_machine === m.machine),
+      duration_p50_ms: m.p50,
+      duration_p95_ms: m.p95,
+    })),
+  };
   return {
+    latency,
     usage,
     result_sources: resultSources,
     hourly: [...hourly.values()],

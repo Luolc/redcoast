@@ -5,6 +5,7 @@ import type {
   Account,
   Dashboard,
   HistoryEntry,
+  HourLatency,
   LiveSession,
   Quota,
   SourceCount,
@@ -42,11 +43,17 @@ function add(into: Counts, p: Counts) {
  * included. The window starts 24 h before at, inside an hour, so it touches
  * 25 hours.
  */
-export function hourSeries(rows: UsagePoint[], at: string): HourCounts[] {
+function windowHours(at: string): number[] {
   const last = Math.floor(Date.parse(at) / HOUR_MS) * HOUR_MS;
+  const hours: number[] = [];
+  for (let t = last - 24 * HOUR_MS; t <= last; t += HOUR_MS) hours.push(t);
+  return hours;
+}
+
+export function hourSeries(rows: UsagePoint[], at: string): HourCounts[] {
   const series: HourCounts[] = [];
   const index = new Map<number, HourCounts>();
-  for (let t = last - 24 * HOUR_MS; t <= last; t += HOUR_MS) {
+  for (const t of windowHours(at)) {
     const h = {
       hour: new Date(t).toISOString(),
       requests: 0,
@@ -61,6 +68,29 @@ export function hourSeries(rows: UsagePoint[], at: string): HourCounts[] {
     if (h !== undefined) add(h, r);
   }
   return series;
+}
+
+export interface HourDurations {
+  hour: string;
+  // Null for an hour with no answered inference request.
+  p50: number | null;
+  p95: number | null;
+}
+
+/** The duration percentiles of each hour of the window, oldest first. */
+export function durationSeries(
+  rows: HourLatency[],
+  at: string,
+): HourDurations[] {
+  const byHour = new Map(rows.map((r) => [Date.parse(r.hour), r]));
+  return windowHours(at).map((t) => {
+    const r = byHour.get(t);
+    return {
+      hour: new Date(t).toISOString(),
+      p50: r?.duration_p50_ms ?? null,
+      p95: r?.duration_p95_ms ?? null,
+    };
+  });
 }
 
 export function total(rows: Counts[]): Counts {

@@ -58,6 +58,14 @@ export function formatSpan(ms: number): string {
     : `${String(Math.floor(m / 1440))}${NB}d ${String(hours)}${NB}h`;
 }
 
+/** A request's duration: `850 ms`, `15.0 s`, `1 min 05 s`. */
+export function formatMs(ms: number): string {
+  if (ms < 1000) return `${String(Math.round(ms))}${NB}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}${NB}s`;
+  const s = Math.round(ms / 1000);
+  return `${String(Math.floor(s / 60))}${NB}min ${String(s % 60).padStart(2, "0")}${NB}s`;
+}
+
 /** How long ago iso was at now, `7 min ago`. */
 export function formatAgo(iso: string, now: Date): string {
   return `${formatSpan(now.getTime() - Date.parse(iso))} ago`;
