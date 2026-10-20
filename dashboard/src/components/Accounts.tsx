@@ -1,5 +1,10 @@
-import { formatPercent } from "../lib/format";
-import { accountState, pausedForGood } from "../lib/stats";
+import { formatCount, formatPercent, formatTokens } from "../lib/format";
+import {
+  accountState,
+  byModel,
+  pausedForGood,
+  type TokenCounts,
+} from "../lib/stats";
 import type { Account, Dashboard } from "../lib/types";
 import { egressWording, providerName } from "../lib/words";
 import { Ago, Empty, Meter, PageHead, Section, Status, Time } from "./ui";
@@ -127,6 +132,114 @@ export function AccountsTable({ data, now }: { data: Dashboard; now: Date }) {
   );
 }
 
+function TokenCells({
+  tokens,
+  cache,
+}: {
+  tokens: TokenCounts;
+  cache: boolean;
+}) {
+  return (
+    <>
+      <td className="n">{formatTokens(tokens.input)}</td>
+      <td className="n">{formatTokens(tokens.output)}</td>
+      {cache ? (
+        <>
+          <td className="n">{formatTokens(tokens.cacheRead)}</td>
+          <td className="n">{formatTokens(tokens.cacheWrite)}</td>
+        </>
+      ) : null}
+    </>
+  );
+}
+
+/** Requests and tokens by model over the last 24 h, with each model's accounts. */
+function Models({ data }: { data: Dashboard }) {
+  if (data.model_usage === undefined) return null;
+  const rows = data.model_usage;
+  const models = byModel(rows);
+  // Codex counts no cache tokens apart; its columns would be zeros.
+  const cache = models.some(
+    (m) => m.tokens.cacheRead > 0 || m.tokens.cacheWrite > 0,
+  );
+  return (
+    <Section
+      title="Models"
+      note={
+        cache
+          ? "Last 24 h, the requests whose response reported its tokens; input leaves out the cache reads and writes, counted apart"
+          : "Last 24 h, the requests whose response reported its tokens; input includes cached tokens"
+      }
+    >
+      {models.length === 0 ? (
+        <Empty title="No tokens reported in the last 24 h." />
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Model</th>
+                <th scope="col">Accounts</th>
+                <th scope="col" className="n">
+                  Requests
+                </th>
+                <th scope="col" className="n">
+                  Input
+                </th>
+                <th scope="col" className="n">
+                  Output
+                </th>
+                {cache ? (
+                  <>
+                    <th scope="col" className="n">
+                      Cache read
+                    </th>
+                    <th scope="col" className="n">
+                      Cache write
+                    </th>
+                  </>
+                ) : null}
+              </tr>
+            </thead>
+            <tbody>
+              {models.map((m) => (
+                <tr key={m.model}>
+                  <td className="mono">
+                    {m.model === "" ? (
+                      <span className="faint">not named</span>
+                    ) : (
+                      m.model
+                    )}
+                  </td>
+                  <td className="small muted">
+                    {byAccount(rows.filter((r) => r.model === m.model))}
+                  </td>
+                  <td className="n">{formatCount(m.requests)}</td>
+                  <TokenCells tokens={m.tokens} cache={cache} />
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// Each account's requests among rows, most first: `sample-ab 1,200 · sample-ad 300`.
+function byAccount(rows: NonNullable<Dashboard["model_usage"]>): string {
+  const counts = new Map<string, number>();
+  for (const r of rows)
+    counts.set(r.alias, (counts.get(r.alias) ?? 0) + r.requests);
+  return [...counts.entries()]
+    .sort((a, b) => (a[1] !== b[1] ? b[1] - a[1] : a[0].localeCompare(b[0])))
+    .map(
+      ([alias, n]) =>
+        `${alias === "" ? "no account" : alias} ${formatCount(n)}`,
+    )
+    .join(" · ");
+}
+
 export function Accounts({ data, now }: { data: Dashboard; now: Date }) {
   return (
     <>
@@ -140,6 +253,7 @@ export function Accounts({ data, now }: { data: Dashboard; now: Date }) {
       >
         <AccountsTable data={data} now={now} />
       </Section>
+      <Models data={data} />
     </>
   );
 }

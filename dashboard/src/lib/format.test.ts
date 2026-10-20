@@ -8,6 +8,7 @@ import {
   formatPercent,
   formatSpan,
   formatTime,
+  formatTokens,
   formatUntil,
   LA,
 } from "./format";
@@ -63,4 +64,16 @@ it("writes a request's duration in ms, s or min", () => {
 it("names an hour by its start and end in UTC, across midnight too", () => {
   expect(formatHourSpan("2026-10-07T09:00:00.000Z")).toBe("09:00–10:00 UTC");
   expect(formatHourSpan("2026-10-07T23:00:00.000Z")).toBe("23:00–00:00 UTC");
+});
+
+it("writes token counts in k, M and B, never 1000 of a unit", () => {
+  const nb = " ";
+  expect(formatTokens(512)).toBe("512");
+  expect(formatTokens(999)).toBe("999");
+  expect(formatTokens(1_800)).toBe(`1.8${nb}k`);
+  expect(formatTokens(9_960)).toBe(`10${nb}k`);
+  expect(formatTokens(845_000)).toBe(`845${nb}k`);
+  expect(formatTokens(999_600)).toBe(`1.0${nb}M`);
+  expect(formatTokens(217_000_000)).toBe(`217${nb}M`);
+  expect(formatTokens(3_400_000_000)).toBe(`3.4${nb}B`);
 });

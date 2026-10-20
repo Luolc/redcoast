@@ -17,3 +17,25 @@ export function runs<T>(
   if (run.length > 0) out.push(run);
   return out;
 }
+
+export interface Reading {
+  at: string;
+  utilization: number;
+}
+
+/**
+ * A quota history as the corners of a step line, [ms, utilization]: a
+ * reading holds until the next one, since the history keeps a reading only
+ * when the value changed or an hour passed.
+ */
+export function steps(readings: Reading[]): [number, number][] {
+  const out: [number, number][] = [];
+  let before: number | null = null;
+  for (const r of readings) {
+    const t = Date.parse(r.at);
+    if (before !== null && before !== r.utilization) out.push([t, before]);
+    out.push([t, r.utilization]);
+    before = r.utilization;
+  }
+  return out;
+}

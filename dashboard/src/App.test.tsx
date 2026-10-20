@@ -4,7 +4,12 @@ import { sampleDashboard } from "../fixtures/sample.ts";
 import { Page } from "./App";
 import { Sidebar } from "./components/Shell";
 import { HourBars, HourLines } from "./components/charts";
-import { formatCount, formatMs, formatPercent } from "./lib/format";
+import {
+  formatCount,
+  formatMs,
+  formatPercent,
+  formatTokens,
+} from "./lib/format";
 import { durationSeries, hourSeries } from "./lib/stats";
 import type { Route } from "./lib/route";
 
@@ -256,5 +261,110 @@ it("counts the rows of Clients in the sidebar", () => {
   expect(count(data)).toBe("4");
   expect(count({ ...data, clients: undefined, client_hourly: undefined })).toBe(
     "2",
+  );
+});
+
+it("shows the tokens of the day on Overview and by model on Accounts", () => {
+  const usage = data.usage ?? [];
+  const input = usage.reduce((n, u) => n + (u.input_tokens ?? 0), 0);
+  const output = usage.reduce((n, u) => n + (u.output_tokens ?? 0), 0);
+  expect(formatTokens(input)).not.toBe(formatTokens(output));
+  expect(page({ view: "overview" })).toContain(
+    `Tokens ${formatTokens(input)} in · ${formatTokens(output)} out`,
+  );
+  const read = usage.reduce((n, u) => n + (u.cache_read_input_tokens ?? 0), 0);
+  const written = usage.reduce(
+    (n, u) => n + (u.cache_creation_input_tokens ?? 0),
+    0,
+  );
+  expect(page({ view: "overview" })).toContain(
+    `Cache ${formatTokens(read)} read · ${formatTokens(written)} written`,
+  );
+
+  const large = (data.model_usage ?? []).filter(
+    (m) => m.model === "claude-sample-large",
+  );
+  const requests = large.reduce((n, m) => n + m.requests, 0);
+  const largeIn = large.reduce((n, m) => n + m.input_tokens, 0);
+  const largeOut = large.reduce((n, m) => n + m.output_tokens, 0);
+  expect(page({ view: "accounts" })).toContain(
+    `${formatCount(requests)}${formatTokens(largeIn)}${formatTokens(largeOut)}`,
+  );
+});
+
+it("draws each window's quota history on Monitor's account cards", () => {
+  const [ab] = data.accounts;
+  const history = ab?.quota_history?.["5h"] ?? [];
+  const last = history.at(-1);
+  const first = history[0];
+  if (ab === undefined || first === undefined || last === undefined)
+    throw new Error("the sample has no quota history");
+  const current = ab.quota["5h"];
+  const readings =
+    current !== undefined &&
+    Date.parse(current.observed_at) > Date.parse(last.at)
+      ? [...history, current]
+      : history;
+  const html = renderToStaticMarkup(
+    <Page data={data} now={now} route={{ view: "monitor" }} />,
+  );
+  expect(html).toContain(
+    `5 h window over the last 5 h: ${String(readings.length)} readings, from ${formatPercent(first.utilization)} to ${formatPercent(readings.at(-1)?.utilization ?? 0)}`,
+  );
+  expect(page({ view: "monitor" })).toContain("Pruned quota readings");
+});
+
+it("shows no tokens, models or quota history from a gateway that has none", () => {
+  const older = {
+    ...data,
+    model_usage: undefined,
+    usage: (data.usage ?? []).map((u) => ({
+      ...u,
+      input_tokens: undefined,
+      output_tokens: undefined,
+      cache_read_input_tokens: undefined,
+      cache_creation_input_tokens: undefined,
+    })),
+    accounts: data.accounts.map((a) => ({ ...a, quota_history: undefined })),
+  };
+  expect(page({ view: "overview" }, older)).not.toContain("Tokens");
+  expect(page({ view: "clients" }, older)).not.toContain("Tokens, 24 h");
+  expect(page({ view: "accounts" }, older)).not.toContain("Models");
+  const monitor = renderToStaticMarkup(
+    <Page data={older} now={now} route={{ view: "monitor" }} />,
+  );
+  expect(monitor).not.toContain('class="curve"');
+  expect(
+    renderToStaticMarkup(
+      <Page data={data} now={now} route={{ view: "monitor" }} />,
+    ),
+  ).toContain('class="curve"');
+});
+
+it("ends a quota history at the current reading when it is newer", () => {
+  const [ab, ...rest] = data.accounts;
+  const current = ab?.quota["5h"];
+  if (ab === undefined || current === undefined)
+    throw new Error("the sample has no 5 h reading");
+  // Readings up to 30 min before the current one, ending below it.
+  const kept = (ab.quota_history?.["5h"] ?? []).filter(
+    (r) => Date.parse(r.at) <= Date.parse(current.observed_at) - 30 * 60_000,
+  );
+  const first = kept[0];
+  expect(kept.at(-1)?.utilization).not.toBe(current.utilization);
+  if (first === undefined) throw new Error("no reading kept");
+  const earlier = {
+    ...data,
+    accounts: [
+      { ...ab, quota_history: { ...ab.quota_history, "5h": kept } },
+      ...rest,
+    ],
+  };
+  expect(
+    renderToStaticMarkup(
+      <Page data={earlier} now={now} route={{ view: "monitor" }} />,
+    ),
+  ).toContain(
+    `5 h window over the last 5 h: ${String(kept.length + 1)} readings, from ${formatPercent(first.utilization)} to ${formatPercent(current.utilization)}`,
   );
 });

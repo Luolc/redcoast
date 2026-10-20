@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { runs } from "../lib/chart";
-import { formatClock } from "../lib/format";
+import { runs, steps, type Reading } from "../lib/chart";
+import { formatClock, formatPercent } from "../lib/format";
 
 /** The smallest of 1, 2, 3, 4, 5, 6, 8 or 10 times a power of ten that is at least v. */
 function niceMax(v: number): number {
@@ -12,9 +12,9 @@ function niceMax(v: number): number {
 // The size used before the first measurement, and in tests.
 const DEFAULT_SIZE = { width: 640, height: 133 };
 
-function useSize() {
+function useSize(initial = DEFAULT_SIZE) {
   const ref = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState(DEFAULT_SIZE);
+  const [size, setSize] = useState(initial);
   useEffect(() => {
     const el = ref.current;
     if (el === null) return;
@@ -387,5 +387,78 @@ export function RowSpark({
         <circle className="d" cx={last[0]} cy={last[1]} r={2.5} />
       )}
     </svg>
+  );
+}
+
+const CURVE_SIZE = { width: 320, height: 72 };
+
+/**
+ * A window's quota history from from to to (ms) as a step line, with the
+ * soft limit and, when it falls in the span, the window's last reset; each
+ * reading's time and value is in its tooltip.
+ */
+export function QuotaCurve({
+  label,
+  readings,
+  from,
+  to,
+  soft,
+  reset,
+}: {
+  label: string;
+  readings: Reading[];
+  from: number;
+  to: number;
+  soft: number;
+  reset: number | null;
+}) {
+  const [ref, { width: W, height: H }] = useSize(CURVE_SIZE);
+  const x = (t: number) =>
+    ((Math.min(Math.max(t, from), to) - from) / (to - from)) * W;
+  const y = (u: number) => H - Math.min(Math.max(u, 0), 1) * H;
+  const corners = steps(readings);
+  const last = readings.at(-1);
+  return (
+    <div className="curve" ref={ref}>
+      <svg
+        viewBox={`0 0 ${String(W)} ${String(H)}`}
+        role="img"
+        aria-label={label}
+      >
+        <line className="soft" x1={0} x2={W} y1={y(soft)} y2={y(soft)} />
+        {reset === null || reset <= from || reset >= to ? null : (
+          <line className="reset" x1={x(reset)} x2={x(reset)} y1={0} y2={H}>
+            <title>{`Reset at ${formatClock(new Date(reset).toISOString())} UTC`}</title>
+          </line>
+        )}
+        {corners.length < 2 ? null : (
+          <polyline
+            className="used"
+            points={corners
+              .map(([t, u]) => `${x(t).toFixed(1)},${y(u).toFixed(1)}`)
+              .join(" ")}
+          />
+        )}
+        {last === undefined ? null : (
+          <circle
+            className="d"
+            cx={x(Date.parse(last.at))}
+            cy={y(last.utilization)}
+            r={3}
+          />
+        )}
+        {readings.map((r) => (
+          <circle
+            key={r.at}
+            className="hit"
+            cx={x(Date.parse(r.at))}
+            cy={y(r.utilization)}
+            r={6}
+          >
+            <title>{`${r.at.slice(5, 10)} ${formatClock(r.at)} UTC: ${formatPercent(r.utilization)}`}</title>
+          </circle>
+        ))}
+      </svg>
+    </div>
   );
 }
