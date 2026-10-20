@@ -133,6 +133,21 @@ export interface SourceCount extends ResultCount {
   error: boolean; // whether this result and status count as an error
 }
 
+// Nearest-rank percentiles, in ms, of the inference requests that are no error.
+// A duration is the whole request until its response finished streaming, not
+// the time to its first byte; CONNECT tunnels are left out.
+interface Latency {
+  requests: number;
+  duration_p50_ms: number;
+  duration_p95_ms: number;
+}
+
+interface LatencyView {
+  hourly: (Latency & { hour: string })[];
+  accounts: (Latency & { alias: string })[]; // "" for no account
+  machines: (Latency & { client_machine: string })[]; // "" for no session
+}
+
 interface Destination {
   host: string;
   port: number;
@@ -181,6 +196,7 @@ export interface Dashboard {
   destinations: Destination[];
   days: Day[];
   history: HistoryEntry[];
+  latency?: LatencyView | undefined; // absent from a gateway older than this page
 }
 
 const isPlan: Guard<Plan> = object<Plan>({
@@ -188,6 +204,12 @@ const isPlan: Guard<Plan> = object<Plan>({
   effective_from: isString,
   effective_to: nullable(isString),
 });
+
+const latency = {
+  requests: isNumber,
+  duration_p50_ms: isNumber,
+  duration_p95_ms: isNumber,
+};
 
 const isDashboard: Guard<Dashboard> = object<Dashboard>({
   at: isString,
@@ -347,6 +369,13 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
       from: isString,
       to: optional(isString),
       reason: isString,
+    }),
+  ),
+  latency: optional(
+    object<LatencyView>({
+      hourly: arrayOf(object({ hour: isString, ...latency })),
+      accounts: arrayOf(object({ alias: isString, ...latency })),
+      machines: arrayOf(object({ client_machine: isString, ...latency })),
     }),
   ),
 });
