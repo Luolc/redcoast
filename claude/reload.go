@@ -209,7 +209,7 @@ func diff(ctx context.Context, old, next *AccountSet, verify EgressCheck) Reload
 
 // sameConfig reports whether b has a's credential, exit, expected exit IP and proxy credentials.
 func (a *account) sameConfig(b *account) bool {
-	return a.credential.Same(b.credential) && a.exit.String() == b.exit.String() && a.expectedIP == b.expectedIP && a.proxyUsername == b.proxyUsername && a.proxyPassword == b.proxyPassword
+	return a.credential.Same(b.credential) && a.exitName() == b.exitName() && a.expectedIP == b.expectedIP && a.proxyUsername == b.proxyUsername && a.proxyPassword == b.proxyPassword
 }
 
 // lock takes the exclusive lock, waiting at most reloadWait for the binding sections

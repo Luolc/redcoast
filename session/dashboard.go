@@ -80,6 +80,8 @@ type Snapshot struct {
 	Usage        []UsagePoint   `json:"usage"`          // the hourly figures by account and client machine
 	ModelUsage   []ModelUsage   `json:"model_usage"`    // the hourly tokens by account and model
 	SourceCounts []SourceCount  `json:"result_sources"` // results by account and client machine
+	Clients      []ClientCount  `json:"clients"`
+	ClientHourly []ClientHour   `json:"client_hourly"`
 	Destinations []Destination  `json:"destinations"`
 	Days         []DayCounts    `json:"days"`
 	History      []HistoryEntry `json:"history"`
@@ -109,6 +111,11 @@ type LiveSession struct {
 	Alias    string    `json:"alias"` // empty when unbound
 	Created  time.Time `json:"created_at"`
 	LastSeen time.Time `json:"last_seen"` // the creation time until the first request
+
+	// Client is the client program and ClientVersion its version, each empty when the
+	// launcher did not report a valid one.
+	Client        string `json:"client"`
+	ClientVersion string `json:"client_version"`
 }
 
 // HourTraffic is one hour's requests and bytes of one account and kind.
@@ -282,10 +289,11 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 	err = collect(ctx, db, &out.Sessions, func(rows *sql.Rows) (LiveSession, error) {
 		var v LiveSession
 		var created, seen int64
-		err := rows.Scan(&v.ID, &v.Machine, &v.Alias, &created, &seen)
+		err := rows.Scan(&v.ID, &v.Machine, &v.Alias, &created, &seen, &v.Client, &v.ClientVersion)
 		v.Created, v.LastSeen = fromMillis(created), fromMillis(seen)
+		v.ClientVersion = clientVersion(v.Client, v.ClientVersion)
 		return v, err
-	}, `SELECT substr(s.id, 1, ?), s.client_machine, COALESCE(b.alias, ''), s.created_at, COALESCE(s.last_seen_at, s.created_at)
+	}, `SELECT substr(s.id, 1, ?), s.client_machine, COALESCE(b.alias, ''), s.created_at, COALESCE(s.last_seen_at, s.created_at), `+clientColumn+`, `+clientVersionColumn+`
 		FROM sessions s LEFT JOIN bindings b ON b.session_id = s.id WHERE s.ended_at IS NULL ORDER BY s.created_at`, shortID)
 	if err != nil {
 		return Snapshot{}, err
@@ -366,10 +374,22 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if out.Clients, out.ClientHourly, err = r.clients(ctx, dayStart, since); err != nil {
+		return Snapshot{}, err
+	}
 	if out.Days, err = r.days(ctx, dayStart, now); err != nil {
 		return Snapshot{}, err
 	}
-	err = collect(ctx, db, &out.History, func(rows *sql.Rows) (HistoryEntry, error) {
+	if out.History, err = r.history(ctx); err != nil {
+		return Snapshot{}, err
+	}
+	return out, nil
+}
+
+// history returns the latest dashboardHistory rows of the binding history.
+func (r *Reader) history(ctx context.Context) ([]HistoryEntry, error) {
+	history := []HistoryEntry{}
+	err := collect(ctx, r.store.db, &history, func(rows *sql.Rows) (HistoryEntry, error) {
 		var v HistoryEntry
 		var from int64
 		var to sql.NullInt64
@@ -380,10 +400,7 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		}
 		return v, err
 	}, "SELECT substr(session_id, 1, ?), alias, from_ts, to_ts, reason FROM binding_history ORDER BY id DESC LIMIT ?", shortID, dashboardHistory)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	return out, nil
+	return history, err
 }
 
 // latency returns the latency of the inference requests since since that are no error.

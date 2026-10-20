@@ -63,7 +63,7 @@ func TestDashboardJSON(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &keys); err != nil {
 		t.Fatal(err)
 	}
-	if got := slices.Sorted(maps.Keys(keys)); !slices.Equal(got, []string{"accounts", "at", "days", "db_bytes", "destinations", "gateway", "hard", "health", "history", "hourly", "idle_sessions", "latency", "machines", "model_usage", "result_sources", "results", "sessions", "soft", "usage"}) {
+	if got := slices.Sorted(maps.Keys(keys)); !slices.Equal(got, []string{"accounts", "at", "client_hourly", "clients", "days", "db_bytes", "destinations", "gateway", "hard", "health", "history", "hourly", "idle_sessions", "latency", "machines", "model_usage", "result_sources", "results", "sessions", "soft", "usage"}) {
 		t.Fatalf("top-level keys = %v", got)
 	}
 	var view struct {

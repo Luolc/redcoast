@@ -50,6 +50,16 @@ proxy: # the account's exit, an HTTP proxy
   password_ref: op://example-vault/example-a-proxy/password
 ```
 
+At most one account of an inventory may have a direct exit instead, the gateway host's own address:
+
+```yaml
+proxy:
+  direct: true
+  expected_egress_ip: 203.0.113.7 # the gateway host's own public address
+```
+
+With `direct: true`, `host`, `port`, `username_ref` and `password_ref` must be left out; a missing `proxy` is an error, not a direct exit. All of the account's traffic leaves from the gateway, in the address family of `expected_egress_ip` only, so on a host with both an IPv4 and an IPv6 address, name the one the upstream should see. Its tunnels on the forward proxy reach only port 443 of public addresses. The egress check reads the IP echo from the gateway and, instead of a CONNECT through an exit, dials the upstream: a failed dial marks health degraded and never sets the account aside.
+
 `device_id` and `account_uuid` are the identity the gateway puts into `metadata.user_id` of the account's requests in place of the client's; a missing or empty one is sent as an empty string. A malformed one is refused, naming the account and the field, never the value. Changing either counts as changing the account on a reload.
 
 All of an active account's references must resolve, or the gateway does not start (and a reload changes nothing). An optional `direct-hosts.yaml` in the same directory lists the exact `host:port` CONNECT targets the gateway dials itself instead of through an account's exit:

@@ -75,3 +75,28 @@ it("refuses a dashboard link without a url", () => {
   };
   expect(() => parseDashboard(JSON.stringify(drifted))).toThrow();
 });
+
+it("accepts a gateway that reports no client programs", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const older = {
+    ...sample,
+    sessions: sample.sessions.map((s) => ({
+      ...s,
+      client: undefined,
+      client_version: undefined,
+    })),
+    clients: undefined,
+    client_hourly: undefined,
+  };
+  const parsed = parseDashboard(JSON.stringify(older));
+  expect(parsed.clients).toBeUndefined();
+  expect(parsed.sessions[1]?.client).toBeUndefined();
+});
+
+it("refuses a client count that drifted", () => {
+  const drifted = {
+    ...sampleDashboard(new Date("2026-10-07T12:00:00Z")),
+    clients: [{ client_machine: "machine-a", client: "pi" }],
+  };
+  expect(() => parseDashboard(JSON.stringify(drifted))).toThrow();
+});
