@@ -1,7 +1,12 @@
 import { RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { formatCount, formatPercent, formatTokens } from "../lib/format";
-import { refreshOffer, requestQuotaRefresh } from "../lib/quotaRefresh";
+import {
+  refreshOffer,
+  requestQuotaRefresh,
+  shownRefusal,
+  type Refusal,
+} from "../lib/quotaRefresh";
 import {
   accountState,
   byModel,
@@ -83,7 +88,7 @@ export function QuotaRefreshButton({
 }) {
   const state = data.gateway.quota_refresh;
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Refusal | null>(null);
   const running = state?.running === true;
   useEffect(() => {
     if (!running) return;
@@ -94,11 +99,12 @@ export function QuotaRefreshButton({
   }, [running, data.at, reload]);
   if (state === undefined || state === null) return null;
   const offer = refreshOffer(state, now);
-  const note = error ?? offer.note;
+  const refusal = shownRefusal(error, data.at);
+  const note = refusal ?? offer.note;
   return (
     <>
       {note === null ? null : (
-        <span role={error === null ? "status" : "alert"}>{note} </span>
+        <span role={refusal === null ? "status" : "alert"}>{note} </span>
       )}
       <button
         type="button"
@@ -106,10 +112,13 @@ export function QuotaRefreshButton({
         disabled={!offer.enabled || sending}
         onClick={() => {
           setSending(true);
+          const at = data.at;
           void requestQuotaRefresh().then((failed) => {
-            setError(failed);
             setSending(false);
-            reload();
+            if (failed === null) {
+              setError(null);
+              reload();
+            } else setError({ text: failed, at });
           });
         }}
       >
