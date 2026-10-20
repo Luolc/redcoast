@@ -138,7 +138,7 @@ func (f *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if result != "" {
 		record.Result, row.SessionID = result, binding.SessionID
 		switch result {
-		case "auth_failed":
+		case "challenged", "auth_failed":
 			w.Header().Set("Proxy-Authenticate", `Basic realm="gateway session"`)
 			http.Error(w, "session credential required", http.StatusProxyAuthRequired)
 		case "not_session":
@@ -247,9 +247,14 @@ func (f *forwardProxy) open(w http.ResponseWriter, r *http.Request, a *account, 
 
 // authenticate reads the session credential from Proxy-Authorization and evaluates the
 // binding. It returns the bound account and binding, or the result to record:
-// auth_failed, not_session, no_account, quota_exhausted or store_failed. With no_account and
-// quota_exhausted the binding still carries the recognised session's ID.
+// challenged when the request has no Proxy-Authorization, as clients that wait for the
+// 407 challenge before they send a credential first ask; auth_failed, not_session,
+// no_account, quota_exhausted or store_failed. With no_account and quota_exhausted the
+// binding still carries the recognised session's ID.
 func (f *forwardProxy) authenticate(r *http.Request) (*account, session.Binding, string) {
+	if len(r.Header.Values("Proxy-Authorization")) == 0 {
+		return nil, session.Binding{}, "challenged"
+	}
 	token, ok := proxyCredential(r.Header.Get("Proxy-Authorization"))
 	if !ok {
 		return nil, session.Binding{}, "auth_failed"

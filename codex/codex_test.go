@@ -162,6 +162,54 @@ func TestScreen(t *testing.T) {
 	}
 }
 
+// TestUpgradeDeclinedIsNoError sends a WebSocket upgrade, which gets 426, and reads its
+// row back from the dashboard's snapshot: upgrade_declined, no error. Control arm: a
+// request with unreadable turn metadata gets 400 and stays a refused error.
+func TestUpgradeDeclinedIsNoError(t *testing.T) {
+	for _, arm := range []struct {
+		name   string
+		method string
+		header http.Header
+		status int
+		result string
+		error  bool
+	}{
+		{"websocket", http.MethodGet, http.Header{"Connection": {"Upgrade"}, "Upgrade": {"websocket"}, "Sec-Websocket-Version": {"13"}, "Sec-Websocket-Key": {"c3ludGhldGljLWtleS0xMjM0"}}, http.StatusUpgradeRequired, "upgrade_declined", false},
+		{"metadata_not_json", http.MethodPost, http.Header{"X-Codex-Turn-Metadata": {"synthetic"}}, http.StatusBadRequest, "refused", true},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			g := newGateway(t)
+			if status, _ := g.do(arm.method, "/backend-api/codex/responses", "", arm.header); status != arm.status {
+				t.Fatalf("status %d, want %d", status, arm.status)
+			}
+			reader, err := session.OpenReadOnly(filepath.Join(g.dir, "codex.sqlite"), session.Config{}, claude.DefaultLimits.MaxTunnel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reader.Close() })
+			var snap session.Snapshot
+			for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				if snap, err = reader.Snapshot(t.Context(), []string{"sample-a"}); err != nil {
+					t.Fatal(err)
+				}
+				if len(snap.SourceCounts) > 0 || time.Now().After(deadline) {
+					break
+				}
+			}
+			if s := snap.SourceCounts; len(s) != 1 || s[0].Result != arm.result || s[0].Error != arm.error {
+				t.Fatalf("sources %+v, want result %s error %t", s, arm.result, arm.error)
+			}
+			wantErrors := 0
+			if arm.error {
+				wantErrors = 1
+			}
+			if len(snap.Usage) != 1 || snap.Usage[0].Errors != wantErrors {
+				t.Fatalf("usage %+v, want %d errors", snap.Usage, wantErrors)
+			}
+		})
+	}
+}
+
 // TestCrossProviderCredentials checks that a session credential of one provider is
 // refused by the other's gateway before anything goes upstream: inference gets 401 and
 // CONNECT 407, for a Claude session credential at the Codex gateway and a Codex one at

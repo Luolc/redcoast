@@ -196,6 +196,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rt.provider.Screen != nil {
 		if status, message := rt.provider.Screen(r); status != 0 {
 			row.Result, row.Request = "refused", truncate(line, maxRequestLine)
+			if status == http.StatusUpgradeRequired {
+				row.Result = "upgrade_declined"
+			}
 			http.Error(down, message, status)
 			return
 		}

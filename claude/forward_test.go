@@ -117,7 +117,9 @@ func connectOn(t *testing.T, conn net.Conn, target, authorization string) (net.C
 // and the traffic row: a tunnel through the bound account's exit carries bytes both
 // ways with the account's credentials, a rejecting or unreachable exit fails without
 // any other connection, a missing or wrong session credential is refused with 407
-// before any connection, and requests other than CONNECT are refused.
+// before any connection, recorded as challenged when Proxy-Authorization is missing
+// and auth_failed when it is unreadable or names no session, and requests other than
+// CONNECT are refused.
 func TestForwardProxy(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -131,7 +133,7 @@ func TestForwardProxy(t *testing.T) {
 		{"exit_rejects", 407, true, "session", 502, "egress_failed"},
 		{"exit_unreachable", 0, true, "session", 502, "egress_failed"},
 		{"not_connect", 200, false, "session", 405, "refused"},
-		{"no_credential", 200, true, "", 407, "auth_failed"},
+		{"no_credential", 200, true, "", 407, "challenged"},
 		{"unknown_credential", 200, true, "sk-ant-gws-" + strings.Repeat("C", 43), 407, "auth_failed"},
 		{"not_session_credential", 200, true, "sk-ant-oat01-" + strings.Repeat("C", 43), 407, "not_session"},
 		{"not_basic", 200, true, "bearer", 407, "auth_failed"},

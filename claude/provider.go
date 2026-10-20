@@ -21,7 +21,9 @@ type Provider struct {
 	// client's path. Empty forwards the path as it came.
 	Prefix string
 	// Screen answers a request before the allowlist and authentication when it returns
-	// a status other than 0, with message as the body; nil screens nothing.
+	// a status other than 0, with message as the body; nil screens nothing. Its row's
+	// result is upgrade_declined for a 426, which the client follows with the same
+	// request without an upgrade, and refused for any other status.
 	Screen func(r *http.Request) (status int, message string)
 	// NotSession is the answer to a credential that does not have the shape of a
 	// session credential.
