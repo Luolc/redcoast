@@ -123,8 +123,8 @@ func hashToken(token string) string {
 }
 
 // Bind is BindFrom for a request from a loopback address.
-func (s *Store) Bind(ctx context.Context, token string, candidates []string) (Binding, error) {
-	return s.BindFrom(ctx, token, LocalSource, candidates)
+func (s *Store) Bind(ctx context.Context, token string, candidates []string, setAside ...string) (Binding, error) {
+	return s.BindFrom(ctx, token, LocalSource, candidates, setAside...)
 }
 
 // BindFrom evaluates the binding of the session that token identifies for one request
@@ -135,10 +135,12 @@ func (s *Store) Bind(ctx context.Context, token string, candidates []string) (Bi
 // active, with a token reference), in any order; paused accounts and accounts without
 // a plan at this time are excluded here, and the rest are tiered by their quota
 // readings against the soft and hard thresholds read from the settings for this
-// request. The evaluation runs in one write transaction, so concurrent requests of one
+// request. setAside names candidates the caller has set aside for a reason the store
+// does not hold (an exit that refuses the upstream); they are excluded as an account
+// without a plan is. The evaluation runs in one write transaction, so concurrent requests of one
 // session see the same binding; a credential that is refused never gets that far (see
 // refuse). It also records the request as the session's last activity.
-func (s *Store) BindFrom(ctx context.Context, token, source string, candidates []string) (Binding, error) {
+func (s *Store) BindFrom(ctx context.Context, token, source string, candidates []string, setAside ...string) (Binding, error) {
 	if err := s.refuse(ctx, token, source); err != nil {
 		return Binding{}, err
 	}
@@ -162,7 +164,7 @@ func (s *Store) BindFrom(ctx context.Context, token, source string, candidates [
 		if _, err := tx.ExecContext(ctx, "UPDATE sessions SET last_seen_at = ? WHERE id = ?", now, id); err != nil {
 			return fmt.Errorf("record session activity: %v", err)
 		}
-		eligible, blocked, err := unpaused(ctx, tx, candidates, now)
+		eligible, blocked, err := unpaused(ctx, tx, candidates, setAside, now)
 		if err != nil {
 			return err
 		}
@@ -248,15 +250,22 @@ func (s *Store) rebind(ctx context.Context, tx *sql.Tx, id string, standings map
 // a pause is a quota exclusion, like a reading at or over hard.
 const QuotaPauseReason = "upstream_429"
 
-// unpaused returns the candidates whose account is not paused at now, and the
-// exclusions of the others: the end of each quota pause, and whether any candidate is
-// out for another reason.
-func unpaused(ctx context.Context, tx *sql.Tx, candidates []string, now int64) (map[string]bool, excluded, error) {
+// unpaused returns the candidates whose account is neither set aside nor paused at
+// now, and the exclusions of the others: the end of each quota pause, and whether any
+// candidate is out for another reason. A set-aside account is out for another reason
+// whatever its pause.
+func unpaused(ctx context.Context, tx *sql.Tx, candidates, setAside []string, now int64) (map[string]bool, excluded, error) {
 	eligible := make(map[string]bool, len(candidates))
 	for _, alias := range candidates {
 		eligible[alias] = true
 	}
 	out := excluded{quotaPaused: map[string]int64{}}
+	for _, alias := range setAside {
+		if eligible[alias] {
+			delete(eligible, alias)
+			out.other = true
+		}
+	}
 	rows, err := tx.QueryContext(ctx, "SELECT alias, paused_until, COALESCE(pause_reason, '') FROM account_state WHERE paused_until IS NOT NULL AND paused_until > ?", now)
 	if err != nil {
 		return nil, out, fmt.Errorf("read paused accounts: %v", err)

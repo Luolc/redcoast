@@ -26,6 +26,56 @@ it("accepts a gateway that reports no version", () => {
   expect(parseDashboard(JSON.stringify(older)).gateway.version).toBeUndefined();
 });
 
+it("accepts a gateway without the per-machine tables and latency", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const older = {
+    ...sample,
+    usage: undefined,
+    result_sources: undefined,
+    latency: undefined,
+  };
+  expect(parseDashboard(JSON.stringify(older)).latency).toBeUndefined();
+});
+
+it("refuses latency that drifted", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const drifted = {
+    ...sample,
+    latency: { ...sample.latency, hourly: [{ hour: "2026-10-07" }] },
+  };
+  expect(() => parseDashboard(JSON.stringify(drifted))).toThrow();
+});
+
+it("reads the provider and the other providers' dashboards", () => {
+  const gateway = parseDashboard(
+    JSON.stringify(sampleDashboard(new Date("2026-10-07T12:00:00Z"))),
+  ).gateway;
+  expect(gateway.provider).toBe("claude");
+  expect(gateway.dashboards).toEqual([
+    { provider: "codex", url: "http://127.0.0.1:7807/" },
+  ]);
+});
+
+it("accepts a gateway that reports no provider or dashboards", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const older = {
+    ...sample,
+    gateway: { ...sample.gateway, provider: undefined, dashboards: undefined },
+  };
+  expect(
+    parseDashboard(JSON.stringify(older)).gateway.dashboards,
+  ).toBeUndefined();
+});
+
+it("refuses a dashboard link without a url", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const drifted = {
+    ...sample,
+    gateway: { ...sample.gateway, dashboards: [{ provider: "codex" }] },
+  };
+  expect(() => parseDashboard(JSON.stringify(drifted))).toThrow();
+});
+
 it("accepts a gateway that reports no client programs", () => {
   const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
   const older = {

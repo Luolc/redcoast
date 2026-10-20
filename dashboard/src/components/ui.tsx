@@ -1,133 +1,231 @@
+import {
+  CircleCheck,
+  CircleSlash,
+  CircleX,
+  Clock,
+  Info,
+  TriangleAlert,
+  type LucideIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
-import { formatTime, LA } from "../lib/format";
+import {
+  formatAgo,
+  formatPercent,
+  formatTime,
+  formatUntil,
+  LA,
+} from "../lib/format";
+import { pace, windowTier, type State, type Tone } from "../lib/stats";
+import type { Quota } from "../lib/types";
 
-export function Section({
-  title,
-  note,
-  children,
+const TONE_ICONS: Record<Tone, LucideIcon> = {
+  ok: CircleCheck,
+  warn: TriangleAlert,
+  bad: CircleX,
+  info: Info,
+  off: CircleSlash,
+};
+
+/** A state as its icon and its word, so it never rests on color alone. */
+export function Status({
+  state,
+  pill = false,
+  icon,
 }: {
-  title: string;
-  note?: ReactNode;
-  children: ReactNode;
+  state: State;
+  pill?: boolean;
+  icon?: LucideIcon;
 }) {
+  const Icon = icon ?? TONE_ICONS[state.tone];
   return (
-    <section className="rounded-lg border border-border bg-card p-4 shadow-xs">
-      <h2 className="text-base font-semibold">{title}</h2>
-      {note === undefined ? null : (
-        <div className="mt-1 text-sm text-muted-foreground">{note}</div>
-      )}
-      <div className="mt-3 overflow-x-auto">{children}</div>
-    </section>
-  );
-}
-
-/** A table whose first row is head; an empty body shows empty instead. */
-export function Table({
-  head,
-  empty,
-  children,
-}: {
-  head: string[];
-  empty: string;
-  children: ReactNode[];
-}) {
-  if (children.length === 0) {
-    return <p className="text-sm text-muted-foreground">{empty}</p>;
-  }
-  return (
-    <table className="w-full border-collapse text-sm">
-      <thead>
-        <tr className="border-b border-border text-left text-muted-foreground">
-          {head.map((h) => (
-            <th
-              key={h}
-              scope="col"
-              className="px-2 py-1 font-medium whitespace-nowrap"
-            >
-              {h}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>{children}</tbody>
-    </table>
-  );
-}
-
-export function Cell({
-  children,
-  numeric = false,
-}: {
-  children: ReactNode;
-  numeric?: boolean;
-}) {
-  return (
-    <td
-      className={
-        numeric
-          ? "px-2 py-1 text-right font-mono whitespace-nowrap tabular-nums"
-          : "px-2 py-1 align-top"
-      }
-    >
-      {children}
-    </td>
-  );
-}
-
-/** A time in Los Angeles; the title gives it in UTC. */
-export function Time({ iso, short = false }: { iso: string; short?: boolean }) {
-  return (
-    <time
-      dateTime={iso}
-      title={formatTime(iso, "UTC")}
-      className="font-mono whitespace-nowrap tabular-nums"
-    >
-      {formatTime(iso, LA, short)}
-    </time>
-  );
-}
-
-/** Text that stands out: warn for something to look at, bad for a fault. */
-export function Flag({
-  tone,
-  children,
-}: {
-  tone: "warn" | "bad";
-  children: ReactNode;
-}) {
-  return (
-    <span
-      className={
-        tone === "bad"
-          ? "font-medium text-red-700 dark:text-red-400"
-          : "font-medium text-amber-700 dark:text-amber-400"
-      }
-    >
-      {children}
+    <span className={`status s-${state.tone}${pill ? " pill" : ""}`}>
+      <Icon className="icon sm solid" aria-hidden="true" />
+      {state.word}
     </span>
   );
 }
 
-/** A bar of fraction, full from 1 on: red from the hard threshold, amber from soft. */
-export function Bar({
-  fraction,
+/** A time as text, with the time itself in UTC and Los Angeles on hover. */
+export function Time({ iso, children }: { iso: string; children: ReactNode }) {
+  return (
+    <time
+      dateTime={iso}
+      title={`${formatTime(iso, "UTC")} · ${formatTime(iso, LA)}`}
+    >
+      {children}
+    </time>
+  );
+}
+
+export function Ago({ iso, now }: { iso: string; now: Date }) {
+  return <Time iso={iso}>{formatAgo(iso, now)}</Time>;
+}
+
+export function PageHead({ title, sub }: { title: string; sub: ReactNode }) {
+  return (
+    <div className="page-head">
+      <h1>{title}</h1>
+      <div className="sub">{sub}</div>
+    </div>
+  );
+}
+
+export function Section({
+  title,
+  note,
+  id,
+  children,
+}: {
+  title: string;
+  note?: ReactNode;
+  id?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="section" id={id}>
+      <div className="section-head">
+        <h2>{title}</h2>
+        {note === undefined ? null : <span className="note">{note}</span>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** A dashed box that says why there is nothing to show. */
+export function Empty({
+  title,
+  children,
+}: {
+  title: string;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="empty">
+      <p className="serif">{title}</p>
+      {children === undefined ? null : <p>{children}</p>}
+    </div>
+  );
+}
+
+/** A small bar of part's share of whole. */
+export function Share({ part, whole }: { part: number; whole: number }) {
+  const fraction = whole <= 0 ? 0 : part / whole;
+  return (
+    <span className="share" title={formatPercent(fraction, 1)}>
+      <i style={{ width: `${(Math.max(0.02, fraction) * 100).toFixed(1)}%` }} />
+    </span>
+  );
+}
+
+// A reading older than this is shown as stale: the account served nothing since.
+const STALE_MS = 30 * 60_000;
+
+/**
+ * One quota window: a bar with the soft limit as a tick and an even pace
+ * through the window as a hollow mark, then the reset and the pace. Its
+ * ink follows how selection reads the window (windowTier).
+ */
+export function Meter({
+  quota,
+  window,
   soft,
   hard,
+  paused,
+  now,
 }: {
-  fraction: number;
+  quota: Quota | undefined;
+  window: string;
   soft: number;
   hard: number;
+  paused: boolean;
+  now: Date;
 }) {
-  const width = `${String(Math.min(100, Math.max(0, fraction * 100)))}%`;
-  const color =
-    fraction >= hard
-      ? "bg-red-500"
-      : fraction >= soft
-        ? "bg-amber-500"
-        : "bg-emerald-500";
+  if (quota === undefined)
+    return <span className="muted small">No reading</span>;
+  const u = quota.utilization;
+  const tier = windowTier(quota, soft, hard, now);
+  const tone: Tone = paused
+    ? "off"
+    : {
+        unread: "off" as const,
+        open: "ok" as const,
+        soft: "warn" as const,
+        exhausted: "bad" as const,
+      }[tier];
+  const p = paused ? null : pace(quota, window, now);
+  const stale = now.getTime() - Date.parse(quota.observed_at) > STALE_MS;
   return (
-    <div className="h-2 w-24 rounded-sm bg-muted" aria-hidden="true">
-      <div className={`h-2 rounded-sm ${color}`} style={{ width }} />
+    <div className={`meter s-${tone}`}>
+      <div className="track">
+        <div
+          className="fill"
+          style={{ width: `${String(Math.min(u, 1) * 100)}%` }}
+        />
+        <div
+          className="soft"
+          style={{ left: `${String(soft * 100)}%` }}
+          title={`Soft limit ${formatPercent(soft)}`}
+        />
+        {p === null ? null : (
+          <div
+            className="even"
+            style={{ left: `${(Math.min(p.elapsed, 1) * 100).toFixed(1)}%` }}
+            title={`Even pace: ${formatPercent(p.elapsed)} of the window has passed`}
+          />
+        )}
+      </div>
+      <span className="pct">{formatPercent(u)}</span>
+      <span className="when">
+        <span>
+          {quota.reset_at === undefined ? (
+            "reset unknown"
+          ) : Date.parse(quota.reset_at) <= now.getTime() ? (
+            <Time iso={quota.reset_at}>reset passed, counts as unread</Time>
+          ) : (
+            <Time iso={quota.reset_at}>
+              resets {formatUntil(quota.reset_at, now)}
+            </Time>
+          )}
+        </span>
+        {quota.status === "rejected" ? (
+          <span className="s-bad">rejected by the upstream</span>
+        ) : null}
+        {p === null ? null : <PaceText by={p.by} />}
+        {stale ? (
+          <span className="stale s-warn">
+            <Clock className="icon sm" aria-hidden="true" /> read{" "}
+            <Ago iso={quota.observed_at} now={now} />
+          </span>
+        ) : null}
+      </span>
     </div>
+  );
+}
+
+/** Points of the window used beyond an even pace; marked from 5 over. */
+function PaceText({ by }: { by: number }) {
+  const n = by > 0 ? `+${String(by)}` : by < 0 ? `−${String(-by)}` : "0";
+  if (by >= 5)
+    return (
+      <span
+        className="pace over"
+        title={`${String(by)} points more used than an even pace through the window: at this rate it runs out before it resets`}
+      >
+        <TriangleAlert className="icon sm solid" aria-hidden="true" />
+        Pace {n}
+      </span>
+    );
+  return (
+    <span
+      className="pace"
+      title={
+        by <= -5
+          ? `${String(-by)} points less used than an even pace: at this rate it lasts until it resets`
+          : "About on an even pace through the window"
+      }
+    >
+      Pace {n}
+    </span>
   );
 }

@@ -26,7 +26,16 @@ interface RetentionRun {
   error?: string | undefined;
 }
 
+// Another provider's gateway's dashboard. The page only links to it, and
+// reads nothing from it: its Host and Origin checks refuse this page.
+interface DashboardLink {
+  provider: string; // claude or codex
+  url: string; // absolute, http or https
+}
+
 interface Gateway {
+  provider?: string | undefined; // claude or codex; absent from a gateway older than this page
+  dashboards?: DashboardLink[] | undefined; // the other providers'; absent from an older gateway
   version?: string | undefined; // absent from a gateway older than this page
   inventory_commit: string;
   started: string;
@@ -79,7 +88,7 @@ interface Machine {
   last_seen?: string | undefined;
 }
 
-interface LiveSession {
+export interface LiveSession {
   id: string; // the first 8 characters
   client_machine: string;
   alias: string; // empty when unbound
@@ -109,7 +118,7 @@ interface ClientHour {
   requests: number;
 }
 
-export interface HourTraffic {
+interface HourTraffic {
   hour: string;
   alias: string;
   kind: string;
@@ -128,7 +137,7 @@ interface ResultCount {
 // Errors are rows with a result other than ok, or with a status of 400 or more;
 // a CONNECT tunnel the limits closed (idle_timeout, max_duration) is no error.
 // Limited rows are among the errors.
-interface UsagePoint {
+export interface UsagePoint {
   hour: string;
   alias: string; // empty for requests carried on no account
   client_machine: string; // empty for requests of no session
@@ -140,10 +149,25 @@ interface UsagePoint {
   limited: number;
 }
 
-interface SourceCount extends ResultCount {
+export interface SourceCount extends ResultCount {
   alias: string;
   client_machine: string;
   error: boolean; // whether this result and status count as an error
+}
+
+// Nearest-rank percentiles, in ms, of the inference requests that are no error.
+// A duration is the whole request until its response finished streaming, not
+// the time to its first byte; CONNECT tunnels are left out.
+interface Latency {
+  requests: number;
+  duration_p50_ms: number;
+  duration_p95_ms: number;
+}
+
+interface LatencyView {
+  hourly: (Latency & { hour: string })[];
+  accounts: (Latency & { alias: string })[]; // "" for no account
+  machines: (Latency & { client_machine: string })[]; // "" for no session
 }
 
 interface Destination {
@@ -167,7 +191,7 @@ interface Day {
   leaked: number;
 }
 
-interface HistoryEntry {
+export interface HistoryEntry {
   session: string;
   alias: string;
   from: string;
@@ -197,6 +221,7 @@ export interface Dashboard {
   destinations: Destination[];
   days: Day[];
   history: HistoryEntry[];
+  latency?: LatencyView | undefined; // absent from a gateway older than this page
 }
 
 const isPlan: Guard<Plan> = object<Plan>({
@@ -204,6 +229,12 @@ const isPlan: Guard<Plan> = object<Plan>({
   effective_from: isString,
   effective_to: nullable(isString),
 });
+
+const latency = {
+  requests: isNumber,
+  duration_p50_ms: isNumber,
+  duration_p95_ms: isNumber,
+};
 
 const isDashboard: Guard<Dashboard> = object<Dashboard>({
   at: isString,
@@ -214,6 +245,10 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
     reasons: optional(arrayOf(isString)),
   }),
   gateway: object<Gateway>({
+    provider: optional(isString),
+    dashboards: optional(
+      arrayOf(object<DashboardLink>({ provider: isString, url: isString })),
+    ),
     version: optional(isString),
     inventory_commit: isString,
     started: isString,
@@ -383,11 +418,19 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
       reason: isString,
     }),
   ),
+  latency: optional(
+    object<LatencyView>({
+      hourly: arrayOf(object({ hour: isString, ...latency })),
+      accounts: arrayOf(object({ alias: isString, ...latency })),
+      machines: arrayOf(object({ client_machine: isString, ...latency })),
+    }),
+  ),
 });
 
 /** Parses the endpoint's text; throws when it is not the expected shape. */
 export function parseDashboard(text: string): Dashboard {
   const value: unknown = JSON.parse(text);
-  if (!isDashboard(value)) throw new Error("dashboard.json 的结构与页面不符");
+  if (!isDashboard(value))
+    throw new Error("dashboard.json does not have the shape this page reads");
   return value;
 }

@@ -376,3 +376,27 @@ func TestSourceOf(t *testing.T) {
 		}
 	}
 }
+
+// TestIssueRefusesSetAside checks that the session interface asks Available with the
+// candidates SetAside names: with every account set aside a launcher is refused with
+// no_account, and with none set aside (the control arm) it gets a session.
+func TestIssueRefusesSetAside(t *testing.T) {
+	store, _ := open(t, newClock())
+	server := NewServer(store, Entrypoints{ReverseProxy: "http://127.0.0.1:8789", ForwardProxy: "127.0.0.1:8791"}, func() []string { return accounts })
+	var setAside []string
+	server.SetAside = func() []string { return setAside }
+	issue := func() (int, string) {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"client_machine":"machine-a"}`))
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder.Code, recorder.Body.String()
+	}
+	setAside = accounts
+	if status, body := issue(); status != http.StatusServiceUnavailable || !strings.Contains(body, `"no_account"`) {
+		t.Fatalf("every account set aside: %d %s", status, body)
+	}
+	setAside = nil
+	if status, body := issue(); status != http.StatusCreated {
+		t.Fatalf("control arm: %d %s", status, body)
+	}
+}

@@ -11,8 +11,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -498,4 +500,106 @@ func TestSwapReader(t *testing.T) {
 			t.Fatalf("whole reads: got %q %v", got, err)
 		}
 	}
+}
+
+// codexUpstream is the Codex process's upstream, whose host the egress check asks
+// the exit to reach.
+var codexUpstream, _ = url.Parse(Upstream)
+
+// TestEgressUpstreamReach checks the egress check's reach check at the Codex process:
+// the exit is asked to CONNECT to chatgpt.com:443, the host of the Codex upstream,
+// with the proxy credentials and no account token. A 403 sets the account aside, so
+// inference gets 503 and nothing goes upstream, without a pause; a later 200 ends the
+// set-aside without resume; no answer sets nothing aside and marks health degraded.
+// A needs_reimport pause stays when the set-aside ends. Control arm: the first sweep,
+// whose CONNECT gets 200, sets nothing aside.
+func TestEgressUpstreamReach(t *testing.T) {
+	g := newGateway(t)
+	egress := claude.NewEgress(g.accounts, g.store, codexUpstream)
+	var mu sync.Mutex
+	reach := http.StatusOK
+	var connects []string
+	inner := g.exit.answer
+	g.exit.setAnswer(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			inner(w, r)
+			return
+		}
+		if r.Host != "chatgpt.com:443" {
+			// The IP echo: the check reads no IP here, which only marks health degraded.
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		mu.Lock()
+		connects = append(connects, r.Header.Get("Authorization")+"|"+r.Header.Get("Proxy-Authorization"))
+		status := reach
+		mu.Unlock()
+		if status == 0 {
+			if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		w.WriteHeader(status)
+	})
+	sweep := func(status int) claudeHealth {
+		t.Helper()
+		mu.Lock()
+		reach = status
+		mu.Unlock()
+		if err := egress.Sweep(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		res := httptest.NewRecorder()
+		egress.HealthHandler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/health", nil))
+		var answer claudeHealth
+		if err := json.Unmarshal(res.Body.Bytes(), &answer); err != nil {
+			t.Fatal(err)
+		}
+		return answer
+	}
+	const refused = "sample-a: exit cannot reach chatgpt.com: 403"
+	inference := func() int {
+		t.Helper()
+		status, _ := g.do(http.MethodPost, "/backend-api/codex/responses", "{}", nil)
+		return status
+	}
+
+	if answer := sweep(http.StatusOK); slices.Contains(answer.Reasons, refused) || g.accounts.SetAside() != nil || inference() != http.StatusOK {
+		t.Fatalf("control arm: health %+v, set aside %v", answer, g.accounts.SetAside())
+	}
+	if answer := sweep(http.StatusForbidden); !slices.Contains(answer.Reasons, refused) || g.pauseReason() != "" {
+		t.Fatalf("after a 403: health %+v, paused %q", answer, g.pauseReason())
+	}
+	before := len(g.exit.exchanges())
+	if status := inference(); status != http.StatusServiceUnavailable || len(g.exit.exchanges()) != before {
+		t.Fatalf("inference while set aside: %d, %d requests reached the exit", status, len(g.exit.exchanges())-before)
+	}
+	if answer := sweep(0); !slices.Contains(answer.Reasons, refused) || !slices.Contains(answer.Reasons, "sample-a: egress check got no answer to CONNECT chatgpt.com") {
+		t.Fatalf("after no answer: health %+v", answer)
+	}
+	if answer := sweep(http.StatusOK); slices.Contains(answer.Reasons, refused) || inference() != http.StatusOK {
+		t.Fatalf("after a 200: health %+v, set aside %v", answer, g.accounts.SetAside())
+	}
+
+	if err := g.store.Pause(t.Context(), "sample-a", time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), claude.NeedsImportReason); err != nil {
+		t.Fatal(err)
+	}
+	sweep(http.StatusForbidden)
+	if answer := sweep(http.StatusOK); slices.Contains(answer.Reasons, refused) || g.pauseReason() != claude.NeedsImportReason {
+		t.Fatalf("a 200 to a paused account: health %+v, paused %q", answer, g.pauseReason())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, headers := range connects {
+		if !strings.HasPrefix(headers, "|Basic ") {
+			t.Fatalf("CONNECT headers %q; want only the proxy credentials", headers)
+		}
+	}
+}
+
+// claudeHealth is the health endpoint's answer.
+type claudeHealth struct {
+	Status  string   `json:"status"`
+	Reasons []string `json:"reasons"`
 }

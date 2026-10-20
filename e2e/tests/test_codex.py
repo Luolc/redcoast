@@ -10,10 +10,11 @@ import codex_fake
 
 def test_new_records_keeps_what_came_after_the_snapshot_without_egress_checks():
   before = [{"kind": "request", "port": 18790}]
-  egress = {"kind": "connect", "port": 18799, "target": codex.EGRESS_ECHO}
+  echo = {"kind": "connect", "port": 18799, "target": "ip.oxylabs.io:443"}
+  reach = {"kind": "connect", "port": 18799, "target": "127.0.0.1:18790"}
   connect = {"kind": "connect", "port": 18799, "target": "example.test:443"}
   request = {"kind": "request", "port": 18790}
-  assert codex.new_records(before, before + [egress, connect, request]) == [
+  assert codex.new_records(before, before + [echo, reach, connect, request]) == [
     connect,
     request,
   ]

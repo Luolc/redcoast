@@ -103,7 +103,7 @@ func main() {
 	}
 	accounts := claude.NewAccounts(set, store)
 	defer accounts.CloseIdleConnections()
-	egress := claude.NewEgress(accounts, store)
+	egress := claude.NewEgress(accounts, store, cfg.upstream)
 	egress.Problems = gateway.Problems
 	// An account whose exit IP differs is paused before the gateway serves.
 	if err := egress.Sweep(ctx); err != nil {
@@ -120,7 +120,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	sessions := session.NewServer(store, entrypoints(cfg), accounts.Candidates)
+	sessions := newSessionServer(cfg, store, accounts)
 	l, err := listenAndNotify(upg, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -188,6 +188,21 @@ func entrypoints(cfg config) session.Entrypoints {
 	return session.Entrypoints{ReverseProxy: "https://" + net.JoinHostPort(cfg.serverName, reverse), ForwardProxy: net.JoinHostPort(cfg.serverName, forward)}
 }
 
+// sessionAccounts is what the session interface reads of the account set: the
+// candidates and those the egress check set aside (claude.Accounts).
+type sessionAccounts interface {
+	Candidates() []string
+	SetAside() []string
+}
+
+// newSessionServer returns the session interface over store, refusing a session when
+// no account of accounts could serve it, set-aside ones left out.
+func newSessionServer(cfg config, store *session.Store, accounts sessionAccounts) *session.Server {
+	sessions := session.NewServer(store, entrypoints(cfg), accounts.Candidates)
+	sessions.SetAside = accounts.SetAside
+	return sessions
+}
+
 // readOnly is how /health and the dashboard are served: only to requests that name the
 // gateway by one of cfg.hostNames.
 func (cfg config) readOnly(handler http.Handler) http.Handler {
@@ -227,7 +242,7 @@ func newDashboard(cfg config, store *session.Store, backups *backup.Backup, egre
 	if err != nil {
 		return dashboard{}, err
 	}
-	dc := claude.DashboardConfig{Reader: reader, Store: store, DBPath: cfg.sessionDB, Version: version, Inventory: cfg.inventory, Started: started, Tunnels: entrypoint.Tunnels, Dir: cfg.dashboardDir}
+	dc := claude.DashboardConfig{Provider: cfg.provider, Links: cfg.dashboardLinks, Reader: reader, Store: store, DBPath: cfg.sessionDB, Version: version, Inventory: cfg.inventory, Started: started, Tunnels: entrypoint.Tunnels, Dir: cfg.dashboardDir}
 	if cfg.dashboardDir != "" {
 		if info, err := os.Stat(filepath.Join(cfg.dashboardDir, "index.html")); err != nil || !info.Mode().IsRegular() {
 			log.Printf("dashboard: %s has no index.html; / answers 404, /dashboard.json is served", cfg.dashboardDir)

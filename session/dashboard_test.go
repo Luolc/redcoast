@@ -46,6 +46,9 @@ func TestDashboardEmptyStore(t *testing.T) {
 			t.Fatalf("empty table %s is not an empty array: %s", table, body)
 		}
 	}
+	if !strings.Contains(string(body), `"latency":{"hourly":[],"accounts":[],"machines":[]}`) {
+		t.Fatalf("empty latency is not empty arrays: %s", body)
+	}
 }
 
 func TestDashboardSnapshot(t *testing.T) {
@@ -290,5 +293,77 @@ func TestDashboardUsageBySource(t *testing.T) {
 	// The existing tables keep their grouping: hourly by account and kind only.
 	if len(snap.Hourly) != 4 || len(snap.Results) == 0 {
 		t.Fatalf("hourly = %+v, results = %+v", snap.Hourly, snap.Results)
+	}
+}
+
+func TestDashboardLatency(t *testing.T) {
+	ctx := context.Background()
+	c := newClock()
+	store, path := open(t, c)
+	now := c.Now()
+	one, err := store.Issue(ctx, "devbox-1", LocalSource, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := store.Issue(ctx, "devbox-2", LocalSource, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := func(at time.Time, session, alias, kind, result string, status int, ms int64) {
+		t.Helper()
+		row := Traffic{At: at, SessionID: session, Alias: alias, Kind: kind, Host: "api.example.com", Port: 443, Duration: time.Duration(ms) * time.Millisecond, Result: result, Status: status}
+		if err := store.RecordTraffic(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	since := now.Add(-24 * time.Hour)
+	at11 := now.Add(-30 * time.Minute) // in the hour starting at 11:00
+	// Twenty requests of sample-a on devbox-1 at 11:00, 100 ms to 2000 ms in a shuffled
+	// order: nearest-rank p50 is the 10th, 1000 ms, and p95 the 19th, 1900 ms.
+	for _, i := range []int64{7, 20, 1, 13, 4, 18, 10, 2, 15, 9, 19, 3, 16, 6, 11, 17, 5, 14, 8, 12} {
+		record(at11, one.ID, "sample-a", "inference", "ok", 200, i*100)
+	}
+	// A single request of sample-b on devbox-2, on the window's first millisecond.
+	record(since, two.ID, "sample-b", "inference", "ok", 200, 250)
+	// Left out: a tunnel, errors, and a request a millisecond before the window.
+	record(at11, one.ID, "sample-a", "connect", "ok", 200, 3_600_000)
+	record(at11, one.ID, "sample-a", "inference", "ok", 500, 60_000)
+	record(at11, one.ID, "sample-a", "inference", "incomplete", 200, 60_000)
+	record(at11, one.ID, "sample-b", "inference", "limited", 0, 60_000)
+	record(since.Add(-time.Millisecond), two.ID, "sample-b", "inference", "ok", 200, 60_000)
+
+	snap, err := openReader(t, path, c).Snapshot(ctx, accounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	many, single := Latency{Requests: 20, P50: 1000, P95: 1900}, Latency{Requests: 1, P50: 250, P95: 250}
+	got := snap.Latency
+	if len(got.Hourly) != 2 || !got.Hourly[0].Hour.Equal(since) || got.Hourly[0].Latency != single ||
+		!got.Hourly[1].Hour.Equal(time.Date(2026, 10, 6, 11, 0, 0, 0, time.UTC)) || got.Hourly[1].Latency != many {
+		t.Errorf("hourly latency = %+v", got.Hourly)
+	}
+	if !slices.Equal(got.Accounts, []AccountLatency{{"sample-a", many}, {"sample-b", single}}) {
+		t.Errorf("account latency = %+v", got.Accounts)
+	}
+	if !slices.Equal(got.Machines, []MachineLatency{{"devbox-1", many}, {"devbox-2", single}}) {
+		t.Errorf("machine latency = %+v", got.Machines)
+	}
+}
+
+func TestPercentile(t *testing.T) {
+	cases := []struct {
+		sorted   []int64
+		p50, p95 int64
+	}{
+		{[]int64{7}, 7, 7},
+		{[]int64{1, 2}, 1, 2},
+		{[]int64{1, 2, 3}, 2, 3},
+		{[]int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 10, 19},
+		{[]int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21}, 11, 20},
+	}
+	for _, c := range cases {
+		if got50, got95 := percentile(c.sorted, 50), percentile(c.sorted, 95); got50 != c.p50 || got95 != c.p95 {
+			t.Errorf("percentiles of %v = %d, %d, want %d, %d", c.sorted, got50, got95, c.p50, c.p95)
+		}
 	}
 }

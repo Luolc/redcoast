@@ -1,7 +1,6 @@
 import js from "@eslint/js";
 import eslintReact from "@eslint-react/eslint-plugin";
 import vitest from "@vitest/eslint-plugin";
-import betterTailwind from "eslint-plugin-better-tailwindcss";
 import jsxA11y from "eslint-plugin-jsx-a11y-x";
 import reactHooks from "eslint-plugin-react-hooks";
 import { reactRefresh } from "eslint-plugin-react-refresh";
@@ -25,7 +24,6 @@ export default defineConfig([
       eslintReact.configs["disable-conflict-eslint-plugin-react-hooks"],
       jsxA11y.configs.strict,
       reactRefresh.configs.vite(),
-      betterTailwind.configs.correctness,
     ],
     languageOptions: {
       globals: globals.browser,
@@ -33,9 +31,6 @@ export default defineConfig([
         projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
-    },
-    settings: {
-      "better-tailwindcss": { entryPoint: "src/index.css" },
     },
     rules: {
       // disable-conflict switches off every react-hooks rule that has an

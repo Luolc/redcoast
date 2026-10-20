@@ -26,9 +26,9 @@ type health struct {
 
 // HealthHandler returns the read-only health endpoint, GET /health. The answer is 200
 // in both states, so a monitor tells a degraded gateway from an unreachable one by the
-// body. Degraded means an account of the current set is paused or its last egress
-// check could not read an IP, the session store cannot be read, or Problems names a
-// problem.
+// body. Degraded means an account of the current set is paused or set aside, or its
+// last egress check could not read an IP or got no answer to its CONNECT, the session
+// store cannot be read, or Problems names a problem.
 func (e *Egress) HealthHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -51,8 +51,14 @@ func (e *Egress) judge(accounts []session.AccountStatus, err error) health {
 		}
 	}
 	for _, a := range e.accounts.set.Load().sorted() {
+		if reason := a.setAside.Load(); reason != nil {
+			answer.Reasons = append(answer.Reasons, a.alias+": "+*reason)
+		}
 		if e.failedCheck(a) {
 			answer.Reasons = append(answer.Reasons, a.alias+": egress check could not read the exit IP")
+		}
+		if e.unanswered(a) {
+			answer.Reasons = append(answer.Reasons, a.alias+": egress check got no answer to CONNECT "+e.host)
 		}
 	}
 	if e.Problems != nil {

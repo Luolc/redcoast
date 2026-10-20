@@ -1,0 +1,153 @@
+/* Every color, size and font of the page is written in this file only.
+   The surfaces, text and accent are Agent Constitution's tokens. The status
+   inks are the dashboard's own: a blue-leaning green set apart from the
+   sage page, a raspberry set apart from the rust accent, an ochre for
+   warnings; each one passes 4.5:1 on the page and on a panel. */
+
+/* The Latin subsets of the Fontsource packages, inlined by the build so the
+   page shows them offline. Their licenses are in the build's header;
+   knip.json lists the packages, since knip does not follow a url(). */
+@font-face {
+  font-family: "Geist";
+  src: url("../../node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2")
+    format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Geist Mono";
+  src: url("../../node_modules/@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2")
+    format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "EB Garamond";
+  src: url("../../node_modules/@fontsource-variable/eb-garamond/files/eb-garamond-latin-wght-normal.woff2")
+    format("woff2");
+  font-weight: 400 800;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root {
+  /* Color: Agent Constitution. */
+  --t-bg-page: light-dark(#dde6d5, #1e2520);
+  --t-bg-panel: light-dark(#d1dcc8, #252d27);
+  --t-bg-hover: light-dark(#c7d0bf, #343b35);
+  --t-bg-panel-hover: light-dark(#bcc7b4, #3a423b);
+  --t-bg-active: light-dark(#b2bdaa, #444c45);
+  --t-bg-selected: light-dark(#c5c5b0, #3e3e33);
+  --t-text: light-dark(#23301f, #d3dccf);
+  --t-text-muted: light-dark(#4b5946, #9cab98);
+  --t-text-faint: light-dark(#5a6754, #839080);
+  --t-accent: light-dark(#7d3a1e, #dba37f);
+  --t-accent-hover: light-dark(#6b381e, #d9ae8f);
+  --t-text-on-accent: light-dark(#dde6d5, #1e2520);
+  --t-border-subtle: light-dark(#b5c4aa, #38453a);
+  --t-border-strong: light-dark(#6d7968, #717970);
+  --t-status-active: light-dark(#245a20, #9fd39a);
+  --t-status-active-bg: light-dark(#c3d2bc, #303d31);
+  --t-status-trial: light-dark(#66460a, #e2c07a);
+  --t-status-trial-bg: light-dark(#ccd0b9, #393b2d);
+  --t-status-draft: light-dark(#4b5946, #9cab98);
+  --t-status-draft-bg: light-dark(#c9d2c1, #303831);
+
+  /* Color: added for the dashboard. A status is an ink, a chip (the
+     paper raised above the page, tinted 12% with the ink) and always an
+     icon and a word. ok is a blue-leaning green, set apart from the
+     yellow-green page; negative is a raspberry, set apart from the rust
+     accent; warning is an ochre. */
+  --t-status-ok: light-dark(#0b6b3a, #5fd68f);
+  --t-status-warning: light-dark(#6b5000, #f0d060);
+  --t-status-negative: light-dark(#a0006e, #ff80c0);
+  --t-status-info: light-dark(#1d4f86, #9cc2ec);
+  --t-status-off: light-dark(#4b5946, #9cab98);
+  --t-chip: light-dark(#f2f6ee, #131815);
+  --t-status-ok-bg: light-dark(#d6e5d8, #1c2f24);
+  --t-status-warning-bg: light-dark(#e2e2d1, #2e2e1e);
+  --t-status-negative-bg: light-dark(#e8d8df, #2f242a);
+  --t-status-info-bg: light-dark(#d8e2e2, #232c2f);
+  --t-status-off-bg: light-dark(#dee3da, #232a25);
+  /* One chart hue; a second series is told apart by its dash and a
+     direct label, never by a second color. */
+  --t-chart-1: light-dark(#0b6a96, #2f9bd0);
+  --t-chart-track: light-dark(#c7d0bf, #343b35);
+  --t-chart-grid: light-dark(#c3cfb9, #313a33);
+  --t-chart-pace: light-dark(#6d7968, #8a958a);
+
+  /* Type: Geist for the interface and numbers, EB Garamond only for page
+     titles and empty states. */
+  --t-font-ui: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --t-font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --t-font-serif: "EB Garamond", Garamond, Georgia, "Times New Roman", serif;
+  --t-font-size-base: 14px;
+  --t-text-xs: 0.786rem;
+  --t-text-sm: 0.893rem;
+  --t-text-md: 1rem;
+  --t-text-lg: 1.143rem;
+  --t-text-stat: 1.857rem;
+  --t-text-title: 2.15rem;
+  --t-text-empty: 1.4rem;
+  --t-weight-regular: 400;
+  --t-weight-medium: 520;
+  --t-weight-bold: 620;
+  --t-weight-serif: 500;
+  --t-line-height-ui: 1.45;
+
+  /* Space, size, radius and shadow. */
+  --t-space-1: 0.25rem;
+  --t-space-2: 0.5rem;
+  --t-space-3: 0.75rem;
+  --t-space-4: 1rem;
+  --t-space-6: 1.5rem;
+  --t-space-8: 2rem;
+  --t-space-12: 3rem;
+  --t-width-sidebar: 15rem;
+  --t-width-main: 84rem;
+  --t-height-spark: 1.75rem;
+  --t-height-curve: 4.5rem;
+  --t-size-heat: 1.05rem;
+  --t-width-share: 3rem;
+  --t-width-figures: 21rem;
+  --t-width-menu: 18rem;
+  --t-height-bar: 3rem;
+  --t-height-row: 36px;
+  --t-height-chart: 9.5rem;
+  --t-height-meter: 6px;
+  --t-size-dot: 0.5rem;
+  --t-radius-sm: 0.25rem;
+  --t-radius-md: 0.5rem;
+  --t-radius-full: 9999px;
+  --t-shadow-popover:
+    0 1px 2px light-dark(rgb(0 0 0 / 0.08), rgb(0 0 0 / 0.3)),
+    0 0.25rem 0.9rem light-dark(rgb(0 0 0 / 0.14), rgb(0 0 0 / 0.45));
+  --t-z-popover: 30;
+
+  /* Icons. */
+  --t-icon-sm: 14px;
+  --t-icon-md: 16px;
+  --t-icon-stroke: 1.75;
+
+  /* Motion. */
+  --t-duration-fast: 120ms;
+  --t-duration-base: 200ms;
+  --t-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
+  --t-target: 24px;
+}
+
+@media (pointer: coarse) {
+  :root {
+    --t-target: 44px;
+  }
+}
