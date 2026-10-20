@@ -24,9 +24,10 @@ import (
 type requestState struct {
 	sessionID           string
 	alias               string
-	upstreamStatus      int   // the upstream's status when a response arrived; 0 otherwise
-	upstreamUnavailable bool  // set by respondUpstreamUnavailable
-	cut                 error // errIdleTimeout or errMaxDuration when the limits ended the request
+	upstreamStatus      int         // the upstream's status when a response arrived; 0 otherwise
+	upstreamUnavailable bool        // set by respondUpstreamUnavailable
+	cut                 error       // errIdleTimeout or errMaxDuration when the limits ended the request
+	meter               *usageMeter // reads the response's usage; nil when it is not read
 }
 
 // stateKey is the context key of the request's *requestState.
@@ -179,6 +180,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		aborted := recover()
 		row.BytesUp, row.BytesDown, row.Status = up.count, down.count, state.upstreamStatus
 		row.Duration = time.Since(start)
+		if state.meter != nil {
+			row.Usage = state.meter.result()
+		}
 		if row.Result == "" {
 			row.Result = outcome(state, r.Context().Err() != nil || aborted != nil)
 		}
@@ -292,10 +296,12 @@ func outcome(state *requestState, interrupted bool) string {
 }
 
 // inspectUpstream runs on every upstream response before it is written back. It keeps
-// the upstream's status for the traffic row and hands the response to recordUpstream.
-// The response passes through unchanged and is not replayed.
+// the upstream's status for the traffic row, hands the response to recordUpstream and
+// puts a usage meter on its body. The response passes through unchanged and is not
+// replayed.
 func (rt *router) inspectUpstream(res *http.Response) error {
-	if state, ok := res.Request.Context().Value(stateKey{}).(*requestState); ok {
+	state, ok := res.Request.Context().Value(stateKey{}).(*requestState)
+	if ok {
 		state.upstreamStatus = res.StatusCode
 	}
 	source := "response"
@@ -303,6 +309,11 @@ func (rt *router) inspectUpstream(res *http.Response) error {
 		source = "429"
 	}
 	rt.recordUpstream(res, source)
+	if ok {
+		if state.meter = newUsageMeter(res, rt.provider.Usage); state.meter != nil {
+			res.Body = state.meter
+		}
+	}
 	return nil
 }
 

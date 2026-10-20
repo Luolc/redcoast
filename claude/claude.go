@@ -21,6 +21,7 @@ var Claude = Provider{
 	NotSession: notSessionCredential,
 	Account:    claudeAccount,
 	Readings:   quotaReadings,
+	Usage:      claudeUsage,
 	Refused:    tokenRefused,
 	Probe:      &Probe{Path: "/v1/messages", Body: refreshBody, Header: refreshHeaders},
 	Capture:    true,

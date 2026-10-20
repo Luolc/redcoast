@@ -32,6 +32,11 @@ type Provider struct {
 	Account func(alias string, document []byte) (CredentialSource, error)
 	// Readings parses an upstream response's quota readings, recorded under source.
 	Readings func(header http.Header, source string) []session.Reading
+	// Usage reads what one JSON document of a 200 response to a forwarded request says
+	// of its model and tokens: the whole body of a JSON response, or the data of one
+	// event of an event stream. The traffic row keeps what the response's documents
+	// said, and nothing when they gave no token count. Nil records no usage.
+	Usage func(document []byte) UsageReport
 	// Refused reports whether an upstream 401 means the account's credential was
 	// refused, which pauses the account: for credentialPause without Renew, and with it
 	// until a forced renewal succeeds.

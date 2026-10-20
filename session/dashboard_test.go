@@ -367,3 +367,61 @@ func TestPercentile(t *testing.T) {
 		}
 	}
 }
+
+// TestDashboardTokens sums the reported tokens into the usage points, with a row that
+// reported none counted as a request and as no tokens, and groups the rows that
+// reported usage by hour, account and model, a row without a model under "". A row a
+// millisecond before the window is left out. Each account carries its quota history,
+// an empty one as {}.
+func TestDashboardTokens(t *testing.T) {
+	ctx := context.Background()
+	c := newClock()
+	store, path := open(t, c)
+	now := c.Now()
+	hour := now.Add(-30 * time.Minute)
+	for _, row := range []struct {
+		at    time.Time
+		usage *Usage
+	}{
+		{hour, &Usage{Model: "claude-sample-1", InputTokens: 10, OutputTokens: 42, CacheRead: 3, CacheCreation: 2}},
+		{hour, &Usage{Model: "claude-sample-1", InputTokens: 1, OutputTokens: 2, CacheRead: 3, CacheCreation: 4}},
+		{hour, &Usage{Model: "claude-sample-2", InputTokens: 100, OutputTokens: 200}},
+		{hour, &Usage{InputTokens: 5}},
+		{hour, nil},
+		{now.Add(-24*time.Hour - time.Millisecond), &Usage{Model: "claude-sample-1", InputTokens: 1000}},
+	} {
+		if err := store.RecordTraffic(ctx, Traffic{At: row.at, Alias: "sample-a", Kind: "inference", Host: "api.example.com", Port: 443, Result: "ok", Status: 200, Usage: row.usage}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.RecordQuota(ctx, "sample-a", []Reading{{Window: Window5h, Utilization: 0.25, Source: "response"}}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := openReader(t, path, c).Snapshot(ctx, accounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at11 := time.Date(2026, 10, 6, 11, 0, 0, 0, time.UTC)
+	wantUsage := UsagePoint{Hour: at11, Alias: "sample-a", Kind: "inference", Requests: 5, Tokens: Tokens{InputTokens: 116, OutputTokens: 244, CacheRead: 6, CacheCreation: 6}}
+	if len(snap.Usage) != 1 || snap.Usage[0] != wantUsage {
+		t.Fatalf("usage = %+v, want %+v", snap.Usage, wantUsage)
+	}
+	wantModels := []ModelUsage{
+		{Hour: at11, Alias: "sample-a", Requests: 1, Tokens: Tokens{InputTokens: 5}},
+		{Hour: at11, Alias: "sample-a", Model: "claude-sample-1", Requests: 2, Tokens: Tokens{InputTokens: 11, OutputTokens: 44, CacheRead: 6, CacheCreation: 6}},
+		{Hour: at11, Alias: "sample-a", Model: "claude-sample-2", Requests: 1, Tokens: Tokens{InputTokens: 100, OutputTokens: 200}},
+	}
+	if !slices.Equal(snap.ModelUsage, wantModels) {
+		t.Fatalf("model usage = %+v, want %+v", snap.ModelUsage, wantModels)
+	}
+	if len(snap.Accounts) != 2 {
+		t.Fatalf("accounts = %+v", snap.Accounts)
+	}
+	// The accounts come in the order of the candidates: sample-b first.
+	if a := snap.Accounts[1]; a.Alias != "sample-a" || len(a.QuotaHistory) != 1 || len(a.QuotaHistory[Window5h]) != 1 || a.QuotaHistory[Window5h][0].Utilization != 0.25 {
+		t.Fatalf("sample-a quota history = %+v", a.QuotaHistory)
+	}
+	if b := snap.Accounts[0]; b.QuotaHistory == nil || len(b.QuotaHistory) != 0 {
+		t.Fatalf("sample-b quota history = %+v", b.QuotaHistory)
+	}
+}

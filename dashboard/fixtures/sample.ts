@@ -32,7 +32,12 @@ export function sampleDashboard(now: Date): Dashboard {
       wal_bytes: 4_194_304,
       retention: {
         at: at(-25 * 60),
-        pruned: { traffic: 0, binding_history: 0, sessions: 0 },
+        pruned: {
+          traffic: 0,
+          binding_history: 0,
+          sessions: 0,
+          quota_history: 0,
+        },
         vacuumed: false,
       },
       backup: { last_success: at(-17) },
@@ -63,6 +68,10 @@ export function sampleDashboard(now: Date): Dashboard {
             observed_at: at(-1),
             source: "response",
           },
+        },
+        quota_history: {
+          "5h": quotaHistory(now, 5 * 60, 15, 0.42, 0.02),
+          "7d": quotaHistory(now, 7 * 24 * 60, 60, 0.92, 0.005),
         },
         plan: {
           name: "max-20x",
@@ -218,6 +227,7 @@ export function sampleDashboard(now: Date): Dashboard {
       },
     ],
     client_hourly: clientHourly(counted.usage ?? []),
+    model_usage: modelUsage(counted.usage ?? []),
     destinations: [
       {
         host: "github.com",
@@ -327,6 +337,7 @@ function traffic(
           s.kind === "inference" && s.machine !== ""
             ? Math.floor(failing / 3)
             : 0,
+        ...tokens(s.kind === "inference" && s.machine !== "" ? requests : 0),
       });
     }
   }
@@ -464,4 +475,58 @@ function clientHourly(
       count(u.hour, u.client_machine, "codex-cli", u.requests);
   }
   return [...hourly.values()];
+}
+
+// Made-up token counts of a number of inference requests that reported usage.
+function tokens(requests: number) {
+  return {
+    input_tokens: requests * 1_800,
+    output_tokens: requests * 400,
+    cache_read_input_tokens: requests * 52_000,
+    cache_creation_input_tokens: requests * 3_000,
+  };
+}
+
+// The hourly tokens by model: two thirds of each account's inference requests
+// on one model and the rest on another.
+function modelUsage(
+  usage: NonNullable<Dashboard["usage"]>,
+): NonNullable<Dashboard["model_usage"]> {
+  const out: NonNullable<Dashboard["model_usage"]> = [];
+  for (const u of usage) {
+    if (u.kind !== "inference" || u.client_machine === "") continue;
+    const main = Math.round((u.requests * 2) / 3);
+    for (const [model, requests] of [
+      ["claude-sample-large", main],
+      ["claude-sample-small", u.requests - main],
+    ] as const) {
+      if (requests > 0)
+        out.push({
+          hour: u.hour,
+          alias: u.alias,
+          model,
+          requests,
+          ...tokens(requests),
+        });
+    }
+  }
+  return out;
+}
+
+// A quota history over the last span minutes, one reading every step minutes,
+// rising by rise from one reading to the next and ending at end.
+function quotaHistory(
+  now: Date,
+  span: number,
+  step: number,
+  end: number,
+  rise: number,
+): { at: string; utilization: number }[] {
+  const points = [];
+  for (let back = span - step; back >= 0; back -= step)
+    points.push({
+      at: new Date(now.getTime() - back * 60_000).toISOString(),
+      utilization: Math.max(0, end - (back / step) * rise),
+    });
+  return points;
 }

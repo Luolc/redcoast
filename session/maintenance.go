@@ -24,8 +24,8 @@ const pruneBatch = 1000
 // pruneInterval is how often RunRetention prunes.
 const pruneInterval = 24 * time.Hour
 
-// Retention is how long Prune keeps traffic rows, and closed binding_history rows and
-// ended sessions.
+// Retention is how long Prune keeps traffic rows and the quota history, and closed
+// binding_history rows and ended sessions.
 type Retention struct {
 	Traffic  time.Duration
 	Sessions time.Duration
@@ -33,9 +33,10 @@ type Retention struct {
 
 // Pruned counts the rows one Prune deleted.
 type Pruned struct {
-	Traffic  int `json:"traffic"`
-	History  int `json:"binding_history"`
-	Sessions int `json:"sessions"`
+	Traffic      int `json:"traffic"`
+	History      int `json:"binding_history"`
+	Sessions     int `json:"sessions"`
+	QuotaHistory int `json:"quota_history"`
 }
 
 // RetentionRun is the outcome of the last retention run since the gateway started.
@@ -78,10 +79,10 @@ func (s *Store) QuickCheck(ctx context.Context) error {
 	return nil
 }
 
-// Prune deletes traffic rows older than r.Traffic, binding_history rows closed longer
-// ago than r.Sessions, and sessions ended longer ago than r.Sessions together with
-// their bindings row. A session that traffic or binding_history still refers to is
-// kept. Each batch is its own transaction.
+// Prune deletes traffic rows and quota history readings older than r.Traffic,
+// binding_history rows closed longer ago than r.Sessions, and sessions ended longer ago
+// than r.Sessions together with their bindings row. A session that traffic or
+// binding_history still refers to is kept. Each batch is its own transaction.
 func (s *Store) Prune(ctx context.Context, r Retention) (Pruned, error) {
 	trafficCutoff := s.now() - r.Traffic.Milliseconds()
 	sessionCutoff := s.now() - r.Sessions.Milliseconds()
@@ -91,6 +92,11 @@ func (s *Store) Prune(ctx context.Context, r Retention) (Pruned, error) {
 		return exec(ctx, tx, "DELETE FROM traffic WHERE id IN (SELECT id FROM traffic WHERE ts < ? ORDER BY ts LIMIT ?)", trafficCutoff, pruneBatch)
 	}); err != nil {
 		return out, fmt.Errorf("prune traffic: %v", err)
+	}
+	if out.QuotaHistory, err = s.inBatches(ctx, func(tx *sql.Tx) (int64, error) {
+		return exec(ctx, tx, "DELETE FROM quota_history WHERE rowid IN (SELECT rowid FROM quota_history WHERE at < ? LIMIT ?)", trafficCutoff, pruneBatch)
+	}); err != nil {
+		return out, fmt.Errorf("prune quota history: %v", err)
 	}
 	if out.History, err = s.inBatches(ctx, func(tx *sql.Tx) (int64, error) {
 		return exec(ctx, tx, "DELETE FROM binding_history WHERE id IN (SELECT id FROM binding_history WHERE to_ts < ? LIMIT ?)", sessionCutoff, pruneBatch)
@@ -213,7 +219,7 @@ func (s *Store) RunRetention(ctx context.Context, r Retention) error {
 		if err != nil {
 			log.Printf("retention: %v", err)
 		} else {
-			log.Printf("retention: deleted traffic=%d binding_history=%d sessions=%d vacuum=%t", pruned.Traffic, pruned.History, pruned.Sessions, vacuumed)
+			log.Printf("retention: deleted traffic=%d quota_history=%d binding_history=%d sessions=%d vacuum=%t", pruned.Traffic, pruned.QuotaHistory, pruned.History, pruned.Sessions, vacuumed)
 		}
 		select {
 		case <-ctx.Done():

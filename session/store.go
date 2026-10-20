@@ -35,7 +35,7 @@ const (
 
 // schemaVersion is stored in PRAGMA user_version. Each version's tables are created by
 // migrate when the file's version is lower.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // schema creates the tables of version 1. Timestamps are Unix milliseconds in UTC.
 const schema = `
@@ -145,6 +145,25 @@ CREATE TABLE machines (
 ) STRICT;
 `
 
+// schemaV7 adds what version 7 records of each inference request's usage, the model
+// and token counts its response reported, NULL when it reported none, and the sampled
+// history of each account's quota readings.
+const schemaV7 = `
+ALTER TABLE traffic ADD COLUMN model TEXT;
+ALTER TABLE traffic ADD COLUMN input_tokens INTEGER;
+ALTER TABLE traffic ADD COLUMN output_tokens INTEGER;
+ALTER TABLE traffic ADD COLUMN cache_read_tokens INTEGER;
+ALTER TABLE traffic ADD COLUMN cache_creation_tokens INTEGER;
+CREATE TABLE quota_history (
+	alias TEXT NOT NULL,
+	window TEXT NOT NULL CHECK (window IN ('5h', '7d')),
+	at INTEGER NOT NULL,
+	utilization REAL NOT NULL,
+	PRIMARY KEY (alias, window, at)
+) STRICT;
+CREATE INDEX quota_history_at ON quota_history(at);
+`
+
 // seedPlans are the initial quota units, in effect since the epoch: third-party tests
 // put a plan's quota roughly in proportion to its monthly list price. Later changes go
 // in as new periods, not edits.
@@ -242,7 +261,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	for _, step := range []struct {
 		version int
 		apply   func(context.Context, *sql.Tx) error
-	}{{1, s.migrateToV1}, {2, migrateToV2}, {3, migrateToV3}, {4, migrateToV4}, {5, migrateToV5}, {6, migrateToV6}} {
+	}{{1, s.migrateToV1}, {2, migrateToV2}, {3, migrateToV3}, {4, migrateToV4}, {5, migrateToV5}, {6, migrateToV6}, {7, migrateToV7}} {
 		if version < step.version {
 			if err := step.apply(ctx, tx); err != nil {
 				return err
@@ -324,6 +343,15 @@ func migrateToV5(ctx context.Context, tx *sql.Tx) error {
 func migrateToV6(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, "ALTER TABLE traffic ADD COLUMN request TEXT"); err != nil {
 		return fmt.Errorf("session store migration v6: %v", err)
+	}
+	return nil
+}
+
+// migrateToV7 adds the usage columns of traffic and the quota_history table. Older
+// rows have no usage and the history starts empty.
+func migrateToV7(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, schemaV7); err != nil {
+		return fmt.Errorf("session store migration v7: %v", err)
 	}
 	return nil
 }

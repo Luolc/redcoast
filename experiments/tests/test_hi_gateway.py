@@ -121,8 +121,8 @@ KNOWN = (
   b"2000/01/01 00:00:34 egress: check failed alias=example-a, not paused:"
   b' exit IP not read: Get "https://ip.oxylabs.io/location": proxyconnect'
   b" tcp: dial tcp 127.0.0.1:8793: connect: connection refused\n"
-  b"2000/01/01 00:00:34 retention: deleted traffic=0 binding_history=0"
-  b" sessions=0 vacuum=false\n"
+  b"2000/01/01 00:00:34 retention: deleted traffic=0 quota_history=0"
+  b" binding_history=0 sessions=0 vacuum=false\n"
 )
 
 

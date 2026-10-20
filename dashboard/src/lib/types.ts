@@ -21,7 +21,12 @@ interface Health {
 
 interface RetentionRun {
   at?: string | undefined; // absent before the first run since the start
-  pruned: { traffic: number; binding_history: number; sessions: number };
+  pruned: {
+    traffic: number;
+    binding_history: number;
+    sessions: number;
+    quota_history?: number | undefined; // absent from a gateway older than this page
+  };
   vacuumed: boolean;
   error?: string | undefined;
 }
@@ -57,6 +62,12 @@ export interface Quota {
   source: string;
 }
 
+// One sampled reading of an account's quota history.
+interface QuotaPoint {
+  at: string;
+  utilization: number;
+}
+
 interface Plan {
   name: string;
   effective_from: string;
@@ -73,6 +84,10 @@ export interface Account {
   bound_sessions: number;
   active_sessions: number;
   quota: Record<string, Quota>; // by window, 5h and 7d
+  // By window, oldest first, over the window's length (5 hours, 7 days); a
+  // window without readings has no key. Absent from a gateway older than this
+  // page.
+  quota_history?: Record<string, QuotaPoint[]> | undefined;
   plan: Plan | null;
   next_plan: Plan | null;
   in_flight: number;
@@ -134,9 +149,21 @@ interface ResultCount {
   count: number;
 }
 
+// Sums of the token counts the upstream's responses reported, as the provider
+// counts them: Claude's input tokens leave out the cache reads and writes,
+// which it counts apart; Codex counts no cache tokens apart and reports them as
+// 0, its input tokens including the cached ones.
+interface Tokens {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+
 // Errors are rows with a result other than ok, or with a status of 400 or more;
 // a CONNECT tunnel the limits closed (idle_timeout, max_duration) is no error.
-// Limited rows are among the errors.
+// Limited rows are among the errors. The tokens, absent from a gateway older
+// than this page, count errors too.
 export interface UsagePoint {
   hour: string;
   alias: string; // empty for requests carried on no account
@@ -147,6 +174,19 @@ export interface UsagePoint {
   bytes_down: number;
   errors: number;
   limited: number;
+  input_tokens?: number | undefined;
+  output_tokens?: number | undefined;
+  cache_read_input_tokens?: number | undefined;
+  cache_creation_input_tokens?: number | undefined;
+}
+
+// One hour's tokens of one account and model, over the requests whose
+// response reported usage; model is empty when the response named none.
+interface ModelUsage extends Tokens {
+  hour: string;
+  alias: string;
+  model: string;
+  requests: number;
 }
 
 export interface SourceCount extends ResultCount {
@@ -217,6 +257,7 @@ export interface Dashboard {
   // By account and client machine; absent from a gateway older than this page.
   usage?: UsagePoint[] | undefined;
   result_sources?: SourceCount[] | undefined;
+  model_usage?: ModelUsage[] | undefined; // absent from a gateway older than this page
   // Absent from a gateway older than this page.
   clients?: ClientCount[] | undefined;
   client_hourly?: ClientHour[] | undefined;
@@ -236,6 +277,13 @@ const latency = {
   requests: isNumber,
   duration_p50_ms: isNumber,
   duration_p95_ms: isNumber,
+};
+
+const tokens = {
+  input_tokens: isNumber,
+  output_tokens: isNumber,
+  cache_read_input_tokens: isNumber,
+  cache_creation_input_tokens: isNumber,
 };
 
 const isDashboard: Guard<Dashboard> = object<Dashboard>({
@@ -261,6 +309,7 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
         traffic: isNumber,
         binding_history: isNumber,
         sessions: isNumber,
+        quota_history: optional(isNumber),
       }),
       vacuumed: isBoolean,
       error: optional(isString),
@@ -293,6 +342,11 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
           observed_at: isString,
           source: isString,
         }),
+      ),
+      quota_history: optional(
+        recordOf(
+          arrayOf(object<QuotaPoint>({ at: isString, utilization: isNumber })),
+        ),
       ),
       plan: nullable(isPlan),
       next_plan: nullable(isPlan),
@@ -352,6 +406,10 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
         bytes_down: isNumber,
         errors: isNumber,
         limited: isNumber,
+        input_tokens: optional(isNumber),
+        output_tokens: optional(isNumber),
+        cache_read_input_tokens: optional(isNumber),
+        cache_creation_input_tokens: optional(isNumber),
       }),
     ),
   ),
@@ -365,6 +423,17 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
         alias: isString,
         client_machine: isString,
         error: isBoolean,
+      }),
+    ),
+  ),
+  model_usage: optional(
+    arrayOf(
+      object<ModelUsage>({
+        hour: isString,
+        alias: isString,
+        model: isString,
+        requests: isNumber,
+        ...tokens,
       }),
     ),
   ),

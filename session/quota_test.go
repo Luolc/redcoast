@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"testing"
 	"time"
 )
@@ -116,7 +117,7 @@ func TestMigrateFromVersionOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Turn the file back into a version-1 file.
-	for _, statement := range []string{"ALTER TABLE traffic DROP COLUMN request", "ALTER TABLE traffic DROP COLUMN route", "DROP TABLE machines", "DROP TABLE plan_schedule", "DROP TABLE plans", "PRAGMA user_version = 1"} {
+	for _, statement := range append(undoV7, "ALTER TABLE traffic DROP COLUMN request", "ALTER TABLE traffic DROP COLUMN route", "DROP TABLE machines", "DROP TABLE plan_schedule", "DROP TABLE plans", "PRAGMA user_version = 1") {
 		if _, err := store.db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +164,7 @@ func TestMigrateRescalesQuota(t *testing.T) {
 			if err := store.RecordQuota(ctx, "sample-a", []Reading{reading}); err != nil {
 				t.Fatal(err)
 			}
-			for _, statement := range []string{"ALTER TABLE traffic DROP COLUMN request", "ALTER TABLE traffic DROP COLUMN route"} {
+			for _, statement := range append(undoV7, "ALTER TABLE traffic DROP COLUMN request", "ALTER TABLE traffic DROP COLUMN route") {
 				if _, err := store.db.Exec(statement); err != nil {
 					t.Fatal(err)
 				}
@@ -190,5 +191,113 @@ func TestMigrateRescalesQuota(t *testing.T) {
 				t.Fatalf("bound=%+v err=%v, want %s", bound, err, arm.alias)
 			}
 		})
+	}
+}
+
+// TestQuotaHistorySampling records readings of one window at the boundaries of the
+// sampling rule and reads back which were kept: the first one; a changed one only once
+// quotaSampleGap has passed since the last kept one; an unchanged one only once
+// quotaSampleHeartbeat has; none while the clock is behind the last kept one. The
+// other window and account are sampled on their own, and every reading still replaces
+// the latest.
+func TestQuotaHistorySampling(t *testing.T) {
+	c := newClock()
+	store, _ := open(t, c)
+	ctx := context.Background()
+	start := c.Now()
+	record := func(alias string, window string, utilization float64) {
+		t.Helper()
+		if err := store.RecordQuota(ctx, alias, []Reading{{Window: window, Utilization: utilization, Source: "response"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := func(offset time.Duration) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.now = start.Add(offset)
+	}
+	steps := []struct {
+		offset      time.Duration
+		utilization float64
+	}{
+		{0, 0.10}, // kept: the first
+		{quotaSampleGap - time.Millisecond, 0.20},                        // changed, under the gap
+		{quotaSampleGap, 0.20},                                           // changed from the kept 0.10, at the gap: kept
+		{quotaSampleGap + 30*time.Minute, 0.20},                          // unchanged, under the heartbeat
+		{quotaSampleGap + quotaSampleHeartbeat - time.Millisecond, 0.20}, // unchanged, just under it
+		{quotaSampleGap + quotaSampleHeartbeat, 0.20},                    // unchanged, at the heartbeat: kept
+		{time.Minute, 0.90},                                              // the clock stepped back
+	}
+	for _, s := range steps {
+		at(s.offset)
+		record("sample-a", Window5h, s.utilization)
+	}
+	at(time.Minute)
+	record("sample-a", Window7d, 0.40)
+	record("sample-b", Window5h, 0.30)
+	rows, err := store.db.Query("SELECT alias, window, at, utilization FROM quota_history ORDER BY alias, window, at")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var alias, window string
+		var ms int64
+		var utilization float64
+		if err := rows.Scan(&alias, &window, &ms, &utilization); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("%s %s %v %.2f", alias, window, fromMillis(ms).Sub(start), utilization))
+	}
+	want := []string{"sample-a 5h 0s 0.10", "sample-a 5h 5m0s 0.20", "sample-a 5h 1h5m0s 0.20", "sample-a 7d 1m0s 0.40", "sample-b 5h 1m0s 0.30"}
+	if err := rows.Err(); err != nil || !slices.Equal(got, want) {
+		t.Fatalf("history=%q err=%v, want %q", got, err, want)
+	}
+	if q, err := store.LatestQuota(ctx, "sample-a"); err != nil || q[Window5h].Utilization != 0.90 {
+		t.Fatalf("latest 5h=%+v err=%v, want the last reading", q[Window5h], err)
+	}
+}
+
+// TestQuotaHistorySpan reads back each window's history over that window's length:
+// readings at the start of the span are in it, ones a millisecond older are not.
+func TestQuotaHistorySpan(t *testing.T) {
+	c := newClock()
+	store, _ := open(t, c)
+	ctx := context.Background()
+	now := c.Now()
+	for _, r := range []struct {
+		window string
+		at     time.Time
+		value  float64
+	}{
+		{Window5h, now.Add(-5*time.Hour - time.Millisecond), 0.1},
+		{Window5h, now.Add(-5 * time.Hour), 0.2},
+		{Window7d, now.Add(-5*time.Hour - time.Millisecond), 0.3},
+		{Window7d, now.Add(-7*24*time.Hour - time.Millisecond), 0.4},
+		{Window7d, now.Add(-7 * 24 * time.Hour), 0.5},
+	} {
+		if _, err := store.db.Exec("INSERT INTO quota_history (alias, window, at, utilization) VALUES ('sample-a', ?, ?, ?)", r.window, r.at.UnixMilli(), r.value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	history, err := store.QuotaHistory(ctx, "sample-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]QuotaPoint{
+		Window5h: {{At: now.Add(-5 * time.Hour), Utilization: 0.2}},
+		Window7d: {{At: now.Add(-7 * 24 * time.Hour), Utilization: 0.5}, {At: now.Add(-5*time.Hour - time.Millisecond), Utilization: 0.3}},
+	}
+	if len(history) != len(want) {
+		t.Fatalf("history=%+v, want %+v", history, want)
+	}
+	for window, points := range want {
+		if !slices.EqualFunc(history[window], points, func(a, b QuotaPoint) bool { return a.At.Equal(b.At) && a.Utilization == b.Utilization }) {
+			t.Errorf("%s history=%+v, want %+v", window, history[window], points)
+		}
+	}
+	if other, err := store.QuotaHistory(ctx, "sample-b"); err != nil || other == nil || len(other) != 0 {
+		t.Fatalf("an account without history: %+v err=%v", other, err)
 	}
 }

@@ -35,8 +35,24 @@ type Quota struct {
 	Source      string    `json:"source"`
 }
 
-// RecordQuota replaces the latest reading of each window in readings for account alias.
-// A window absent from readings keeps its previous reading.
+// The quota history keeps a reading of an account's window when the window's last kept
+// reading is at least quotaSampleGap old and either differs from it or is at least
+// quotaSampleHeartbeat old, so it holds at most one reading per gap and none for a
+// stretch that did not change.
+const (
+	quotaSampleGap       = 5 * time.Minute
+	quotaSampleHeartbeat = time.Hour
+)
+
+// QuotaPoint is one reading of the quota history.
+type QuotaPoint struct {
+	At          time.Time `json:"at"`
+	Utilization float64   `json:"utilization"`
+}
+
+// RecordQuota replaces the latest reading of each window in readings for account alias,
+// and adds it to the quota history as the sampling rule above allows. A window absent
+// from readings keeps its previous reading.
 func (s *Store) RecordQuota(ctx context.Context, alias string, readings []Reading) error {
 	if len(readings) == 0 {
 		return nil
@@ -60,9 +76,60 @@ func (s *Store) RecordQuota(ctx context.Context, alias string, readings []Readin
 			if err != nil {
 				return fmt.Errorf("record quota: %v", err)
 			}
+			if err := sampleQuota(ctx, tx, alias, r, now); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
+}
+
+// sampleQuota adds reading r of account alias, taken at now, to the quota history when
+// the sampling rule allows it.
+func sampleQuota(ctx context.Context, tx *sql.Tx, alias string, r Reading, now int64) error {
+	var at int64
+	var utilization float64
+	err := tx.QueryRowContext(ctx, "SELECT at, utilization FROM quota_history WHERE alias = ? AND window = ? ORDER BY at DESC LIMIT 1", alias, r.Window).Scan(&at, &utilization)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return fmt.Errorf("read quota history: %v", err)
+	case now-at < quotaSampleGap.Milliseconds(), utilization == r.Utilization && now-at < quotaSampleHeartbeat.Milliseconds():
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO quota_history (alias, window, at, utilization) VALUES (?, ?, ?, ?)", alias, r.Window, now, r.Utilization); err != nil {
+		return fmt.Errorf("record quota history: %v", err)
+	}
+	return nil
+}
+
+// QuotaHistory returns the quota history of account alias by window, oldest first, for
+// the length of each window back from now: the last five hours of 5h, the last seven
+// days of 7d. A window with no reading in that span has no key.
+func (s *Store) QuotaHistory(ctx context.Context, alias string) (map[string][]QuotaPoint, error) {
+	now := s.now()
+	rows, err := s.db.QueryContext(ctx, `SELECT window, at, utilization FROM quota_history
+		WHERE alias = ? AND ((window = ? AND at >= ?) OR (window = ? AND at >= ?)) ORDER BY window, at`,
+		alias, Window5h, now-(5*time.Hour).Milliseconds(), Window7d, now-(7*24*time.Hour).Milliseconds())
+	if err != nil {
+		return nil, fmt.Errorf("read quota history: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string][]QuotaPoint{}
+	for rows.Next() {
+		var window string
+		var at int64
+		var p QuotaPoint
+		if err := rows.Scan(&window, &at, &p.Utilization); err != nil {
+			return nil, fmt.Errorf("read quota history: %v", err)
+		}
+		p.At = fromMillis(at)
+		out[window] = append(out[window], p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read quota history: %v", err)
+	}
+	return out, nil
 }
 
 // LatestQuota returns the stored readings of account alias by window.
