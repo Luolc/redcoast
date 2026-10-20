@@ -78,7 +78,7 @@ func TestReadOnlyHosts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			server := httptest.NewServer(cfg.readOnly(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			server := httptest.NewServer(cfg.hostGuarded(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte("guarded"))
 			})))
 			defer server.Close()

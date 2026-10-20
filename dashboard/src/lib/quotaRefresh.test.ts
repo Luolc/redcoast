@@ -1,5 +1,9 @@
 import { expect, it } from "vitest";
-import { refreshOffer, requestQuotaRefresh } from "./quotaRefresh";
+import {
+  refreshOffer,
+  requestQuotaRefresh,
+  shownRefusal,
+} from "./quotaRefresh";
 
 const now = new Date("2026-10-07T12:20:00Z");
 
@@ -72,4 +76,16 @@ it("says why the gateway refused the refresh", async () => {
   expect(await requestQuotaRefresh(failing)).toBe(
     "Could not refresh: TypeError: network",
   );
+});
+
+it("shows a refusal only until the next reading of the gateway", () => {
+  const refusal = {
+    text: "Could not refresh: HTTP 403",
+    at: "2026-10-07T12:20:00Z",
+  };
+  expect(shownRefusal(refusal, "2026-10-07T12:20:00Z")).toBe(
+    "Could not refresh: HTTP 403",
+  );
+  expect(shownRefusal(refusal, "2026-10-07T12:20:30Z")).toBeNull();
+  expect(shownRefusal(null, "2026-10-07T12:20:00Z")).toBeNull();
 });
