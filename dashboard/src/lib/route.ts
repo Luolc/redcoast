@@ -2,17 +2,25 @@
 // every view opens directly and another provider's dashboard opens on the
 // same view when the fragment is carried over.
 export type View =
-  "overview" | "clients" | "sessions" | "accounts" | "exits" | "monitor";
+  | "overview"
+  | "clients"
+  | "client"
+  | "sessions"
+  | "accounts"
+  | "exits"
+  | "monitor";
 
 export interface Route {
   view: View;
-  // A client machine for clients and sessions; a section for monitor.
+  // A client machine for sessions; `<machine>/<program>` for client; a
+  // section for monitor.
   arg?: string | undefined;
 }
 
 const VIEWS = new Set<string>([
   "overview",
   "clients",
+  "client",
   "sessions",
   "accounts",
   "exits",
@@ -61,8 +69,23 @@ export function providerHref(url: string, hash: string): string | null {
 export const VIEW_NAMES: Record<View, string> = {
   overview: "Overview",
   clients: "Clients",
+  client: "Client",
   sessions: "Sessions",
   accounts: "Accounts",
   exits: "Exits",
   monitor: "Monitor",
 };
+
+// A machine's name has no slash, so the first one ends it.
+export function clientHref(machine: string, client: string): string {
+  return routeHref({ view: "client", arg: `${machine}/${client}` });
+}
+
+/** The machine and program of a client route's arg; null without a slash. */
+export function parseClient(
+  arg: string | undefined,
+): { machine: string; client: string } | null {
+  const i = arg?.indexOf("/") ?? -1;
+  if (arg === undefined || i < 0) return null;
+  return { machine: arg.slice(0, i), client: arg.slice(i + 1) };
+}

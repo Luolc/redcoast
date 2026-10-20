@@ -7,8 +7,9 @@ import {
   recentBindings,
   sessionState,
 } from "../lib/stats";
-import type { Dashboard } from "../lib/types";
+import type { Dashboard, LiveSession } from "../lib/types";
 import { bindingReason, providerName } from "../lib/words";
+import { ClientName } from "./Clients";
 import { Ago, Empty, PageHead, Section, Status, Time } from "./ui";
 
 /** The live sessions of this gateway, on one client machine or all, and how they were bound. */
@@ -115,50 +116,7 @@ export function Sessions({
             expiry (7 days by default) without a request.
           </Empty>
         ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Session</th>
-                  <th scope="col">Client machine</th>
-                  <th scope="col">Account</th>
-                  <th scope="col" className="n">
-                    Age
-                  </th>
-                  <th scope="col" className="n">
-                    Last request
-                  </th>
-                  <th scope="col">State</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map((s) => (
-                  <tr key={s.id}>
-                    <td className="mono">{s.id}</td>
-                    <td>{s.client_machine}</td>
-                    <td>
-                      {s.alias === "" ? (
-                        <span className="faint">unbound</span>
-                      ) : (
-                        s.alias
-                      )}
-                    </td>
-                    <td className="n">
-                      <Time iso={s.created_at}>
-                        {formatSpan(now.getTime() - Date.parse(s.created_at))}
-                      </Time>
-                    </td>
-                    <td className="n muted">
-                      <Ago iso={s.last_seen} now={now} />
-                    </td>
-                    <td>
-                      <Status state={sessionState(s, now)} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <SessionTable sessions={shown} now={now} />
         )}
       </Section>
       <Section
@@ -227,5 +185,90 @@ export function Sessions({
         )}
       </Section>
     </>
+  );
+}
+
+/**
+ * Live sessions, one per row; the client column names the machine and
+ * program unless the page is already one client's (onClient).
+ */
+export function SessionTable({
+  sessions,
+  now,
+  onClient = false,
+}: {
+  sessions: LiveSession[];
+  now: Date;
+  onClient?: boolean;
+}) {
+  // A gateway older than this page does not report programs.
+  const programs = sessions.some((s) => s.client !== undefined);
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Session</th>
+            {onClient ? null : <th scope="col">Client</th>}
+            {programs ? <th scope="col">Version</th> : null}
+            <th scope="col">Account</th>
+            <th scope="col" className="n">
+              Age
+            </th>
+            <th scope="col" className="n">
+              Last request
+            </th>
+            <th scope="col">State</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sessions.map((s) => (
+            <tr key={s.id}>
+              <td className="mono">{s.id}</td>
+              {onClient ? null : (
+                <td>
+                  {programs ? (
+                    <ClientName
+                      machine={s.client_machine}
+                      client={s.client ?? ""}
+                      link
+                    />
+                  ) : (
+                    s.client_machine
+                  )}
+                </td>
+              )}
+              {programs ? (
+                <td className="muted mono small">
+                  {s.client_version === undefined || s.client_version === "" ? (
+                    <span className="faint">—</span>
+                  ) : (
+                    s.client_version
+                  )}
+                </td>
+              ) : null}
+              <td>
+                {s.alias === "" ? (
+                  <span className="faint">unbound</span>
+                ) : (
+                  s.alias
+                )}
+              </td>
+              <td className="n">
+                <Time iso={s.created_at}>
+                  {formatSpan(now.getTime() - Date.parse(s.created_at))}
+                </Time>
+              </td>
+              <td className="n muted">
+                <Ago iso={s.last_seen} now={now} />
+              </td>
+              <td>
+                <Status state={sessionState(s, now)} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

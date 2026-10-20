@@ -450,32 +450,29 @@ function traffic(
   };
 }
 
-// The hourly requests by client program: machine-a's as claude-code's,
-// machine-b's as codex-cli's; requests of no session are not counted.
+// The hourly requests by client program: a fifth of machine-a's as pi's
+// and the rest as claude-code's, machine-b's as codex-cli's; requests of no
+// session are not counted.
 function clientHourly(
   usage: NonNullable<Dashboard["usage"]>,
 ): NonNullable<Dashboard["client_hourly"]> {
-  const programs: Record<string, string> = {
-    "machine-a": "claude-code",
-    "machine-b": "codex-cli",
-  };
-  const hourly = new Map<
-    string,
-    NonNullable<Dashboard["client_hourly"]>[number]
-  >();
-  for (const u of usage) {
-    const client = programs[u.client_machine];
-    if (client === undefined) continue;
-    const k = `${u.hour}\t${u.client_machine}`;
+  type Hour = NonNullable<Dashboard["client_hourly"]>[number];
+  const hourly = new Map<string, Hour>();
+  const count = (hour: string, machine: string, client: string, n: number) => {
+    if (n === 0) return;
+    const k = `${hour}\t${machine}\t${client}`;
     const into = hourly.get(k);
     if (into === undefined)
-      hourly.set(k, {
-        hour: u.hour,
-        client_machine: u.client_machine,
-        client,
-        requests: u.requests,
-      });
-    else into.requests += u.requests;
+      hourly.set(k, { hour, client_machine: machine, client, requests: n });
+    else into.requests += n;
+  };
+  for (const u of usage) {
+    if (u.client_machine === "machine-a") {
+      const pi = Math.floor(u.requests / 5);
+      count(u.hour, u.client_machine, "pi", pi);
+      count(u.hour, u.client_machine, "claude-code", u.requests - pi);
+    } else if (u.client_machine === "machine-b")
+      count(u.hour, u.client_machine, "codex-cli", u.requests);
   }
   return [...hourly.values()];
 }

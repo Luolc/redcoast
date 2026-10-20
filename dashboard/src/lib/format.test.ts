@@ -3,6 +3,7 @@ import {
   formatAgo,
   formatBytes,
   formatCount,
+  formatHourSpan,
   formatMs,
   formatPercent,
   formatSpan,
@@ -57,4 +58,9 @@ it("writes a request's duration in ms, s or min", () => {
   expect(formatMs(850)).toBe("850\u00a0ms");
   expect(formatMs(15_040)).toBe("15.0\u00a0s");
   expect(formatMs(65_000)).toBe("1\u00a0min 05\u00a0s");
+});
+
+it("names an hour by its start and end in UTC, across midnight too", () => {
+  expect(formatHourSpan("2026-10-07T09:00:00.000Z")).toBe("09:00–10:00 UTC");
+  expect(formatHourSpan("2026-10-07T23:00:00.000Z")).toBe("23:00–00:00 UTC");
 });

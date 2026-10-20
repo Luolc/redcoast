@@ -50,6 +50,11 @@ function windowHours(at: string): number[] {
   return hours;
 }
 
+/** The start of each hour of the 24 h window, oldest first. */
+export function windowHourStarts(at: string): string[] {
+  return windowHours(at).map((t) => new Date(t).toISOString());
+}
+
 export function hourSeries(rows: UsagePoint[], at: string): HourCounts[] {
   const series: HourCounts[] = [];
   const index = new Map<number, HourCounts>();
@@ -307,4 +312,72 @@ export function recentBindings(
     all: recent.length,
     rebound: recent.filter((h) => h.reason !== "new").length,
   };
+}
+
+export interface ClientRow {
+  machine: string;
+  client: string; // empty when the launcher did not name a known one
+  versions: string[]; // of its live sessions, newest first
+  live: number;
+  sessions: number; // created in the last 7 days, live or not
+  requests: number[]; // per hour of the 24 h window, oldest first
+}
+
+const byVersion = new Intl.Collator("en", { numeric: true });
+
+/**
+ * One row per client machine and client program, from the session counts
+ * of the last 7 days and the hourly requests of the 24 h window, most
+ * requests first.
+ */
+export function clientRows(
+  d: Pick<Dashboard, "at" | "clients" | "client_hourly" | "sessions">,
+): ClientRow[] {
+  const hours = windowHours(d.at);
+  const slot = new Map(hours.map((t, i) => [t, i]));
+  const rows = new Map<string, ClientRow>();
+  const row = (machine: string, client: string) => {
+    const k = `${machine}\t${client}`;
+    let r = rows.get(k);
+    if (r === undefined) {
+      r = {
+        machine,
+        client,
+        versions: [],
+        live: 0,
+        sessions: 0,
+        requests: hours.map(() => 0),
+      };
+      rows.set(k, r);
+    }
+    return r;
+  };
+  for (const c of d.clients ?? []) {
+    const r = row(c.client_machine, c.client);
+    r.live += c.live;
+    r.sessions += c.sessions;
+  }
+  for (const h of d.client_hourly ?? []) {
+    const i = slot.get(Date.parse(h.hour));
+    if (i === undefined) continue;
+    const r = row(h.client_machine, h.client);
+    r.requests[i] = (r.requests[i] ?? 0) + h.requests;
+  }
+  for (const s of d.sessions) {
+    const r = rows.get(`${s.client_machine}\t${s.client ?? ""}`);
+    const v = s.client_version ?? "";
+    if (r !== undefined && v !== "" && !r.versions.includes(v))
+      r.versions.push(v);
+  }
+  const sum = (r: ClientRow) => r.requests.reduce((a, b) => a + b, 0);
+  return [...rows.values()]
+    .map((r) => ({
+      ...r,
+      versions: r.versions.sort((a, b) => byVersion.compare(b, a)),
+    }))
+    .sort((a, b) => {
+      if (sum(a) !== sum(b)) return sum(b) - sum(a);
+      if (a.machine !== b.machine) return a.machine.localeCompare(b.machine);
+      return a.client.localeCompare(b.client);
+    });
 }
