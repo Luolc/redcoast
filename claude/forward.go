@@ -29,7 +29,8 @@ var connectTarget = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}:[0-9]{1,5}$`)
 
 // connectRecord is the saved capture record of one forward-proxy request. Result is
 // one of ok, refused (not a CONNECT, an invalid target, a host the deny list names,
-// or an account-route target accountTarget rules out), auth_failed, not_session (the
+// or an account-route target accountTarget rules out), challenged (no
+// Proxy-Authorization, answered with the 407 challenge), auth_failed, not_session (the
 // credential does not have the shape of a session credential), wrong_source, no_account,
 // quota_exhausted, store_failed, limited, egress_failed (the exit could not be reached, answered
 // nothing valid, or refused the tunnel; ExitStatus tells which; on the direct route,
