@@ -360,7 +360,7 @@ type sessionSource struct {
 }
 
 // window reads the traffic rows since since once and groups them into the snapshot's
-// hourly traffic, results, usage, model usage, result sources, client hours and latency.
+// usage, model usage, result sources, client hours and latency.
 // A row's client machine is its session's, which is read once per session rather than
 // joined to each row. Prune keeps every session a traffic row names, so only a row of
 // no session has no machine, and is left out of the client hours.
