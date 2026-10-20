@@ -133,15 +133,6 @@ interface ClientHour {
   requests: number;
 }
 
-interface HourTraffic {
-  hour: string;
-  alias: string;
-  kind: string;
-  requests: number;
-  bytes_up: number;
-  bytes_down: number;
-}
-
 interface ResultCount {
   kind: string;
   result: string;
@@ -252,8 +243,6 @@ export interface Dashboard {
   machines: Machine[];
   sessions: LiveSession[];
   idle_sessions: number;
-  hourly: HourTraffic[];
-  results: ResultCount[];
   // By account and client machine; absent from a gateway older than this page.
   usage?: UsagePoint[] | undefined;
   result_sources?: SourceCount[] | undefined;
@@ -376,24 +365,6 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
     }),
   ),
   idle_sessions: isNumber,
-  hourly: arrayOf(
-    object<HourTraffic>({
-      hour: isString,
-      alias: isString,
-      kind: isString,
-      requests: isNumber,
-      bytes_up: isNumber,
-      bytes_down: isNumber,
-    }),
-  ),
-  results: arrayOf(
-    object<ResultCount>({
-      kind: isString,
-      result: isString,
-      status: isNumber,
-      count: isNumber,
-    }),
-  ),
   usage: optional(
     arrayOf(
       object<UsagePoint>({

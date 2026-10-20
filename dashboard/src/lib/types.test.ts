@@ -152,3 +152,26 @@ it("refuses model usage or a quota history that drifted", () => {
   ])
     expect(() => parseDashboard(JSON.stringify(drifted))).toThrow();
 });
+
+// A gateway older than this page still sends the top-level hourly and results,
+// which the page no longer reads; a newer one leaves them out.
+it("accepts a gateway with or without the top-level hourly and results", () => {
+  const newer = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  expect("hourly" in newer || "results" in newer).toBe(false);
+  const older = {
+    ...newer,
+    hourly: [
+      {
+        hour: "2026-10-07T11:00:00Z",
+        alias: "sample-ab",
+        kind: "inference",
+        requests: 3,
+        bytes_up: 1,
+        bytes_down: 2,
+      },
+    ],
+    results: [{ kind: "inference", result: "ok", status: 200, count: 3 }],
+  };
+  for (const sample of [newer, older])
+    expect(parseDashboard(JSON.stringify(sample)).at).toBe(newer.at);
+});

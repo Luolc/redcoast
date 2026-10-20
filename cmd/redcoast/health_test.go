@@ -57,8 +57,9 @@ func TestHealthAndEgressConfiguration(t *testing.T) {
 
 // TestReadOnlyHosts checks which Host names /health and the dashboard answer, through
 // a real HTTP server: the IPs of their listen addresses, the TLS server name and
-// listen.host_names, and no other name (DNS rebinding) or listener's IP. Entries of
-// listen.host_names that are not lower-case DNS names without a port are refused.
+// listen.host_names, and no other name (DNS rebinding) or listener's IP, whether or
+// not the request accepts gzip. Entries of listen.host_names that are not lower-case
+// DNS names without a port are refused.
 func TestReadOnlyHosts(t *testing.T) {
 	cert, key := writeTLSFiles(t, testtls.New(t))
 	tailnet := "listen: {health: '100.64.0.1:7804', dashboard: '[fd00::7]:7805', reverse: '10.0.0.2:7802', host_names: [gateway-a]}\n"
@@ -82,20 +83,25 @@ func TestReadOnlyHosts(t *testing.T) {
 			})))
 			defer server.Close()
 			for _, host := range append(arm.allowed, arm.refused...) {
-				request, err := http.NewRequest(http.MethodGet, server.URL+"/health", nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				request.Host = host
-				response, err := server.Client().Do(request)
-				if err != nil {
-					t.Fatal(err)
-				}
-				body, _ := io.ReadAll(response.Body)
-				_ = response.Body.Close()
-				answered := response.StatusCode == http.StatusOK && string(body) == "guarded"
-				if want := !slices.Contains(arm.refused, host); answered != want || !want && response.StatusCode != http.StatusForbidden {
-					t.Errorf("Host %s: status %d, body %q; want answered %v", host, response.StatusCode, body, want)
+				for _, encoding := range []string{"", "gzip"} {
+					request, err := http.NewRequest(http.MethodGet, server.URL+"/health", nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					request.Host = host
+					if encoding != "" {
+						request.Header.Set("Accept-Encoding", encoding)
+					}
+					response, err := server.Client().Do(request)
+					if err != nil {
+						t.Fatal(err)
+					}
+					body, _ := io.ReadAll(response.Body)
+					_ = response.Body.Close()
+					answered := response.StatusCode == http.StatusOK && string(body) == "guarded"
+					if want := !slices.Contains(arm.refused, host); answered != want || !want && response.StatusCode != http.StatusForbidden {
+						t.Errorf("Host %s, Accept-Encoding %q: status %d, body %q; want answered %v", host, encoding, response.StatusCode, body, want)
+					}
 				}
 			}
 		})

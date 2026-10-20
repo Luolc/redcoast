@@ -58,30 +58,14 @@ type ClientHour struct {
 	Requests int       `json:"requests"`
 }
 
-// clients reads the session counts of the sessions live or created since dayStart,
-// and the hourly requests since since, by client machine and client program.
-func (r *Reader) clients(ctx context.Context, dayStart, since int64) ([]ClientCount, []ClientHour, error) {
-	db := r.store.db
+// clients reads the session counts of the sessions live or created since dayStart, by
+// client machine and client program.
+func (r *Reader) clients(ctx context.Context, dayStart int64) ([]ClientCount, error) {
 	counts := []ClientCount{}
-	err := collect(ctx, db, &counts, func(rows *sql.Rows) (ClientCount, error) {
+	err := collect(ctx, r.store.db, &counts, func(rows *sql.Rows) (ClientCount, error) {
 		var v ClientCount
 		return v, rows.Scan(&v.Machine, &v.Client, &v.Live, &v.Sessions)
 	}, `SELECT s.client_machine AS m, `+clientColumn+` AS c, SUM(s.ended_at IS NULL), SUM(s.created_at >= ?)
 		FROM sessions s WHERE s.ended_at IS NULL OR s.created_at >= ? GROUP BY m, c ORDER BY m, c`, dayStart, dayStart)
-	if err != nil {
-		return nil, nil, err
-	}
-	hourly := []ClientHour{}
-	err = collect(ctx, db, &hourly, func(rows *sql.Rows) (ClientHour, error) {
-		var v ClientHour
-		var hour int64
-		err := rows.Scan(&hour, &v.Machine, &v.Client, &v.Requests)
-		v.Hour = fromMillis(hour)
-		return v, err
-	}, `SELECT t.ts / 3600000 * 3600000 AS hour, s.client_machine AS m, `+clientColumn+` AS c, COUNT(*)
-		FROM traffic t JOIN sessions s ON s.id = t.session_id WHERE t.ts >= ? GROUP BY hour, m, c ORDER BY hour, m, c`, since)
-	if err != nil {
-		return nil, nil, err
-	}
-	return counts, hourly, nil
+	return counts, err
 }

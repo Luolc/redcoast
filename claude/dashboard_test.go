@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"compress/gzip"
 	"crypto/tls"
 	"encoding/json"
 	"io"
@@ -308,4 +309,106 @@ func TestDashboardRefusesALinkOutOfTheDirectory(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAcceptsGzip reads Accept-Encoding the way RFC 9110 weighs it: gzip, or else *,
+// with a weight above 0.
+func TestAcceptsGzip(t *testing.T) {
+	for value, want := range map[string]bool{
+		"":                        false,
+		"gzip":                    true,
+		"gzip, deflate, br, zstd": true,
+		"GZIP;Q=0.5":              true,
+		"x-gzip":                  true,
+		"gzip;q=0":                false,
+		"gzip; q=0.000":           false,
+		"br;q=1, gzip;q=0":        false,
+		"*":                       true,
+		"*, gzip;q=0":             false,
+		"*;q=0":                   false,
+		"deflate, br":             false,
+		"identity":                false,
+		"gzip;q=x":                false,
+	} {
+		header := http.Header{}
+		if value != "" {
+			header.Set("Accept-Encoding", value)
+		}
+		if got := acceptsGzip(header); got != want {
+			t.Errorf("Accept-Encoding %q: %v, want %v", value, got, want)
+		}
+	}
+}
+
+// TestDashboardGzip reads /dashboard.json and the page with and without gzip: the
+// compressed answer says so, and decompresses to the plain answer. A Range on the page
+// gets the whole page when compressed, and the part only when not.
+func TestDashboardGzip(t *testing.T) {
+	h := newHarness(t, "sample-a")
+	reader, err := session.OpenReadOnly(h.path, session.Config{Now: func() time.Time { return h.clock }}, DefaultLimits.MaxTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	dir := t.TempDir()
+	page := strings.Repeat("<p>Claude 网关</p>\n", 200)
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(page), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Started: h.clock, Dir: dir}).Handler()
+	get := func(path, encoding, ranges string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		if encoding != "" {
+			request.Header.Set("Accept-Encoding", encoding)
+		}
+		if ranges != "" {
+			request.Header.Set("Range", ranges)
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder
+	}
+	for _, path := range []string{"/dashboard.json", "/"} {
+		plain := get(path, "", "")
+		if plain.Code != http.StatusOK || plain.Header().Get("Content-Encoding") != "" || plain.Header().Get("Vary") != "Accept-Encoding" {
+			t.Fatalf("%s without gzip: %d %v", path, plain.Code, plain.Header())
+		}
+		for _, encoding := range []string{"gzip", "br;q=1, gzip;q=0.5", "gzip;q=0"} {
+			recorder := get(path, encoding, "")
+			want := "gzip"
+			if encoding == "gzip;q=0" {
+				want = ""
+			}
+			if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Encoding") != want || recorder.Header().Get("Vary") != "Accept-Encoding" {
+				t.Fatalf("%s with %q: %d %v", path, encoding, recorder.Code, recorder.Header())
+			}
+			if body := decoded(t, recorder); body != plain.Body.String() {
+				t.Fatalf("%s with %q: body differs from the plain one", path, encoding)
+			}
+		}
+	}
+	if part := get("/", "", "bytes=0-9"); part.Code != http.StatusPartialContent || part.Body.String() != page[:10] {
+		t.Fatalf("plain Range: %d %q", part.Code, part.Body.String())
+	}
+	whole := get("/", "gzip", "bytes=0-9")
+	if whole.Code != http.StatusOK || whole.Header().Get("Content-Range") != "" || whole.Header().Get("Content-Length") != "" || decoded(t, whole) != page {
+		t.Fatalf("Range with gzip: %d %v", whole.Code, whole.Header())
+	}
+}
+
+// decoded is the body of recorder, decompressed when it says it is gzip.
+func decoded(t *testing.T, recorder *httptest.ResponseRecorder) string {
+	t.Helper()
+	if recorder.Header().Get("Content-Encoding") != "gzip" {
+		return recorder.Body.String()
+	}
+	r, err := gzip.NewReader(recorder.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
 }
