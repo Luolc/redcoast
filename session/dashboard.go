@@ -613,15 +613,7 @@ func (r *Reader) connects(ctx context.Context, start, now int64) (connectWindow,
 			d := entry(destinations, key, func(k destinationKey) Destination {
 				return Destination{Host: k.host, Port: k.port, Alias: k.alias, Route: k.route}
 			})
-			d.Tunnels++
-			if result == "ok" {
-				d.OK++
-			}
-			d.BytesUp += bytesUp
-			d.BytesDown += bytesDown
-			if last := fromMillis(ts); last.After(d.Last) {
-				d.Last = last
-			}
+			d.add(ts, result, bytesUp, bytesDown)
 		}
 		opened := result == "ok" || result == "idle_timeout" || result == "max_duration"
 		if connect && opened && ts >= tunnelsFrom && ts+duration > start {
@@ -645,6 +637,19 @@ func (r *Reader) connects(ctx context.Context, start, now int64) (connectWindow,
 			cmp.Compare(a.Alias, b.Alias), cmp.Compare(a.Route, b.Route))
 	})
 	return out, nil
+}
+
+// add counts a tunnel to the destination that started at ts and ended with result.
+func (d *Destination) add(ts int64, result string, bytesUp, bytesDown int64) {
+	d.Tunnels++
+	if result == "ok" {
+		d.OK++
+	}
+	d.BytesUp += bytesUp
+	d.BytesDown += bytesDown
+	if last := fromMillis(ts); last.After(d.Last) {
+		d.Last = last
+	}
 }
 
 // spread returns the count and the nearest-rank 50th and 95th percentiles of the
