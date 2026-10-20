@@ -20,6 +20,8 @@ export function sampleDashboard(now: Date): Dashboard {
       reasons: ["sample-ac: paused (upstream_429)"],
     },
     gateway: {
+      provider: "claude",
+      dashboards: [{ provider: "codex", url: "http://127.0.0.1:7807/" }],
       version: "0.1.0",
       inventory_commit: "fedcba9876543210fedcba9876543210fedcba98",
       started: at(-26 * 60),

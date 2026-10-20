@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/Luolc/redcoast/credential"
 )
@@ -53,6 +54,10 @@ type account struct {
 	expectedIP    netip.Addr      // the inventory's expected_egress_ip
 	transport     *http.Transport // every connection goes through exit
 	slots         chan struct{}   // a buffered channel used as a semaphore
+
+	// setAside is why the egress check set this configuration aside from selection
+	// ("exit cannot reach <host>: <status>"), or nil. Only the check sets and clears it.
+	setAside atomic.Pointer[string]
 }
 
 // AccountSet is the accounts the gateway can bind sessions to. A reload replaces the
@@ -195,6 +200,18 @@ func (s *AccountSet) lookup(alias string) *account {
 // Candidates returns every alias, sorted, for the session store's binding evaluation.
 func (s *AccountSet) Candidates() []string {
 	return slices.Sorted(maps.Keys(s.byAlias))
+}
+
+// SetAside returns the aliases the egress check has set aside, sorted, as the session
+// store's binding evaluation takes them.
+func (s *AccountSet) SetAside() []string {
+	var out []string
+	for _, a := range s.sorted() {
+		if a.setAside.Load() != nil {
+			out = append(out, a.alias)
+		}
+	}
+	return out
 }
 
 // CloseIdleConnections closes every account's idle connections.

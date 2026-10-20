@@ -104,9 +104,11 @@ PROCESSES = {
 # The token endpoint of the gateways' renewals, in the fake upstream.
 TOKEN_URL = "http://127.0.0.1:18790/oauth/token"
 CLAUDE_EXIT, CODEX_EXIT, DIRECT_PORT = 18798, 18799, 18791
-# The exit IP echo of the gateway's egress check also goes through the exits;
-# its CONNECTs are not traffic of any arm.
-EGRESS_ECHO = "ip.oxylabs.io:443"
+# The gateway's egress check also goes through the exits: it reads the exit IP
+# from an echo service and asks the exit to reach the upstream. Its CONNECTs are
+# not traffic of any arm; no arm can CONNECT to the upstream's IP literal, which
+# the forward proxy refuses.
+EGRESS_CHECK_TARGETS = ("ip.oxylabs.io:443", "127.0.0.1:18790")
 
 
 def proxy_yaml(port: int) -> str:
@@ -218,7 +220,9 @@ def new_records(before: list[dict], after: list[dict]) -> list[dict]:
   return [
     entry
     for entry in after[len(before) :]
-    if not (entry["kind"] == "connect" and entry["target"] == EGRESS_ECHO)
+    if not (
+      entry["kind"] == "connect" and entry["target"] in EGRESS_CHECK_TARGETS
+    )
   ]
 
 

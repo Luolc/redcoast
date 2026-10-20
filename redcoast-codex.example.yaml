@@ -18,6 +18,11 @@ session_socket: /run/redcoast-codex/session.sock # required
 admin_socket: /run/redcoast-codex/admin.sock # required
 session_db: /var/lib/redcoast-codex/sessions.db # required
 inventory: /etc/redcoast-codex/inventory # required
+# The Claude gateway's dashboard, linked from this one's page; see
+# dashboard_links in redcoast.example.yaml.
+# dashboard_links:
+#   - provider: claude
+#     url: ":7805"
 
 codex:
   # One directory per account alias, mode 0700, holding the account's
