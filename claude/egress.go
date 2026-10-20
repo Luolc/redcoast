@@ -42,10 +42,17 @@ var errEgressMismatch = errors.New("exit IP differs from expected_egress_ip")
 // read an IP (a timeout, a 5xx, an answer without an IP) pauses nothing: the exit may
 // be right and only the check broken. It is logged and shows on the health endpoint
 // until the account's next check reads an IP.
+//
+// Unless the IP differs, the check also asks the exit to CONNECT to the upstream's
+// host. An answer other than 200 sets the account configuration aside from selection,
+// and a later 200 ends that; neither touches a pause. A CONNECT without an answer
+// changes nothing and shows on the health endpoint, as an unread IP does.
 type Egress struct {
 	accounts *Accounts
 	store    *session.Store
 	echo     string
+	upstream string         // host:port of the upstream, the target of the reach check
+	host     string         // the upstream's host name, as reasons name it
 	rootCAs  *x509.CertPool // nil: the system roots; tests trust their fake echo service
 
 	mu   sync.Mutex
@@ -56,21 +63,33 @@ type Egress struct {
 }
 
 // EgressResult is the outcome of one account's last check since the gateway started:
-// ok, mismatch, or unread when the check could not read an IP. The IP read is not kept.
+// ok, mismatch, or unread when the check could not read an IP, and the exit's answer to
+// the CONNECT to the upstream: ok, refused (with the status) or unanswered; empty when
+// the IP differed and the CONNECT was not asked. The IP read is not kept.
 type EgressResult struct {
-	At      time.Time `json:"at"`
-	Outcome string    `json:"outcome"`
+	At             time.Time `json:"at"`
+	Outcome        string    `json:"outcome"`
+	Upstream       string    `json:"upstream,omitempty"`
+	UpstreamStatus int       `json:"upstream_status,omitempty"`
 }
 
-// NewEgress returns the egress check over the accounts, pausing through store.
-func NewEgress(accounts *Accounts, store *session.Store) *Egress {
-	return &Egress{accounts: accounts, store: store, echo: egressEchoURL, last: make(map[*account]EgressResult)}
+// NewEgress returns the egress check over the accounts, pausing through store, that
+// asks each exit to reach the host of upstream, the process's upstream URL.
+func NewEgress(accounts *Accounts, store *session.Store, upstream *url.URL) *Egress {
+	port := upstream.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[upstream.Scheme]
+	}
+	return &Egress{accounts: accounts, store: store, echo: egressEchoURL, upstream: net.JoinHostPort(upstream.Hostname(), port),
+		host: upstream.Hostname(), last: make(map[*account]EgressResult)}
 }
 
 // Check reads a's exit IP through a's proxy, without the account's token, and compares
-// it with the inventory's. The error wraps errEgressMismatch when the IPs differ. The
-// outcome is kept per account object, so a check of a configuration a reload replaced
-// says nothing about the new one.
+// it with the inventory's. The error wraps errEgressMismatch when the IPs differ. Unless
+// they differ, it then asks the exit to reach the upstream and sets a aside or ends its
+// set-aside by the answer; that outcome is no error, so a reload admits the account set
+// aside and a later check can end it. The outcome is kept per account object, so a
+// check of a configuration a reload replaced says nothing about the new one.
 func (e *Egress) Check(ctx context.Context, a *account) error {
 	got, err := e.read(ctx, a)
 	result := EgressResult{At: time.Now().UTC(), Outcome: "ok"}
@@ -80,10 +99,50 @@ func (e *Egress) Check(ctx context.Context, a *account) error {
 	case got != a.expectedIP:
 		result.Outcome, err = "mismatch", fmt.Errorf("%w: read %s, expected %s", errEgressMismatch, got, a.expectedIP)
 	}
+	if result.Outcome != "mismatch" {
+		result.Upstream, result.UpstreamStatus = e.settle(a, e.reach(ctx, a))
+	}
 	e.mu.Lock()
 	e.last[a] = result
 	e.mu.Unlock()
 	return err
+}
+
+// reach asks a's exit, with the proxy credentials and nothing else, to CONNECT to the
+// upstream and closes the connection once the exit answered. It returns the exit's
+// status, or 0 when the exit could not be dialed or sent no response head in time.
+func (e *Egress) reach(ctx context.Context, a *account) int {
+	ctx, cancel := context.WithTimeout(ctx, egressTimeout)
+	defer cancel()
+	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", a.exit.Host)
+	if err != nil {
+		return 0
+	}
+	defer closeQuietly(conn)
+	stop := context.AfterFunc(ctx, func() { closeQuietly(conn) })
+	defer stop()
+	_, status := openTunnel(conn, e.upstream, a.exitAuthorization())
+	return status
+}
+
+// settle applies the exit's answer to the reach check to a: 200 ends a's set-aside, any
+// other status sets it aside, and no answer (0) changes nothing. It returns the
+// check's upstream outcome and the status of a refusal.
+func (e *Egress) settle(a *account, status int) (string, int) {
+	switch status {
+	case 0:
+		log.Printf("egress: alias=%s CONNECT %s got no answer, set-aside unchanged", a.alias, e.upstream)
+		return "unanswered", 0
+	case http.StatusOK:
+		if a.setAside.Swap(nil) != nil {
+			log.Printf("egress: alias=%s exit reaches %s again, no longer set aside", a.alias, e.host)
+		}
+		return "ok", 0
+	}
+	reason := fmt.Sprintf("exit cannot reach %s: %d", e.host, status)
+	a.setAside.Store(&reason)
+	log.Printf("egress: alias=%s set aside: %s", a.alias, reason)
+	return "refused", status
 }
 
 // read requests the echo service through a's proxy on a connection of its own and
@@ -204,6 +263,12 @@ func (e *Egress) Run(ctx context.Context, interval time.Duration) error {
 // failedCheck reports whether the last check of account object a could not read an IP.
 func (e *Egress) failedCheck(a *account) bool {
 	return e.lastCheck(a).Outcome == "unread"
+}
+
+// unanswered reports whether the last check of account object a got no answer to its
+// CONNECT to the upstream.
+func (e *Egress) unanswered(a *account) bool {
+	return e.lastCheck(a).Upstream == "unanswered"
 }
 
 // lastCheck returns the last check of account object a; zero when none ran.

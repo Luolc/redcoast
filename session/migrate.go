@@ -32,7 +32,7 @@ func (s *Store) MigrateBindings(ctx context.Context, from, candidates []string, 
 		if err != nil {
 			return err
 		}
-		eligible, blocked, err := unpaused(ctx, tx, candidates, now)
+		eligible, blocked, err := unpaused(ctx, tx, candidates, nil, now)
 		if err != nil {
 			return err
 		}

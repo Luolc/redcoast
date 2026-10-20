@@ -37,8 +37,8 @@ func (e *QuotaExhausted) Error() string { return "every account is over its hard
 
 // excluded describes the candidates Bind set aside before scoring: the ends of the
 // quota pauses (upstream 429), and whether any was set aside for another reason (a
-// pause after a 401, or no plan at this time). The other kind decides between the
-// local 429 and the 503 when nothing is left to choose.
+// pause after a 401, no plan at this time, or the caller's set-aside). The other kind
+// decides between the local 429 and the 503 when nothing is left to choose.
 type excluded struct {
 	quotaPaused map[string]int64 // pause end by alias
 	quotaResets []int64          // pause ends of the quota-paused accounts that have a plan
@@ -150,7 +150,7 @@ func windowTier(utilization float64, status string, soft, hard float64) int {
 // score, ties broken by fewer active sessions other than id, then by alias. When
 // nothing is left to choose it returns QuotaExhausted if every candidate is out for a
 // quota reason and at least one is, and ErrNoAccount otherwise: a candidate out for
-// another reason (401, no plan) is a fault to notice, not a limit to wait out.
+// another reason (401, no plan, set aside) is a fault to notice, not a limit to wait out.
 func choose(ctx context.Context, tx *sql.Tx, id string, standings map[string]standing, blocked excluded, now int64) (string, error) {
 	lowest := tierExhausted
 	for _, st := range standings {

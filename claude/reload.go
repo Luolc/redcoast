@@ -75,6 +75,11 @@ func (c *Accounts) Candidates() []string {
 	return c.set.Load().Candidates()
 }
 
+// SetAside returns the current set's aliases that the egress check set aside, sorted.
+func (c *Accounts) SetAside() []string {
+	return c.set.Load().SetAside()
+}
+
 // onSwap registers f to run with every new set; f is called once now with the current one.
 func (c *Accounts) onSwap(f func(*AccountSet)) {
 	c.swapped = append(c.swapped, f)
@@ -98,11 +103,12 @@ func (c *Accounts) bind(ctx context.Context, token, source string) (session.Bind
 		}
 		defer c.region.runlock()
 	}
-	candidates := c.set.Load().Candidates()
+	set := c.set.Load()
+	candidates, setAside := set.Candidates(), set.SetAside()
 	if c.beforeBind != nil {
 		c.beforeBind()
 	}
-	binding, err := c.store.BindFrom(ctx, token, source, candidates)
+	binding, err := c.store.BindFrom(ctx, token, source, candidates, setAside...)
 	if err != nil {
 		return binding, nil, err
 	}
@@ -137,7 +143,9 @@ func (c *Accounts) Reload(ctx context.Context, dir string, resolve Resolver, ver
 		}
 	}
 	from := slices.Concat(r.Removed, r.Changed)
-	candidates := slices.DeleteFunc(next.Candidates(), func(alias string) bool { return slices.Contains(r.Changed, alias) })
+	candidates := slices.DeleteFunc(next.Candidates(), func(alias string) bool {
+		return slices.Contains(r.Changed, alias) || next.byAlias[alias].setAside.Load() != nil
+	})
 	if err := c.lock(ctx); err != nil {
 		return r, err
 	}

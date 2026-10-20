@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -26,18 +28,29 @@ import (
 
 // echoService is a fake IP echo service behind a fake proxy. The proxy answers CONNECT
 // with the proxy credentials of harness accounts and tunnels every target to the echo
-// service, recording the targets; the echo service answers with ip and status, or
-// with body when it is set (a 302 points at another host), and records the Authorization headers it received.
+// service, recording the targets and the Authorization headers of the CONNECTs; the
+// echo service answers with ip and status, or with body when it is set (a 302 points
+// at another host), and records the Authorization headers it received. A CONNECT to a
+// target other than the echo host gets reach[proxy user] instead when it is set: that
+// status, or no answer at all for noAnswer.
 type echoService struct {
-	proxy   *httptest.Server
-	roots   *x509.CertPool
-	mu      sync.Mutex
-	ip      string
-	status  int
-	body    string
-	targets []string
-	tokens  []string
+	proxy    *httptest.Server
+	roots    *x509.CertPool
+	mu       sync.Mutex
+	ip       string
+	status   int
+	body     string
+	reach    map[string]int
+	targets  []string
+	tokens   []string
+	connects []string
 }
+
+// noAnswer as a reach status makes the proxy close the connection without answering.
+const noAnswer = -1
+
+// testUpstream is the upstream the egress checks of these tests ask the exits to reach.
+var testUpstream = &url.URL{Scheme: "https", Host: "api.anthropic.com"}
 
 // newEchoService starts the echo service with a certificate for the real echo host,
 // so the check's fixed URL reaches it through the proxy, and the proxy in front of it.
@@ -75,7 +88,19 @@ func newEchoService(t *testing.T, ip string) *echoService {
 		}
 		s.mu.Lock()
 		s.targets = append(s.targets, r.Host)
+		s.connects = append(s.connects, r.Header.Get("Authorization"))
+		reach, refuse := s.reach[user]
 		s.mu.Unlock()
+		if refuse && r.Host != "ip.oxylabs.io:443" {
+			if reach == noAnswer {
+				if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+					_ = conn.Close()
+				}
+				return
+			}
+			http.Error(w, "forbidden by the exit", reach)
+			return
+		}
 		upstream, err := net.Dial("tcp", echo.Listener.Addr().String())
 		if err != nil {
 			http.Error(w, "dial", http.StatusBadGateway)
@@ -131,6 +156,28 @@ func (s *echoService) set(ip string, status int, body string) {
 	s.ip, s.status, s.body = ip, status, body
 }
 
+// setReach makes the proxy answer the CONNECTs of alias's account to any target but the
+// echo host with status (noAnswer: none); 0 tunnels them again.
+func (s *echoService) setReach(alias string, status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reach == nil {
+		s.reach = map[string]int{}
+	}
+	if status == 0 {
+		delete(s.reach, "synthetic-user-"+alias)
+		return
+	}
+	s.reach["synthetic-user-"+alias] = status
+}
+
+// seen returns the CONNECT targets and the Authorization headers of the CONNECTs so far.
+func (s *echoService) seen() (targets, authorizations []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.targets), slices.Clone(s.connects)
+}
+
 // newEgressHarness returns a harness with one account per alias behind the echo
 // service's proxy, each expecting expected[alias], and the egress check over them.
 func newEgressHarness(t *testing.T, echo *echoService, expected map[string]string) (*harness, *Egress) {
@@ -140,7 +187,7 @@ func newEgressHarness(t *testing.T, echo *echoService, expected map[string]strin
 	for alias, ip := range expected {
 		h.addWithExit(alias, "sk-ant-oat01-synthetic-"+alias+"-token", exit).expectedIP = netip.MustParseAddr(ip)
 	}
-	e := NewEgress(h.accounts, h.store)
+	e := NewEgress(h.accounts, h.store, testUpstream)
 	e.rootCAs = echo.roots
 	return h, e
 }
@@ -148,7 +195,8 @@ func newEgressHarness(t *testing.T, echo *echoService, expected map[string]strin
 // TestEgressCheck checks the three outcomes of one check through the account's proxy:
 // the expected IP passes, another IP is a mismatch, and an answer without an IP (a 5xx,
 // a body that is not the echo service's) is a failed check and not a mismatch. Every
-// check asks the proxy for the fixed echo host and sends no account token.
+// check asks the proxy for the fixed echo host, then, unless the IP differs, for the
+// upstream's host, and sends no account token.
 func TestEgressCheck(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -176,8 +224,13 @@ func TestEgressCheck(t *testing.T) {
 			if err != nil && strings.Contains(err.Error(), "Synthetic-Password-") {
 				t.Fatalf("error carries the proxy password: %v", err)
 			}
-			if !slices.Equal(echo.targets, []string{"ip.oxylabs.io:443"}) || !slices.Equal(echo.tokens, []string{""}) {
-				t.Fatalf("proxy targets %v, echo authorization %q", echo.targets, echo.tokens)
+			wantTargets := []string{"ip.oxylabs.io:443", "api.anthropic.com:443"}
+			if test.mismatch {
+				wantTargets = wantTargets[:1]
+			}
+			targets, connects := echo.seen()
+			if !slices.Equal(targets, wantTargets) || slices.ContainsFunc(connects, func(v string) bool { return v != "" }) || !slices.Equal(echo.tokens, []string{""}) {
+				t.Fatalf("proxy targets %v, CONNECT authorization %q, echo authorization %q", targets, connects, echo.tokens)
 			}
 		})
 	}
@@ -270,34 +323,47 @@ func TestEgressRun(t *testing.T) {
 
 // TestReloadWithEgressCheck runs a reload with the gateway's check as its hook: an added
 // account whose exit IP matches joins the set, one whose IP differs is rejected, and
-// so is one whose check could not read an IP.
+// so is one whose check could not read an IP. One whose exit refuses the CONNECT to
+// the upstream joins the set aside, so a later sweep can end that; one whose CONNECT
+// gets no answer joins and is not set aside.
 func TestReloadWithEgressCheck(t *testing.T) {
-	for _, arm := range []string{"match", "mismatch", "echo_down"} {
+	for _, arm := range []string{"match", "mismatch", "echo_down", "upstream_refused", "upstream_unanswered"} {
 		t.Run(arm, func(t *testing.T) {
 			// The inventory files expect 192.0.2.1 (inventoryYAML).
-			echo := newEchoService(t, map[string]string{"match": "192.0.2.1", "mismatch": "198.51.100.7", "echo_down": "192.0.2.1"}[arm])
-			if arm == "echo_down" {
+			echo := newEchoService(t, map[string]string{"mismatch": "198.51.100.7"}[arm])
+			switch arm {
+			case "match", "upstream_refused", "upstream_unanswered":
+				echo.set("192.0.2.1", http.StatusOK, "")
+			case "echo_down":
 				echo.set("192.0.2.1", http.StatusBadGateway, "")
 			}
+			echo.setReach("sample-b", map[string]int{"upstream_refused": http.StatusForbidden, "upstream_unanswered": noAnswer}[arm])
 			h := newReloadHarness(t, onlyA)
-			e := NewEgress(h.accounts, h.store)
+			e := NewEgress(h.accounts, h.store, testUpstream)
 			e.rootCAs = echo.roots
 			// Every account's exit is the fake exit; the check reaches the echo proxy instead.
 			proxy, _ := url.Parse(echo.proxy.URL)
 			h.rewrite(aAndB)
 			check := func(ctx context.Context, a *account) error {
-				through := *a
-				through.exit, through.proxyUsername = proxy, "synthetic-user-"+a.alias
-				return e.Check(ctx, &through)
+				a.exit, a.proxyUsername = proxy, "synthetic-user-"+a.alias
+				return e.Check(ctx, a)
 			}
 			r, err := h.reload(check)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if arm == "match" && (!slices.Equal(r.Added, []string{"sample-b"}) || r.Rejected != nil) {
-				t.Fatalf("match: %+v", r)
+			joined := arm == "match" || arm == "upstream_refused" || arm == "upstream_unanswered"
+			wantSetAside := map[string][]string{"upstream_refused": {"sample-b"}}[arm]
+			if joined && (!slices.Equal(r.Added, []string{"sample-b"}) || r.Rejected != nil || !slices.Equal(h.accounts.SetAside(), wantSetAside)) {
+				t.Fatalf("%s: %+v, set aside %v", arm, r, h.accounts.SetAside())
 			}
-			if arm != "match" && (!slices.Equal(r.Rejected, []string{"sample-b"}) || r.Added != nil || !slices.Equal(h.accounts.Candidates(), []string{"sample-a"})) {
+			if arm == "upstream_refused" {
+				echo.setReach("sample-b", 0)
+				if err := e.Sweep(t.Context()); err != nil || h.accounts.SetAside() != nil {
+					t.Fatalf("sweep %v, set aside %v after the exit reaches the upstream", err, h.accounts.SetAside())
+				}
+			}
+			if !joined && (!slices.Equal(r.Rejected, []string{"sample-b"}) || r.Added != nil || !slices.Equal(h.accounts.Candidates(), []string{"sample-a"})) {
 				t.Fatalf("%s: %+v, candidates %v", arm, r, h.accounts.Candidates())
 			}
 		})
@@ -334,7 +400,7 @@ func TestEgressPauseExcludesReload(t *testing.T) {
 			echo := newEchoService(t, "192.0.2.1")
 			h := newReloadHarness(t, onlyA)
 			h.accounts.noExclusion = !exclusive
-			e := NewEgress(h.accounts, h.store)
+			e := NewEgress(h.accounts, h.store, testUpstream)
 			e.rootCAs = echo.roots
 			proxy, _ := url.Parse(echo.proxy.URL)
 			old := h.accounts.set.Load().lookup("sample-a")
@@ -377,7 +443,7 @@ func TestEgressHealthFollowsConfiguration(t *testing.T) {
 	echo := newEchoService(t, "192.0.2.1")
 	echo.set("", http.StatusServiceUnavailable, "")
 	h := newReloadHarness(t, onlyA)
-	e := NewEgress(h.accounts, h.store)
+	e := NewEgress(h.accounts, h.store, testUpstream)
 	e.rootCAs = echo.roots
 	proxy, _ := url.Parse(echo.proxy.URL)
 	old := h.accounts.set.Load().lookup("sample-a")
@@ -391,5 +457,127 @@ func TestEgressHealthFollowsConfiguration(t *testing.T) {
 	}
 	if answer := readHealth(t, e); answer.Status != "ok" {
 		t.Fatalf("health %+v after the reload replaced the failed configuration", answer)
+	}
+}
+
+// TestEgressUpstreamReach checks the reach check of the egress sweep. An exit that
+// answers the CONNECT to the upstream's host with 403 sets its account aside: it is
+// not chosen, nothing is paused and the health endpoint and status name it; the other account,
+// whose exit tunnels, serves. A later sweep whose CONNECT gets 200 ends the set-aside
+// without resume, and a CONNECT without an answer neither sets aside nor ends one and
+// marks health degraded. Control arm: exits that tunnel set nothing aside.
+func TestEgressUpstreamReach(t *testing.T) {
+	echo := newEchoService(t, "192.0.2.1")
+	h, e := newEgressHarness(t, echo, map[string]string{"sample-a": "192.0.2.1", "sample-b": "192.0.2.1"})
+	sweep := func(want health, setAside ...string) {
+		t.Helper()
+		if err := e.Sweep(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.accounts.SetAside(); !slices.Equal(got, setAside) {
+			t.Fatalf("set aside %v, want %v", got, setAside)
+		}
+		if paused := h.paused(); len(paused) != 0 {
+			t.Fatalf("paused %v; the reach check pauses nothing", paused)
+		}
+		if answer := readHealth(t, e); answer.Status != want.Status || !slices.Equal(answer.Reasons, want.Reasons) {
+			t.Fatalf("health %+v, want %+v", answer, want)
+		}
+	}
+	bound := func() string {
+		t.Helper()
+		token, _ := h.issue()
+		binding, _, err := h.accounts.bind(t.Context(), token, "local")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return binding.Alias
+	}
+	admin := httptest.NewServer(NewAdmin(h.accounts, h.store, nil).Handler())
+	defer admin.Close()
+	statusSetAside := func() any {
+		t.Helper()
+		status, body := adminCall(t, admin, http.MethodGet, "/status", "")
+		if status != http.StatusOK {
+			t.Fatalf("status answered %d", status)
+		}
+		return body["set_aside"]
+	}
+	sweep(health{Status: "ok"})
+
+	echo.setReach("sample-a", http.StatusForbidden)
+	sweep(health{"degraded", []string{"sample-a: exit cannot reach api.anthropic.com: 403"}}, "sample-a")
+	if got := statusSetAside(); !reflect.DeepEqual(got, []any{"sample-a: exit cannot reach api.anthropic.com: 403"}) {
+		t.Fatalf("status set_aside %v", got)
+	}
+	for range 3 {
+		if alias := bound(); alias != "sample-b" {
+			t.Fatalf("bound to %s while sample-a is set aside", alias)
+		}
+	}
+	if targets, connects := echo.seen(); !slices.Contains(targets, "api.anthropic.com:443") || slices.ContainsFunc(connects, func(v string) bool { return v != "" }) {
+		t.Fatalf("CONNECT targets %v, authorization %q", targets, connects)
+	}
+
+	echo.setReach("sample-a", noAnswer)
+	sweep(health{"degraded", []string{"sample-a: exit cannot reach api.anthropic.com: 403", "sample-a: egress check got no answer to CONNECT api.anthropic.com"}}, "sample-a")
+
+	echo.setReach("sample-a", 0)
+	sweep(health{Status: "ok"})
+	if got := statusSetAside(); got != nil {
+		t.Fatalf("status set_aside %v after the exit reaches the upstream", got)
+	}
+
+	echo.setReach("sample-b", noAnswer)
+	sweep(health{"degraded", []string{"sample-b: egress check got no answer to CONNECT api.anthropic.com"}})
+}
+
+// TestUpstreamReachKeepsPauses checks that the reach check neither ends nor replaces a
+// pause: an account paused for upstream_401 and set aside keeps its pause, with its
+// end, once a CONNECT gets 200 again; a manual pause likewise. An exit IP that differs
+// pauses as before and the CONNECT is not asked, so a set-aside in effect stays.
+func TestUpstreamReachKeepsPauses(t *testing.T) {
+	echo := newEchoService(t, "192.0.2.1")
+	h, e := newEgressHarness(t, echo, map[string]string{"sample-a": "192.0.2.1", "sample-b": "192.0.2.1", "sample-c": "192.0.2.9"})
+	until := h.clock.Add(time.Hour)
+	if err := h.store.Pause(t.Context(), "sample-a", until, "upstream_401"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Pause(t.Context(), "sample-b", indefinitePause, "synthetic manual pause"); err != nil {
+		t.Fatal(err)
+	}
+	for _, alias := range []string{"sample-a", "sample-b", "sample-c"} {
+		echo.setReach(alias, http.StatusForbidden)
+	}
+	// sample-c's IP matches during the first sweep only.
+	h.accounts.set.Load().lookup("sample-c").expectedIP = netip.MustParseAddr("192.0.2.1")
+	if err := e.Sweep(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.accounts.SetAside(); !slices.Equal(got, []string{"sample-a", "sample-b", "sample-c"}) {
+		t.Fatalf("set aside %v", got)
+	}
+	h.accounts.set.Load().lookup("sample-c").expectedIP = netip.MustParseAddr("192.0.2.9")
+	for _, alias := range []string{"sample-a", "sample-b", "sample-c"} {
+		echo.setReach(alias, 0)
+	}
+	before, _ := echo.seen()
+	if err := e.Sweep(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.accounts.SetAside(); !slices.Equal(got, []string{"sample-c"}) {
+		t.Fatalf("set aside %v after the exits reach the upstream; want only sample-c, whose IP differs", got)
+	}
+	want := map[string]string{"sample-a": "upstream_401", "sample-b": "synthetic manual pause", "sample-c": EgressMismatchReason}
+	if paused := h.paused(); !maps.Equal(paused, want) {
+		t.Fatalf("paused %v, want %v", paused, want)
+	}
+	status, err := h.store.Status(t.Context(), []string{"sample-a"})
+	if err != nil || !status.Accounts[0].PausedUntil.Equal(until) {
+		t.Fatalf("sample-a paused until %v (%v), want %v", status.Accounts[0].PausedUntil, err, until)
+	}
+	after, _ := echo.seen()
+	if n := strings.Count(strings.Join(after[len(before):], " "), "api.anthropic.com:443"); n != 2 {
+		t.Fatalf("%d CONNECTs to the upstream in the second sweep, want 2 (none for sample-c)", n)
 	}
 }

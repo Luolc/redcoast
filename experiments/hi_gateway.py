@@ -693,7 +693,10 @@ class Exit(http.server.BaseHTTPRequestHandler):
   """Synthetic stand-in for the account's Oxylabs port.
 
   It sits behind the gateway's two entrypoints: a CONNECT is logged, then
-  refused (or, with --mitm, answered locally); an absolute-URI request,
+  refused (or, with --mitm, answered locally); a CONNECT to the fake API,
+  which only the gateway's egress check asks for (the forward proxy refuses
+  IP literals like it), gets 200 and is closed, so the check finds the
+  upstream reachable; an absolute-URI request,
   which is how the reverse proxy reaches the http:// fake API through this
   exit, is relayed to it. Authenticated runs use the account's real exit
   instead.
@@ -785,6 +788,11 @@ class Exit(http.server.BaseHTTPRequestHandler):
     """Log a tunnel request, then refuse it or answer it locally."""
     entry = self.note(self.path)
     self.close_connection = True
+    if self.path == "127.0.0.1:8790":
+      entry["reach_check"] = True
+      self.send_response(200, "Connection Established")
+      self.end_headers()
+      return
     if S.mitm:
       self.answer_tunnel(entry)
       return

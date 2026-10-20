@@ -103,7 +103,7 @@ func main() {
 	}
 	accounts := claude.NewAccounts(set, store)
 	defer accounts.CloseIdleConnections()
-	egress := claude.NewEgress(accounts, store)
+	egress := claude.NewEgress(accounts, store, cfg.upstream)
 	egress.Problems = gateway.Problems
 	// An account whose exit IP differs is paused before the gateway serves.
 	if err := egress.Sweep(ctx); err != nil {
@@ -121,6 +121,7 @@ func main() {
 		log.Fatal(err)
 	}
 	sessions := session.NewServer(store, entrypoints(cfg), accounts.Candidates)
+	sessions.SetAside = accounts.SetAside
 	l, err := listenAndNotify(upg, cfg)
 	if err != nil {
 		log.Fatal(err)
