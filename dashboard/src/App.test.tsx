@@ -173,7 +173,7 @@ it("right-aligns Clients' share and steps the egress check alike", () => {
   const html = renderToStaticMarkup(
     <Page data={data} now={now} route={{ view: "clients" }} />,
   );
-  expect(html).toContain('<th scope="col" class="n">Share</th>');
+  expect(html.includes('<th scope="col" class="n">Share</th>')).toBe(true);
   expect(rule(appCss, ".share-cell")).toContain("text-align: right;");
   // The IP's line has one height in the quota table, on Exits and Monitor.
   expect(rule(appCss, ".ip")).toContain("line-height: var(--t-height-pill);");
