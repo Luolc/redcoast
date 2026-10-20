@@ -125,6 +125,27 @@ interface ResultCount {
   count: number;
 }
 
+// Errors are rows with a result other than ok, or with a status of 400 or more;
+// a CONNECT tunnel the limits closed (idle_timeout, max_duration) is no error.
+// Limited rows are among the errors.
+interface UsagePoint {
+  hour: string;
+  alias: string; // empty for requests carried on no account
+  client_machine: string; // empty for requests of no session
+  kind: string;
+  requests: number;
+  bytes_up: number;
+  bytes_down: number;
+  errors: number;
+  limited: number;
+}
+
+interface SourceCount extends ResultCount {
+  alias: string;
+  client_machine: string;
+  error: boolean; // whether this result and status count as an error
+}
+
 interface Destination {
   host: string;
   port: number;
@@ -167,6 +188,9 @@ export interface Dashboard {
   idle_sessions: number;
   hourly: HourTraffic[];
   results: ResultCount[];
+  // By account and client machine; absent from a gateway older than this page.
+  usage?: UsagePoint[] | undefined;
+  result_sources?: SourceCount[] | undefined;
   // Absent from a gateway older than this page.
   clients?: ClientCount[] | undefined;
   client_hourly?: ClientHour[] | undefined;
@@ -278,6 +302,34 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
       status: isNumber,
       count: isNumber,
     }),
+  ),
+  usage: optional(
+    arrayOf(
+      object<UsagePoint>({
+        hour: isString,
+        alias: isString,
+        client_machine: isString,
+        kind: isString,
+        requests: isNumber,
+        bytes_up: isNumber,
+        bytes_down: isNumber,
+        errors: isNumber,
+        limited: isNumber,
+      }),
+    ),
+  ),
+  result_sources: optional(
+    arrayOf(
+      object<SourceCount>({
+        kind: isString,
+        result: isString,
+        status: isNumber,
+        count: isNumber,
+        alias: isString,
+        client_machine: isString,
+        error: isBoolean,
+      }),
+    ),
   ),
   clients: optional(
     arrayOf(
