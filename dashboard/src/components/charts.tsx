@@ -231,7 +231,8 @@ export function HourLines({
 }) {
   const [ref, { width: W, height: H }] = useSize();
   const [hover, setHover] = useState<number | null>(null);
-  const L = 46;
+  // Room for a duration label as long as "1 min 00 s".
+  const L = 76;
   const R = 40;
   const T = 6;
   const B = 20;
