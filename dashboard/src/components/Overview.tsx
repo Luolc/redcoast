@@ -181,7 +181,7 @@ export function Overview({ data, now }: { data: Dashboard; now: Date }) {
   const name = providerName(g.provider);
   const health = healthState(data);
   const near = data.accounts.filter(
-    (a) => accountState(a, data.soft, data.hard).word === "Near limit",
+    (a) => accountState(a, data.soft, data.hard, now).word === "Near limit",
   ).length;
   const matching = data.accounts.filter(
     (a) => a.egress_check?.outcome === "ok",
@@ -197,8 +197,9 @@ export function Overview({ data, now }: { data: Dashboard; now: Date }) {
         title="Overview"
         sub={
           <>
-            {name} gateway{g.version === undefined ? "" : ` · v${g.version}`} ·
-            up {formatSpan(now.getTime() - Date.parse(g.started))}
+            {g.provider === undefined ? "Gateway" : `${name} gateway`}
+            {g.version === undefined ? "" : ` · v${g.version}`} · up{" "}
+            {formatSpan(now.getTime() - Date.parse(g.started))}
           </>
         }
       />
@@ -217,7 +218,7 @@ export function Overview({ data, now }: { data: Dashboard; now: Date }) {
         <div>
           <div className="k">Accounts</div>
           <div className="v">
-            <span className="num">{available(data).length}</span> of{" "}
+            <span className="num">{available(data, now).length}</span> of{" "}
             <span className="num">{data.accounts.length}</span> available
           </div>
           <div className="reason">
@@ -276,7 +277,11 @@ export function Overview({ data, now }: { data: Dashboard; now: Date }) {
       </div>
       <Section
         title="Requests and errors"
-        note={`Last 24 h, all clients of ${name}`}
+        note={
+          g.provider === undefined
+            ? "Last 24 h, all clients"
+            : `Last 24 h, all clients of ${name}`
+        }
       >
         <Traffic data={data} />
       </Section>

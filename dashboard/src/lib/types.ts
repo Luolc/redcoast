@@ -354,6 +354,7 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
 /** Parses the endpoint's text; throws when it is not the expected shape. */
 export function parseDashboard(text: string): Dashboard {
   const value: unknown = JSON.parse(text);
-  if (!isDashboard(value)) throw new Error("dashboard.json 的结构与页面不符");
+  if (!isDashboard(value))
+    throw new Error("dashboard.json does not have the shape this page reads");
   return value;
 }

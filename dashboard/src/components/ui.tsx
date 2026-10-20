@@ -15,7 +15,7 @@ import {
   formatUntil,
   LA,
 } from "../lib/format";
-import { pace, type State, type Tone } from "../lib/stats";
+import { pace, windowTier, type State, type Tone } from "../lib/stats";
 import type { Quota } from "../lib/types";
 
 const TONE_ICONS: Record<Tone, LucideIcon> = {
@@ -123,7 +123,8 @@ const STALE_MS = 30 * 60_000;
 
 /**
  * One quota window: a bar with the soft limit as a tick and an even pace
- * through the window as a hollow mark, then the reset and the pace.
+ * through the window as a hollow mark, then the reset and the pace. Its
+ * ink follows how selection reads the window (windowTier).
  */
 export function Meter({
   quota,
@@ -143,13 +144,15 @@ export function Meter({
   if (quota === undefined)
     return <span className="muted small">No reading</span>;
   const u = quota.utilization;
+  const tier = windowTier(quota, soft, hard, now);
   const tone: Tone = paused
     ? "off"
-    : u >= hard
-      ? "bad"
-      : u >= soft
-        ? "warn"
-        : "ok";
+    : {
+        unread: "off" as const,
+        open: "ok" as const,
+        soft: "warn" as const,
+        exhausted: "bad" as const,
+      }[tier];
   const p = paused ? null : pace(quota, window, now);
   const stale = now.getTime() - Date.parse(quota.observed_at) > STALE_MS;
   return (
@@ -178,13 +181,16 @@ export function Meter({
           {quota.reset_at === undefined ? (
             "reset unknown"
           ) : Date.parse(quota.reset_at) <= now.getTime() ? (
-            <Time iso={quota.reset_at}>reset passed</Time>
+            <Time iso={quota.reset_at}>reset passed, counts as unread</Time>
           ) : (
             <Time iso={quota.reset_at}>
               resets {formatUntil(quota.reset_at, now)}
             </Time>
           )}
         </span>
+        {quota.status === "rejected" ? (
+          <span className="s-bad">rejected by the upstream</span>
+        ) : null}
         {p === null ? null : <PaceText by={p.by} />}
         {stale ? (
           <span className="stale s-warn">

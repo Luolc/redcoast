@@ -16,7 +16,6 @@ const RESULTS: Record<string, Wording> = {
   no_account: { text: "No account available", tone: "bad" },
   store_failed: { text: "Session store unavailable", tone: "bad" },
   forbidden: { text: "Request not on the allowlist", tone: "bad" },
-  refused: { text: "CONNECT target refused", tone: "bad" },
   egress_failed: { text: "Exit failed", tone: "warn" },
   upstream_failed: { text: "Upstream unreachable", tone: "warn" },
   incomplete: { text: "Broken off before the end", tone: "warn" },
@@ -25,7 +24,15 @@ const RESULTS: Record<string, Wording> = {
 };
 
 /** A failed result as a sentence; an ok result failed by the upstream's status. */
-export function resultWording(result: string, status: number): Wording {
+export function resultWording(
+  kind: string,
+  result: string,
+  status: number,
+): Wording {
+  if (result === "refused")
+    return kind === "connect"
+      ? { text: "CONNECT target refused", tone: "bad" }
+      : { text: "Refused before forwarding", tone: "bad" };
   if (result === "ok") {
     if (status === 429) return { text: "Upstream rate limit", tone: "warn" };
     if (status >= 500) return { text: "Upstream server error", tone: "warn" };

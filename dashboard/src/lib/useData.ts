@@ -18,15 +18,24 @@ export function useData(url: string, everyMs: number): Loaded {
   });
   const [tick, setTick] = useState(0);
   useEffect(() => {
-    let alive = true;
+    // One load at a time: a new one cancels the last, so an older answer
+    // never lands after a newer one.
+    let current: AbortController | null = null;
     async function load() {
+      current?.abort();
+      const controller = new AbortController();
+      current = controller;
       try {
-        const response = await fetch(url, { cache: "no-store" });
+        const response = await fetch(url, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
         if (!response.ok) throw new Error(`HTTP ${String(response.status)}`);
         const data = parseDashboard(await response.text());
-        if (alive) setState({ data, fetchError: null });
+        if (!controller.signal.aborted) setState({ data, fetchError: null });
       } catch (e) {
-        if (alive) setState((l) => ({ ...l, fetchError: String(e) }));
+        if (!controller.signal.aborted)
+          setState((l) => ({ ...l, fetchError: String(e) }));
       }
     }
     void load();
@@ -34,7 +43,7 @@ export function useData(url: string, everyMs: number): Loaded {
       void load();
     }, everyMs);
     return () => {
-      alive = false;
+      current?.abort();
       clearInterval(timer);
     };
   }, [url, everyMs, tick]);

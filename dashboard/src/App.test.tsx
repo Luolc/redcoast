@@ -53,6 +53,10 @@ it("filters sessions to one machine", () => {
 it("says so when a gateway sends no usage or tables are empty", () => {
   const older = { ...data, usage: undefined, result_sources: undefined };
   expect(page({ view: "overview" }, older)).toContain("No hourly usage.");
+  const clients = page({ view: "clients" }, older);
+  expect(clients).toContain("does not report requests by machine");
+  // machine-a: live / max sessions, then no request count.
+  expect(clients).toContain("3 / 12—");
   expect(page({ view: "monitor" }, older)).toContain("No result counts.");
   const empty = { ...data, sessions: [], destinations: [], history: [] };
   expect(page({ view: "sessions" }, empty)).toContain("No live sessions.");
@@ -64,7 +68,7 @@ it("says so when a gateway sends no usage or tables are empty", () => {
 it("offers the other providers' dashboards only when the gateway lists them", () => {
   const route: Route = { view: "monitor" };
   const listed = renderToStaticMarkup(<Sidebar data={data} route={route} />);
-  expect(listed).toContain('aria-haspopup="menu"');
+  expect(listed).toContain('aria-controls="provider-links"');
   expect(listed).toContain("Claude");
   const alone = renderToStaticMarkup(
     <Sidebar
@@ -72,5 +76,24 @@ it("offers the other providers' dashboards only when the gateway lists them", ()
       route={route}
     />,
   );
-  expect(alone).not.toContain("aria-haspopup");
+  expect(alone).not.toContain("aria-controls");
+});
+
+it("reads a pause with no end as until resumed", () => {
+  const [first, ...rest] = data.accounts;
+  if (first === undefined) throw new Error("the sample has no account");
+  const forGood = {
+    ...data,
+    accounts: [
+      {
+        ...first,
+        paused_until: "9999-12-31T23:59:59Z",
+        pause_reason: "manual",
+      },
+      ...rest,
+    ],
+  };
+  const html = page({ view: "accounts" }, forGood);
+  expect(html).toContain("until resumed");
+  expect(page({ view: "accounts" })).not.toContain("until resumed");
 });

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   accountState,
+  idleSessions,
+  pausedForGood,
+  windowTier,
   byMachine,
   errorKinds,
   errorRate,
@@ -156,6 +159,7 @@ describe("pace", () => {
 });
 
 describe("accountState", () => {
+  const now = new Date("2026-10-07T12:00:00Z");
   const base: Account = {
     alias: "sample-ab",
     email: "ab@example.test",
@@ -172,32 +176,42 @@ describe("accountState", () => {
     in_flight: 0,
     concurrency: 4,
   };
-  const q = (utilization: number): Quota => ({
+  const q = (
+    utilization: number,
+    reset_at = "2026-10-07T14:00:00Z",
+    status = "allowed",
+  ): Quota => ({
     utilization,
-    status: "allowed",
+    status,
+    reset_at,
     observed_at: "2026-10-07T11:59:00Z",
     source: "response",
   });
+  const word = (a: Account) => accountState(a, 0.9, 0.95, now).word;
 
   it("reads the highest window against the thresholds, from soft and hard on", () => {
-    expect(
-      accountState({ ...base, quota: { "5h": q(0.89) } }, 0.9, 0.95).word,
-    ).toBe("Available");
-    expect(
-      accountState(
-        { ...base, quota: { "5h": q(0.2), "7d": q(0.9) } },
-        0.9,
-        0.95,
-      ).word,
-    ).toBe("Near limit");
-    expect(
-      accountState({ ...base, quota: { "5h": q(0.95) } }, 0.9, 0.95).word,
-    ).toBe("Over hard limit");
+    expect(word({ ...base, quota: { "5h": q(0.89) } })).toBe("Available");
+    expect(word({ ...base, quota: { "5h": q(0.2), "7d": q(0.9) } })).toBe(
+      "Near limit",
+    );
+    expect(word({ ...base, quota: { "5h": q(0.95) } })).toBe("Over hard limit");
+  });
+
+  it("reads windows as selection does: a passed reset unread, rejected as hard", () => {
+    const passed = q(1, "2026-10-07T12:00:00Z");
+    expect(windowTier(passed, 0.9, 0.95, now)).toBe("unread");
+    expect(word({ ...base, quota: { "5h": passed } })).toBe("Available");
+    const rejected = q(0.6, "2026-10-07T14:00:00Z", "rejected");
+    expect(windowTier(rejected, 0.9, 0.95, now)).toBe("exhausted");
+    expect(word({ ...base, quota: { "5h": rejected } })).toBe(
+      "Over hard limit",
+    );
   });
 
   it("puts a pause, then a missing plan, before quota", () => {
     const paused = {
       ...base,
+      plan: null,
       paused_until: "2026-10-07T13:00:00Z",
       quota: { "5h": q(1) },
     };
@@ -206,21 +220,38 @@ describe("accountState", () => {
         { ...paused, pause_reason: "egress_ip_mismatch" },
         0.9,
         0.95,
+        now,
       ),
-    ).toEqual({
-      tone: "bad",
-      word: "Paused · egress mismatch",
-    });
+    ).toEqual({ tone: "bad", word: "Paused · egress mismatch" });
     expect(
-      accountState({ ...paused, pause_reason: "for a test" }, 0.9, 0.95),
-    ).toEqual({
-      tone: "off",
-      word: "Paused",
-    });
-    expect(accountState({ ...base, plan: null }, 0.9, 0.95).word).toBe(
+      accountState({ ...paused, pause_reason: "for a test" }, 0.9, 0.95, now),
+    ).toEqual({ tone: "off", word: "Paused" });
+    expect(word({ ...base, plan: null, quota: { "5h": q(1) } })).toBe(
       "No plan",
     );
   });
+
+  it("tells a pause with no end from one with an end", () => {
+    expect(pausedForGood("9999-12-31T23:59:59Z")).toBe(true);
+    expect(pausedForGood("2026-10-07T13:00:00Z")).toBe(false);
+  });
+});
+
+it("counts a session idle from exactly 24 h without a request", () => {
+  const now = new Date("2026-10-08T12:00:00Z");
+  const s = (last_seen: string) => ({
+    id: "K7Q2M4XA",
+    client_machine: "machine-a",
+    alias: "",
+    created_at: "2026-10-01T10:00:00Z",
+    last_seen,
+  });
+  expect(
+    idleSessions(
+      [s("2026-10-07T12:00:00Z"), s("2026-10-07T12:00:00.001Z")],
+      now,
+    ),
+  ).toBe(1);
 });
 
 it("tells working sessions from quiet ones at 2 min", () => {

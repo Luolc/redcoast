@@ -111,8 +111,8 @@ export function Sessions({
                 : `No live sessions on ${machine}.`
             }
           >
-            A session ends when its client exits, or after 7 days without a
-            request.
+            A session ends when its client exits, or after the gateway's idle
+            expiry (7 days by default) without a request.
           </Empty>
         ) : (
           <div className="table-wrap">
@@ -163,7 +163,11 @@ export function Sessions({
       </Section>
       <Section
         title="Binding history"
-        note="The gateway's last 50, newest first; each row is one binding of a session to an account"
+        note={
+          machine === undefined
+            ? "The gateway's last 50, newest first; each row is one binding of a session to an account"
+            : `The bindings of ${machine}'s live sessions among the gateway's last 50; those of its ended sessions are not shown`
+        }
       >
         {history.length === 0 ? (
           <Empty title="No bindings." />

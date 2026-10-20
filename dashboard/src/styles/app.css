@@ -125,7 +125,7 @@ th.n {
 .menu-item .grow {
   flex: 1;
 }
-.menu-item[aria-checked="true"] {
+.menu-item[aria-current="page"] {
   font-weight: var(--t-weight-bold);
   color: var(--t-accent);
 }

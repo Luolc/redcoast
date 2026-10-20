@@ -45,7 +45,8 @@ export function Page({
 
 function crumbs(data: Dashboard | null, route: Route): ReactNode[] {
   const trail: ReactNode[] = [];
-  if (data !== null)
+  // Without a provider the trail's first place, "Gateway", already names it.
+  if (data?.gateway.provider !== undefined)
     trail.push(
       <a href={routeHref({ view: "overview" })}>
         {providerName(data.gateway.provider)}

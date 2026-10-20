@@ -51,6 +51,7 @@ function host(url: string): string {
 function ProviderMenu({ data, route }: { data: Dashboard; route: Route }) {
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!open) return;
     const outside = (e: MouseEvent) => {
@@ -61,7 +62,9 @@ function ProviderMenu({ data, route }: { data: Dashboard; route: Route }) {
         setOpen(false);
     };
     const escape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      buttonRef.current?.focus();
     };
     document.addEventListener("click", outside);
     document.addEventListener("keydown", escape);
@@ -99,9 +102,10 @@ function ProviderMenu({ data, route }: { data: Dashboard; route: Route }) {
     <div className="provider" ref={boxRef}>
       <button
         type="button"
+        ref={buttonRef}
         className="provider-button"
-        aria-haspopup="menu"
         aria-expanded={open}
+        aria-controls="provider-links"
         onClick={() => {
           setOpen(!open);
         }}
@@ -110,11 +114,10 @@ function ProviderMenu({ data, route }: { data: Dashboard; route: Route }) {
         <ChevronDown className="icon sm" aria-hidden="true" />
       </button>
       {open ? (
-        <div className="menu" role="menu" aria-label="Provider">
+        <nav className="menu" id="provider-links" aria-label="Providers">
           <a
             className="menu-item"
-            role="menuitemradio"
-            aria-checked="true"
+            aria-current="page"
             href={routeHref(route)}
             onClick={() => {
               setOpen(false);
@@ -132,8 +135,6 @@ function ProviderMenu({ data, route }: { data: Dashboard; route: Route }) {
               <a
                 key={d.provider}
                 className="menu-item"
-                role="menuitemradio"
-                aria-checked="false"
                 href={d.href}
                 title={`Opens ${d.url}`}
               >
@@ -150,7 +151,7 @@ function ProviderMenu({ data, route }: { data: Dashboard; route: Route }) {
             Each provider serves its own dashboard. Choosing one opens it, on
             the same page.
           </div>
-        </div>
+        </nav>
       ) : null}
     </div>
   );

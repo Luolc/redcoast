@@ -194,21 +194,52 @@ const PAUSES: Record<string, State> = {
   upstream_429: { tone: "warn", word: "Paused · rate-limited" },
 };
 
-export function accountState(a: Account, soft: number, hard: number): State {
+/**
+ * How selection reads one window (session/select.go): a reading whose reset
+ * has passed counts as unread, and an upstream "rejected" as over the hard
+ * limit, whatever the utilization.
+ */
+export type Tier = "unread" | "open" | "soft" | "exhausted";
+
+export function windowTier(
+  q: Quota,
+  soft: number,
+  hard: number,
+  now: Date,
+): Tier {
+  if (q.reset_at !== undefined && Date.parse(q.reset_at) <= now.getTime())
+    return "unread";
+  if (q.utilization >= hard || q.status === "rejected") return "exhausted";
+  if (q.utilization >= soft) return "soft";
+  return "open";
+}
+
+const TIER_ORDER: Tier[] = ["unread", "open", "soft", "exhausted"];
+
+export function accountState(
+  a: Account,
+  soft: number,
+  hard: number,
+  now: Date,
+): State {
   if (a.paused_until !== undefined)
     return PAUSES[a.pause_reason ?? ""] ?? { tone: "off", word: "Paused" };
   if (a.plan === null) return { tone: "bad", word: "No plan" };
-  const use = Math.max(...Object.values(a.quota).map((q) => q.utilization), 0);
-  if (use >= hard) return { tone: "bad", word: "Over hard limit" };
-  if (use >= soft) return { tone: "warn", word: "Near limit" };
+  const tiers = Object.values(a.quota).map((q) =>
+    windowTier(q, soft, hard, now),
+  );
+  const worst =
+    TIER_ORDER[Math.max(0, ...tiers.map((t) => TIER_ORDER.indexOf(t)))];
+  if (worst === "exhausted") return { tone: "bad", word: "Over hard limit" };
+  if (worst === "soft") return { tone: "warn", word: "Near limit" };
   return { tone: "ok", word: "Available" };
 }
 
 /** Accounts that selection may choose now: not paused, with a plan, under the hard limit. */
-export function available(d: Dashboard): Account[] {
+export function available(d: Dashboard, now: Date): Account[] {
   return d.accounts.filter((a) => {
     if (a.paused_until !== undefined) return false;
-    const t = accountState(a, d.soft, d.hard).tone;
+    const t = accountState(a, d.soft, d.hard, now).tone;
     return t === "ok" || t === "warn";
   });
 }

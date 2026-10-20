@@ -18,7 +18,11 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
       />
       <Section
         title="Machines"
-        note={`Registered with the ${providerName(data.gateway.provider)} gateway`}
+        note={
+          data.gateway.provider === undefined
+            ? "Registered with this gateway"
+            : `Registered with the ${providerName(data.gateway.provider)} gateway`
+        }
       >
         {data.machines.length === 0 ? (
           <Empty title="No client machines.">
@@ -69,7 +73,13 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
                       <td className="n">
                         {m.live_sessions} / {m.max_sessions}
                       </td>
-                      <td className="n">{formatCount(u?.requests ?? 0)}</td>
+                      <td className="n">
+                        {data.usage === undefined ? (
+                          <span className="faint">—</span>
+                        ) : (
+                          formatCount(u?.requests ?? 0)
+                        )}
+                      </td>
                       <td className="n">
                         {u === undefined || u.requests === 0 ? (
                           <span className="faint">—</span>
@@ -112,6 +122,12 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
             </table>
           </div>
         )}
+        {data.usage === undefined ? (
+          <p className="small muted foot">
+            This gateway is older than the page and does not report requests by
+            machine.
+          </p>
+        ) : null}
         {orphan === undefined ? null : (
           <p className="small muted foot">
             {formatCount(orphan.requests)} requests in the last 24 h came with

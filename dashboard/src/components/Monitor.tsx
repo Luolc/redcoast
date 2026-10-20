@@ -25,7 +25,7 @@ function Failures({ data }: { data: Dashboard }) {
       {failed.length === 0 ? null : (
         <div className="rank">
           {failed.map((f) => {
-            const w = resultWording(f.result, f.status);
+            const w = resultWording(f.kind, f.result, f.status);
             const Icon = w.tone === "bad" ? CircleX : TriangleAlert;
             return (
               <div

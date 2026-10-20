@@ -92,7 +92,10 @@ export function AccountsTable({ data, now }: { data: Dashboard; now: Date }) {
                 <Plan account={a} />
               </td>
               <td className="two">
-                <Status state={accountState(a, data.soft, data.hard)} pill />
+                <Status
+                  state={accountState(a, data.soft, data.hard, now)}
+                  pill
+                />
                 <Pause account={a} />
               </td>
               {(["5h", "7d"] as const).map((w) => (
