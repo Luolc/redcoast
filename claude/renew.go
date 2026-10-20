@@ -32,8 +32,9 @@ type renewals struct {
 	wake    chan struct{}
 }
 
-// renewal is a queued renewal: when the upstream refused the credential, when the
-// renewal runs next and how many times it failed.
+// renewal is a queued renewal: since when the credential is known refused (the
+// upstream's refusal, then each failed renewal), when the renewal runs next and how
+// many times it failed.
 type renewal struct {
 	since    time.Time
 	at       time.Time
@@ -81,7 +82,9 @@ func (q *renewals) queued(alias string) bool {
 	return ok
 }
 
-// retry queues alias's renewal again after one more failure, or drops it when done.
+// retry queues alias's renewal again after one more failure at now, or drops it when
+// done. The credential is still refused at now: the failed renewal settled before it,
+// so the retry renews rather than take that failure as its outcome.
 func (q *renewals) retry(alias string, now time.Time, done bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -91,6 +94,7 @@ func (q *renewals) retry(alias string, now time.Time, done bool) {
 	}
 	r := q.pending[alias]
 	r.failures++
+	r.since = now
 	r.at = now.Add(min(time.Minute<<min(r.failures-1, 10), maxRenewBackoff))
 	q.pending[alias] = r
 }
