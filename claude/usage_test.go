@@ -217,3 +217,47 @@ func TestUsageRecordedFromStream(t *testing.T) {
 		t.Fatalf("usage rows %+v, want %+v", got, want)
 	}
 }
+
+// TestClientLeavesAtMessageStop has the upstream send a stream up to one event and then
+// hold its body open, and the client close the stream once it has read that event: a
+// client that leaves after message_stop leaves an ok row. Control arm: one that leaves
+// after message_delta, before message_stop, leaves an incomplete row.
+func TestClientLeavesAtMessageStop(t *testing.T) {
+	beforeStop, _, _ := strings.Cut(claudeStream, "event: message_stop\n")
+	for _, arm := range []struct{ name, stream, result string }{
+		{"message_stop", claudeStream, "ok"},
+		{"message_delta", beforeStop, "incomplete"},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, arm.stream)
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+				case <-time.After(5 * time.Second):
+				}
+			}))
+			defer upstream.Close()
+			h := newHarness(t, "sample-a")
+			server := h.gateway(upstream.URL)
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/v1/messages", strings.NewReader("{}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := h.client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			head := make([]byte, len(arm.stream))
+			_, err = io.ReadFull(res.Body, head)
+			_ = res.Body.Close()
+			if err != nil || string(head) != arm.stream {
+				t.Fatalf("stream %q err=%v", head, err)
+			}
+			if rows := h.trafficRows(1); len(rows) != 1 || rows[0].result != arm.result || rows[0].status != http.StatusOK {
+				t.Fatalf("rows %+v, want one %s row", rows, arm.result)
+			}
+		})
+	}
+}

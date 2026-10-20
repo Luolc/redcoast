@@ -651,3 +651,77 @@ func TestUsageRecorded(t *testing.T) {
 		t.Fatalf("usage %+v", snap.Usage)
 	}
 }
+
+// TestClientLeavesAtFinalEvent has the upstream send a stream up to one event and then
+// hold its body open, and the client close the stream once it has read that event, as
+// the Codex CLI does at response.completed: after response.completed the request is ok
+// and no error. Control arms: a client that leaves after response.created, or after
+// response.incomplete, leaves an incomplete request that counts as an error.
+func TestClientLeavesAtFinalEvent(t *testing.T) {
+	created := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_synthetic","model":"gpt-sample-1","status":"in_progress"}}` + "\n\n"
+	end := func(event string) string {
+		return "event: " + event + "\n" +
+			`data: {"type":"` + event + `","response":{"id":"resp_synthetic","usage":{"input_tokens":12,"output_tokens":3}}}` + "\n\n"
+	}
+	for _, arm := range []struct {
+		name, stream, result string
+		error                bool
+	}{
+		{"completed", created + end("response.completed"), "ok", false},
+		{"created", created, "incomplete", true},
+		{"incomplete", created + end("response.incomplete"), "incomplete", true},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			g := newGateway(t)
+			g.exit.setAnswer(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, arm.stream)
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+				case <-time.After(5 * time.Second):
+				}
+			})
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, g.server.URL+"/backend-api/codex/responses", strings.NewReader("{}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+g.token)
+			res, err := g.server.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			head := make([]byte, len(arm.stream))
+			_, err = io.ReadFull(res.Body, head)
+			_ = res.Body.Close()
+			if err != nil || string(head) != arm.stream {
+				t.Fatalf("stream %q err=%v", head, err)
+			}
+			reader, err := session.OpenReadOnly(filepath.Join(g.dir, "codex.sqlite"), session.Config{}, claude.DefaultLimits.MaxTunnel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reader.Close() })
+			var snap session.Snapshot
+			for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				if snap, err = reader.Snapshot(t.Context(), []string{"sample-a"}); err != nil {
+					t.Fatal(err)
+				}
+				if len(snap.SourceCounts) > 0 || time.Now().After(deadline) {
+					break
+				}
+			}
+			if s := snap.SourceCounts; len(s) != 1 || s[0].Result != arm.result || s[0].Error != arm.error {
+				t.Fatalf("sources %+v, want result %s error %t", s, arm.result, arm.error)
+			}
+			wantErrors := 0
+			if arm.error {
+				wantErrors = 1
+			}
+			if len(snap.Usage) != 1 || snap.Usage[0].Errors != wantErrors {
+				t.Fatalf("usage %+v, want %d errors", snap.Usage, wantErrors)
+			}
+		})
+	}
+}

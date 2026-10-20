@@ -12,7 +12,8 @@ var usageEvents = map[string]bool{"response.created": true, "response.completed"
 
 // usage reads one event of a Responses API stream: the model and the input and output
 // token counts of its response object. The input count includes the cached tokens,
-// which are not counted apart.
+// which are not counted apart. Only response.completed is final: the other two end a
+// response the upstream did not finish.
 func usage(document []byte) claude.UsageReport {
 	var event struct {
 		Type     string `json:"type"`
@@ -27,7 +28,7 @@ func usage(document []byte) claude.UsageReport {
 	if json.Unmarshal(document, &event) != nil || !usageEvents[event.Type] || event.Response == nil {
 		return claude.UsageReport{}
 	}
-	report := claude.UsageReport{Model: event.Response.Model}
+	report := claude.UsageReport{Model: event.Response.Model, Final: event.Type == "response.completed"}
 	if u := event.Response.Usage; u != nil {
 		report.InputTokens, report.OutputTokens = u.InputTokens, u.OutputTokens
 	}

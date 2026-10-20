@@ -282,14 +282,17 @@ func localRateLimit(w http.ResponseWriter, resetAt, now time.Time) {
 
 // outcome classifies a forwarded request: idle_timeout or max_duration when the limits
 // ended it, upstream_failed when the gateway answered for an unreachable upstream,
-// incomplete when the client left or the upstream body broke off, ok otherwise.
+// incomplete when the client left or the upstream body broke off before the stream's
+// final event, ok otherwise. Clients such as the Codex CLI close the stream as soon as
+// they read the final event, before the upstream ends its body. It reads the meter's
+// final, so it runs after the meter's result.
 func outcome(state *requestState, interrupted bool) string {
 	switch {
 	case state.cut != nil:
 		return state.cut.Error()
 	case state.upstreamUnavailable:
 		return "upstream_failed"
-	case interrupted:
+	case interrupted && (state.meter == nil || !state.meter.final):
 		return "incomplete"
 	}
 	return "ok"
