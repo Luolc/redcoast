@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -20,18 +21,18 @@ const (
 	idleReference    = 24 * time.Hour
 )
 
-// failed is the SQL expression, over a traffic row aliased t, that is true when the row
-// counts as an error: a result other than ok, or a status of 400 or more (an inference
-// request the upstream answered with an error status is recorded with result ok). A
-// CONNECT tunnel that the gateway's limits closed (idle_timeout, max_duration) was open
-// and carried traffic, so it is no error; an inference stream they cut short is one.
-const failed = `(t.result <> 'ok' AND NOT (t.kind = 'connect' AND t.result IN ('idle_timeout', 'max_duration'))
-	OR COALESCE(t.status, 0) >= 400)`
+// sessionBatch is how many session IDs one lookup of the sessions table names.
+const sessionBatch = 500
 
-// tokenSums is the SQL list, over traffic rows aliased t, of the sums of the four token
-// counts, zero for a group in which no row reported usage.
-const tokenSums = `COALESCE(SUM(t.input_tokens), 0), COALESCE(SUM(t.output_tokens), 0),
-	COALESCE(SUM(t.cache_read_tokens), 0), COALESCE(SUM(t.cache_creation_tokens), 0)`
+// failed reports whether a traffic row counts as an error: a result other than ok, or a
+// status of 400 or more (an inference request the upstream answered with an error
+// status is recorded with result ok); status is 0 when the row has none. A CONNECT
+// tunnel that the gateway's limits closed (idle_timeout, max_duration) was open and
+// carried traffic, so it is no error; an inference stream they cut short is one.
+func failed(kind, result string, status int) bool {
+	closedByLimit := kind == "connect" && (result == "idle_timeout" || result == "max_duration")
+	return result != "ok" && !closedByLimit || status >= 400
+}
 
 // Reader reads the dashboard's snapshot over a connection SQLite opens read-only, with
 // query_only on as well, so no statement it runs can write.
@@ -294,80 +295,19 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		}
 	}
 	since := now - dashboardHours*time.Hour.Milliseconds()
-	err = collect(ctx, db, &out.Hourly, func(rows *sql.Rows) (HourTraffic, error) {
-		var v HourTraffic
-		var hour int64
-		err := rows.Scan(&hour, &v.Alias, &v.Kind, &v.Requests, &v.BytesUp, &v.BytesDown)
-		v.Hour = fromMillis(hour)
-		return v, err
-	}, `SELECT ts / 3600000 * 3600000 AS hour, COALESCE(alias, '') AS a, kind, COUNT(*), SUM(bytes_up), SUM(bytes_down)
-		FROM traffic WHERE ts >= ? GROUP BY hour, a, kind ORDER BY hour, a, kind`, since)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	err = collect(ctx, db, &out.Results, func(rows *sql.Rows) (ResultCount, error) {
-		var v ResultCount
-		return v, rows.Scan(&v.Kind, &v.Result, &v.Status, &v.Count)
-	}, `SELECT kind, result, COALESCE(status, 0) AS st, COUNT(*) AS n FROM traffic WHERE ts >= ?
-		GROUP BY kind, result, st ORDER BY kind, n DESC, result, st`, since)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	// A row's client machine is its session's. Prune keeps every session a traffic row
-	// names, so only a row of no session has no machine.
-	err = collect(ctx, db, &out.Usage, func(rows *sql.Rows) (UsagePoint, error) {
-		var v UsagePoint
-		var hour int64
-		err := rows.Scan(&hour, &v.Alias, &v.Machine, &v.Kind, &v.Requests, &v.BytesUp, &v.BytesDown, &v.Errors, &v.Limited,
-			&v.InputTokens, &v.OutputTokens, &v.CacheRead, &v.CacheCreation)
-		v.Hour = fromMillis(hour)
-		return v, err
-	}, `SELECT t.ts / 3600000 * 3600000 AS hour, COALESCE(t.alias, '') AS a, COALESCE(s.client_machine, '') AS m, t.kind,
-		COUNT(*), SUM(t.bytes_up), SUM(t.bytes_down), SUM(`+failed+`), SUM(t.result = 'limited'), `+tokenSums+`
-		FROM traffic t LEFT JOIN sessions s ON s.id = t.session_id WHERE t.ts >= ?
-		GROUP BY hour, a, m, t.kind ORDER BY hour, a, m, t.kind`, since)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	err = collect(ctx, db, &out.ModelUsage, func(rows *sql.Rows) (ModelUsage, error) {
-		var v ModelUsage
-		var hour int64
-		err := rows.Scan(&hour, &v.Alias, &v.Model, &v.Requests, &v.InputTokens, &v.OutputTokens, &v.CacheRead, &v.CacheCreation)
-		v.Hour = fromMillis(hour)
-		return v, err
-	}, `SELECT t.ts / 3600000 * 3600000 AS hour, COALESCE(t.alias, '') AS a, COALESCE(t.model, '') AS md, COUNT(*), `+tokenSums+`
-		FROM traffic t WHERE t.ts >= ? AND t.input_tokens IS NOT NULL GROUP BY hour, a, md ORDER BY hour, a, md`, since)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	err = collect(ctx, db, &out.SourceCounts, func(rows *sql.Rows) (SourceCount, error) {
-		var v SourceCount
-		return v, rows.Scan(&v.Alias, &v.Machine, &v.Kind, &v.Result, &v.Status, &v.Error, &v.Count)
-	}, `SELECT COALESCE(t.alias, '') AS a, COALESCE(s.client_machine, '') AS m, t.kind, t.result, COALESCE(t.status, 0) AS st, `+failed+`, COUNT(*) AS n
-		FROM traffic t LEFT JOIN sessions s ON s.id = t.session_id WHERE t.ts >= ?
-		GROUP BY a, m, t.kind, t.result, st ORDER BY a, m, t.kind, n DESC, t.result, st`, since)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	if out.Latency, err = r.latency(ctx, since); err != nil {
+	if err := r.window(ctx, since, &out); err != nil {
 		return Snapshot{}, err
 	}
 	dayStart := status.At.Truncate(24*time.Hour).AddDate(0, 0, 1-dashboardDays).UnixMilli()
-	err = collect(ctx, db, &out.Destinations, func(rows *sql.Rows) (Destination, error) {
-		var v Destination
-		var last int64
-		err := rows.Scan(&v.Host, &v.Port, &v.Alias, &v.Route, &v.Tunnels, &v.OK, &v.BytesUp, &v.BytesDown, &last)
-		v.Last = fromMillis(last)
-		return v, err
-	}, `SELECT host, port, COALESCE(alias, '') AS a, COALESCE(route, '') AS rt, COUNT(*) AS n, SUM(result = 'ok'), SUM(bytes_up), SUM(bytes_down), MAX(ts)
-		FROM traffic WHERE kind = 'connect' AND ts >= ? GROUP BY host, port, a, rt ORDER BY n DESC, host, port, a, rt`, dayStart)
+	connects, err := r.connects(ctx, dayStart, now)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if out.Clients, out.ClientHourly, err = r.clients(ctx, dayStart, since); err != nil {
+	out.Destinations = connects.destinations
+	if out.Clients, err = r.clients(ctx, dayStart); err != nil {
 		return Snapshot{}, err
 	}
-	if out.Days, err = r.days(ctx, dayStart, now); err != nil {
+	if out.Days, err = r.days(ctx, dayStart, now, connects); err != nil {
 		return Snapshot{}, err
 	}
 	if out.History, err = r.history(ctx); err != nil {
@@ -393,30 +333,220 @@ func (r *Reader) history(ctx context.Context) ([]HistoryEntry, error) {
 	return history, err
 }
 
-// latency returns the latency of the inference requests since since that are no error.
-// SQLite has no percentile function, so the window's durations are read into memory,
-// one row per request, and sorted.
-func (r *Reader) latency(ctx context.Context, since int64) (LatencyView, error) {
-	type row struct {
-		hour           int64
-		alias, machine string
-		duration       int64
-	}
-	var rows []row
-	err := collect(ctx, r.store.db, &rows, func(rows *sql.Rows) (row, error) {
-		var v row
-		return v, rows.Scan(&v.hour, &v.alias, &v.machine, &v.duration)
-	}, `SELECT t.ts / 3600000 * 3600000, COALESCE(t.alias, ''), COALESCE(s.client_machine, ''), t.duration_ms
-		FROM traffic t LEFT JOIN sessions s ON s.id = t.session_id WHERE t.ts >= ? AND t.kind = 'inference' AND NOT `+failed, since)
+// windowRow is what the hourly tables read of one traffic row.
+type windowRow struct {
+	hour                         int64
+	session                      sql.NullString
+	alias, kind, result, model   string // alias and model empty when NULL
+	status                       int    // 0 when NULL
+	reported                     bool   // the response reported usage: input_tokens is not NULL
+	bytesUp, bytesDown, duration int64
+	Tokens                       // each 0 when NULL
+}
+
+// sessionSource is what a traffic row is grouped by of its session: the client machine
+// and the client program as clientColumn gives it.
+type sessionSource struct {
+	machine, client string
+}
+
+// window reads the traffic rows since since once and groups them into the snapshot's
+// hourly traffic, results, usage, model usage, result sources, client hours and latency.
+// A row's client machine is its session's, which is read once per session rather than
+// joined to each row. Prune keeps every session a traffic row names, so only a row of
+// no session has no machine, and is left out of the client hours.
+func (r *Reader) window(ctx context.Context, since int64, out *Snapshot) error {
+	var rows []windowRow
+	err := collect(ctx, r.store.db, &rows, func(rows *sql.Rows) (windowRow, error) {
+		var v windowRow
+		err := rows.Scan(&v.hour, &v.session, &v.alias, &v.kind, &v.result, &v.status, &v.model, &v.reported, &v.bytesUp, &v.bytesDown, &v.duration,
+			&v.InputTokens, &v.OutputTokens, &v.CacheRead, &v.CacheCreation)
+		return v, err
+	}, `SELECT ts / 3600000 * 3600000, session_id, COALESCE(alias, ''), kind, result, COALESCE(status, 0), COALESCE(model, ''), input_tokens IS NOT NULL,
+		bytes_up, bytes_down, duration_ms, COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(cache_read_tokens, 0), COALESCE(cache_creation_tokens, 0)
+		FROM traffic WHERE ts >= ?`, since)
 	if err != nil {
-		return LatencyView{}, err
+		return err
 	}
+	ids := map[string]bool{}
+	for _, v := range rows {
+		if v.session.Valid {
+			ids[v.session.String] = true
+		}
+	}
+	sessions, err := r.sessionSources(ctx, slices.Collect(maps.Keys(ids)))
+	if err != nil {
+		return err
+	}
+
+	type hourKey struct {
+		hour        int64
+		alias, kind string
+	}
+	type resultKey struct {
+		kind, result string
+		status       int
+	}
+	type usageKey struct {
+		hour                 int64
+		alias, machine, kind string
+	}
+	type modelKey struct {
+		hour         int64
+		alias, model string
+	}
+	type sourceKey struct {
+		alias, machine string
+		resultKey
+	}
+	type clientKey struct {
+		hour            int64
+		machine, client string
+	}
+	hourly, results, usage := map[hourKey]*HourTraffic{}, map[resultKey]*ResultCount{}, map[usageKey]*UsagePoint{}
+	models, sources, clients := map[modelKey]*ModelUsage{}, map[sourceKey]*SourceCount{}, map[clientKey]*ClientHour{}
 	hours, accounts, machines := map[int64][]int64{}, map[string][]int64{}, map[string][]int64{}
 	for _, v := range rows {
-		hours[v.hour] = append(hours[v.hour], v.duration)
-		accounts[v.alias] = append(accounts[v.alias], v.duration)
-		machines[v.machine] = append(machines[v.machine], v.duration)
+		source, joined := sessions[v.session.String]
+		joined = joined && v.session.Valid
+		isError := failed(v.kind, v.result, v.status)
+		limited := 0
+		if v.result == "limited" {
+			limited = 1
+		}
+
+		h := entry(hourly, hourKey{v.hour, v.alias, v.kind}, func(k hourKey) HourTraffic {
+			return HourTraffic{Hour: fromMillis(k.hour), Alias: k.alias, Kind: k.kind}
+		})
+		h.Requests++
+		h.BytesUp += v.bytesUp
+		h.BytesDown += v.bytesDown
+
+		result := resultKey{v.kind, v.result, v.status}
+		entry(results, result, func(k resultKey) ResultCount {
+			return ResultCount{Kind: k.kind, Result: k.result, Status: k.status}
+		}).Count++
+
+		u := entry(usage, usageKey{v.hour, v.alias, source.machine, v.kind}, func(k usageKey) UsagePoint {
+			return UsagePoint{Hour: fromMillis(k.hour), Alias: k.alias, Machine: k.machine, Kind: k.kind}
+		})
+		u.Requests++
+		u.BytesUp += v.bytesUp
+		u.BytesDown += v.bytesDown
+		if isError {
+			u.Errors++
+		}
+		u.Limited += limited
+		u.Tokens = u.add(v.Tokens)
+
+		if v.reported {
+			m := entry(models, modelKey{v.hour, v.alias, v.model}, func(k modelKey) ModelUsage {
+				return ModelUsage{Hour: fromMillis(k.hour), Alias: k.alias, Model: k.model}
+			})
+			m.Requests++
+			m.Tokens = m.add(v.Tokens)
+		}
+
+		entry(sources, sourceKey{v.alias, source.machine, result}, func(k sourceKey) SourceCount {
+			return SourceCount{ResultCount: ResultCount{Kind: k.kind, Result: k.result, Status: k.status}, Alias: k.alias, Machine: k.machine,
+				Error: failed(k.kind, k.result, k.status)}
+		}).Count++
+
+		if joined {
+			entry(clients, clientKey{v.hour, source.machine, source.client}, func(k clientKey) ClientHour {
+				return ClientHour{Hour: fromMillis(k.hour), Machine: k.machine, Client: k.client}
+			}).Requests++
+		}
+
+		if v.kind == "inference" && !isError {
+			hours[v.hour] = append(hours[v.hour], v.duration)
+			accounts[v.alias] = append(accounts[v.alias], v.duration)
+			machines[source.machine] = append(machines[source.machine], v.duration)
+		}
 	}
+
+	out.Hourly = sortedValues(hourly, func(a, b *HourTraffic) int {
+		return cmp.Or(a.Hour.Compare(b.Hour), cmp.Compare(a.Alias, b.Alias), cmp.Compare(a.Kind, b.Kind))
+	})
+	out.Results = sortedValues(results, func(a, b *ResultCount) int {
+		return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(b.Count, a.Count), cmp.Compare(a.Result, b.Result), cmp.Compare(a.Status, b.Status))
+	})
+	out.Usage = sortedValues(usage, func(a, b *UsagePoint) int {
+		return cmp.Or(a.Hour.Compare(b.Hour), cmp.Compare(a.Alias, b.Alias), cmp.Compare(a.Machine, b.Machine), cmp.Compare(a.Kind, b.Kind))
+	})
+	out.ModelUsage = sortedValues(models, func(a, b *ModelUsage) int {
+		return cmp.Or(a.Hour.Compare(b.Hour), cmp.Compare(a.Alias, b.Alias), cmp.Compare(a.Model, b.Model))
+	})
+	out.SourceCounts = sortedValues(sources, func(a, b *SourceCount) int {
+		return cmp.Or(cmp.Compare(a.Alias, b.Alias), cmp.Compare(a.Machine, b.Machine), cmp.Compare(a.Kind, b.Kind),
+			cmp.Compare(b.Count, a.Count), cmp.Compare(a.Result, b.Result), cmp.Compare(a.Status, b.Status))
+	})
+	out.ClientHourly = sortedValues(clients, func(a, b *ClientHour) int {
+		return cmp.Or(a.Hour.Compare(b.Hour), cmp.Compare(a.Machine, b.Machine), cmp.Compare(a.Client, b.Client))
+	})
+	out.Latency = latency(hours, accounts, machines)
+	return nil
+}
+
+// add returns the sums of t and u.
+func (t Tokens) add(u Tokens) Tokens {
+	return Tokens{t.InputTokens + u.InputTokens, t.OutputTokens + u.OutputTokens, t.CacheRead + u.CacheRead, t.CacheCreation + u.CacheCreation}
+}
+
+// sessionSources returns the sessionSource of each session in ids that exists, reading
+// sessionBatch sessions per query.
+func (r *Reader) sessionSources(ctx context.Context, ids []string) (map[string]sessionSource, error) {
+	type row struct {
+		id string
+		sessionSource
+	}
+	out := make(map[string]sessionSource, len(ids))
+	for batch := range slices.Chunk(ids, sessionBatch) {
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		var rows []row
+		err := collect(ctx, r.store.db, &rows, func(rows *sql.Rows) (row, error) {
+			var v row
+			return v, rows.Scan(&v.id, &v.machine, &v.client)
+		}, `SELECT s.id, s.client_machine, `+clientColumn+` FROM sessions s WHERE s.id IN (?`+strings.Repeat(", ?", len(batch)-1)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range rows {
+			out[v.id] = v.sessionSource
+		}
+	}
+	return out, nil
+}
+
+// entry returns the value of groups for key, adding the one first returns when there
+// is none.
+func entry[K comparable, V any](groups map[K]*V, key K, first func(K) V) *V {
+	v, ok := groups[key]
+	if !ok {
+		group := first(key)
+		v = &group
+		groups[key] = v
+	}
+	return v
+}
+
+// sortedValues returns the values of groups in the order of compare, an empty slice
+// when there are none.
+func sortedValues[K comparable, V any](groups map[K]*V, compare func(a, b *V) int) []V {
+	out := make([]V, 0, len(groups))
+	for _, v := range slices.SortedFunc(maps.Values(groups), compare) {
+		out = append(out, *v)
+	}
+	return out
+}
+
+// latency returns the latency of the durations grouped by hour, account and client
+// machine. SQLite has no percentile function, so the window's durations are read into
+// memory, one per request, and sorted.
+func latency(hours map[int64][]int64, accounts, machines map[string][]int64) LatencyView {
 	out := LatencyView{Hourly: []HourLatency{}, Accounts: []AccountLatency{}, Machines: []MachineLatency{}}
 	for _, h := range slices.Sorted(maps.Keys(hours)) {
 		out.Hourly = append(out.Hourly, HourLatency{Hour: fromMillis(h), Latency: spread(hours[h])})
@@ -427,6 +557,72 @@ func (r *Reader) latency(ctx context.Context, since int64) (LatencyView, error) 
 	for _, m := range slices.Sorted(maps.Keys(machines)) {
 		out.Machines = append(out.Machines, MachineLatency{Machine: m, Latency: spread(machines[m])})
 	}
+	return out
+}
+
+// connectWindow is what the daily tables read of the CONNECT and limited rows.
+type connectWindow struct {
+	destinations []Destination
+	tunnels      [][2]int64 // the start and end of each tunnel that opened and can overlap the daily window
+	limited      [][2]int64 // the ts of each limited row in the daily window, and 1 for a CONNECT row
+}
+
+// connects reads once the CONNECT rows from the tunnel limit before start, a midnight,
+// and the limited rows of either kind, and returns the CONNECT destinations since start,
+// the opened tunnels that end after start, which include those that started before it,
+// and the limited rows from start to now.
+func (r *Reader) connects(ctx context.Context, start, now int64) (connectWindow, error) {
+	type destinationKey struct {
+		host         string
+		port         int
+		alias, route string
+	}
+	destinations := map[destinationKey]*Destination{}
+	var out connectWindow
+	tunnelsFrom := start - r.maxTunnel.Milliseconds()
+	err := each(ctx, r.store.db, func(rows *sql.Rows) error {
+		var ts, bytesUp, bytesDown, duration int64
+		var connect bool
+		var key destinationKey
+		var result string
+		if err := rows.Scan(&ts, &connect, &key.host, &key.port, &key.alias, &key.route, &result, &bytesUp, &bytesDown, &duration); err != nil {
+			return err
+		}
+		if connect && ts >= start {
+			d := entry(destinations, key, func(k destinationKey) Destination {
+				return Destination{Host: k.host, Port: k.port, Alias: k.alias, Route: k.route}
+			})
+			d.Tunnels++
+			if result == "ok" {
+				d.OK++
+			}
+			d.BytesUp += bytesUp
+			d.BytesDown += bytesDown
+			if last := fromMillis(ts); last.After(d.Last) {
+				d.Last = last
+			}
+		}
+		opened := result == "ok" || result == "idle_timeout" || result == "max_duration"
+		if connect && opened && ts >= tunnelsFrom && ts+duration > start {
+			out.tunnels = append(out.tunnels, [2]int64{ts, ts + duration})
+		}
+		if result == "limited" && ts >= start && ts <= now {
+			kind := int64(0)
+			if connect {
+				kind = 1
+			}
+			out.limited = append(out.limited, [2]int64{ts, kind})
+		}
+		return nil
+	}, `SELECT ts, kind = 'connect', host, port, COALESCE(alias, ''), COALESCE(route, ''), result, bytes_up, bytes_down, duration_ms
+		FROM traffic WHERE ts >= ? AND (kind = 'connect' OR result = 'limited')`, min(start, tunnelsFrom))
+	if err != nil {
+		return connectWindow{}, err
+	}
+	out.destinations = sortedValues(destinations, func(a, b *Destination) int {
+		return cmp.Or(cmp.Compare(b.Tunnels, a.Tunnels), cmp.Compare(a.Host, b.Host), cmp.Compare(a.Port, b.Port),
+			cmp.Compare(a.Alias, b.Alias), cmp.Compare(a.Route, b.Route))
+	})
 	return out, nil
 }
 
@@ -486,7 +682,8 @@ func (r *Reader) machines(ctx context.Context) ([]MachineView, error) {
 
 // days returns the daily figures of the UTC days from start, a midnight, to now's day.
 // Rows stamped after now, as after the clock stepped back, wait until now reaches them.
-func (r *Reader) days(ctx context.Context, start, now int64) ([]DayCounts, error) {
+// The limited rows and the tunnels are those connects read.
+func (r *Reader) days(ctx context.Context, start, now int64, connects connectWindow) ([]DayCounts, error) {
 	const day = 24 * 60 * 60 * 1000
 	out := make([]DayCounts, 0, dashboardDays)
 	for d := start; d <= now; d += day {
@@ -494,11 +691,7 @@ func (r *Reader) days(ctx context.Context, start, now int64) ([]DayCounts, error
 	}
 	at := func(ts int64) *DayCounts { return &out[(ts-start)/day] }
 	db := r.store.db
-	var limited [][2]int64
-	if err := collect(ctx, db, &limited, scanPair, "SELECT ts, kind = 'connect' FROM traffic WHERE ts BETWEEN ? AND ? AND result = 'limited'", start, now); err != nil {
-		return nil, err
-	}
-	for _, l := range limited {
+	for _, l := range connects.limited {
 		if l[1] == 1 {
 			at(l[0]).LimitedConnect++
 		} else {
@@ -512,16 +705,13 @@ func (r *Reader) days(ctx context.Context, start, now int64) ([]DayCounts, error
 	for _, ts := range ended {
 		at(ts).Leaked++
 	}
-	var tunnels, sessions [][2]int64
-	if err := collect(ctx, db, &tunnels, scanPair, "SELECT ts, ts + duration_ms FROM traffic WHERE kind = 'connect' AND result IN ('ok', 'idle_timeout', 'max_duration') AND ts >= ? AND ts + duration_ms > ?", start-r.maxTunnel.Milliseconds(), start); err != nil {
-		return nil, err
-	}
+	var sessions [][2]int64
 	if err := collect(ctx, db, &sessions, scanPair, "SELECT created_at, COALESCE(ended_at, ?) FROM sessions WHERE COALESCE(ended_at, ?) >= ?", now, now, start); err != nil {
 		return nil, err
 	}
 	for i := range out {
 		from := start + int64(i)*day
-		out[i].TunnelPeak = peak(tunnels, from, from+day)
+		out[i].TunnelPeak = peak(connects.tunnels, from, from+day)
 		out[i].SessionPeak = peak(sessions, from, from+day)
 	}
 	return out, nil
@@ -556,17 +746,24 @@ func peak(intervals [][2]int64, from, to int64) int {
 
 // collect appends to out one value scanned from each row of query.
 func collect[T any](ctx context.Context, db *sql.DB, out *[]T, scan func(*sql.Rows) (T, error), query string, args ...any) error {
+	return each(ctx, db, func(rows *sql.Rows) error {
+		v, err := scan(rows)
+		*out = append(*out, v)
+		return err
+	}, query, args...)
+}
+
+// each calls use on each row of query, stopping at the first error.
+func each(ctx context.Context, db *sql.DB, use func(*sql.Rows) error, query string, args ...any) error {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("dashboard query: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		v, err := scan(rows)
-		if err != nil {
+		if err := use(rows); err != nil {
 			return fmt.Errorf("dashboard query: %v", err)
 		}
-		*out = append(*out, v)
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("dashboard query: %v", err)
