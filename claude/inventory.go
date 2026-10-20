@@ -30,6 +30,7 @@ type inventoryFile struct {
 	Access string `yaml:"access"`
 	Status string `yaml:"status"`
 	Proxy  struct {
+		Direct      bool   `yaml:"direct"`
 		Host        string `yaml:"host"`
 		Port        int    `yaml:"port"`
 		ExpectedIP  string `yaml:"expected_egress_ip"`
@@ -40,10 +41,11 @@ type inventoryFile struct {
 
 // inventoryAccount is one account the gateway serves, as the inventory describes it: the
 // alias, the exit without credentials, the references of the exit's credentials and what
-// builds the account's own credential.
+// builds the account's own credential. A direct account has no exit and no references.
 type inventoryAccount struct {
 	alias       string
 	email       string // shown on the dashboard only
+	direct      bool   // the account's traffic leaves from the gateway's own address
 	exit        string // http://host:port
 	expectedIP  netip.Addr
 	credential  CredentialSource
@@ -103,6 +105,16 @@ func readInventory(dir string, provider Provider) ([]inventoryAccount, map[strin
 	if len(accounts) == 0 {
 		return nil, nil, errors.New("inventory: no active gateway account")
 	}
+	// Every direct account leaves from the gateway's one address, so two would share an exit.
+	var direct []string
+	for _, account := range accounts {
+		if account.direct {
+			direct = append(direct, account.alias)
+		}
+	}
+	if len(direct) > 1 {
+		return nil, nil, fmt.Errorf("inventory: proxy.direct: more than one direct account: %s", strings.Join(direct, ", "))
+	}
 	return accounts, directHosts, nil
 }
 
@@ -140,16 +152,37 @@ func readInventoryFile(alias, path string, provider Provider) (account inventory
 }
 
 // servedAccount validates the fields a served account needs, the provider's own among
-// them, and builds its description. data is the file the fields were decoded from.
+// them, and builds its description. data is the file the fields were decoded from. A
+// proxy with direct: true must have only expected_egress_ip besides; any other proxy
+// needs every field, so a file missing them is refused rather than read as direct.
 func servedAccount(alias string, file inventoryFile, data []byte, provider Provider) (inventoryAccount, error) {
 	var errs []error
 	report := func(field, problem string) { errs = append(errs, fieldError{alias, field, problem}) }
-	account := inventoryAccount{alias: alias, email: file.Email, usernameRef: file.Proxy.UsernameRef, passwordRef: file.Proxy.PasswordRef}
+	account := inventoryAccount{alias: alias, email: file.Email, direct: file.Proxy.Direct, usernameRef: file.Proxy.UsernameRef, passwordRef: file.Proxy.PasswordRef}
 	source, err := provider.Account(alias, data)
 	if err != nil {
 		errs = append(errs, err)
 	}
 	account.credential = source
+	expected, err := netip.ParseAddr(file.Proxy.ExpectedIP)
+	if err != nil || expected.Zone() != "" {
+		report("proxy.expected_egress_ip", "not an IP address")
+	}
+	if account.direct {
+		for _, field := range []struct {
+			name    string
+			present bool
+		}{{"proxy.host", file.Proxy.Host != ""}, {"proxy.port", file.Proxy.Port != 0}, {"proxy.username_ref", account.usernameRef != ""}, {"proxy.password_ref", account.passwordRef != ""}} {
+			if field.present {
+				report(field.name, "not allowed with proxy.direct")
+			}
+		}
+		if len(errs) > 0 {
+			return inventoryAccount{}, errors.Join(errs...)
+		}
+		account.expectedIP = expected.Unmap()
+		return account, nil
+	}
 	for _, ref := range []struct{ field, value string }{{"proxy.username_ref", account.usernameRef}, {"proxy.password_ref", account.passwordRef}} {
 		switch {
 		case ref.value == "":
@@ -163,10 +196,6 @@ func servedAccount(alias string, file inventoryFile, data []byte, provider Provi
 	}
 	if file.Proxy.Port < 1 || file.Proxy.Port > 65535 {
 		report("proxy.port", "not a port")
-	}
-	expected, err := netip.ParseAddr(file.Proxy.ExpectedIP)
-	if err != nil || expected.Zone() != "" {
-		report("proxy.expected_egress_ip", "not an IP address")
 	}
 	if len(errs) > 0 {
 		return inventoryAccount{}, errors.Join(errs...)

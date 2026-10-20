@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -581,5 +582,108 @@ func TestMalformedBearerIsFullyRedactedInSavedCapture(t *testing.T) {
 		if strings.Contains(string(artifact), h.token[len(h.token)-4:]) || strings.Contains(string(artifact), h.token[:12]) {
 			t.Fatalf("%s: a piece of the session credential was saved", file.Name())
 		}
+	}
+}
+
+// directExitYAML renders an account file with a direct exit expecting ip.
+func directExitYAML(alias, ip string) string {
+	return "email: " + alias + "@example.test\naccess: gateway\nstatus: active\noauth_token: op://example-vault/token-" + alias +
+		"/credential\nproxy:\n  direct: true\n  expected_egress_ip: " + ip + "\n"
+}
+
+// TestDirectAccountInventory checks which direct exits load: proxy.direct with only
+// expected_egress_ip loads beside an account with a proxy; direct with any proxy field, a missing proxy and a second direct account
+// are refused, naming the field or both aliases. A loaded direct account dials in the
+// family of its expected IP and leaves known-value redaction intact.
+func TestDirectAccountInventory(t *testing.T) {
+	proxied := inventoryYAML("sample-a", "active", "gateway", "op://example-vault/token-sample-a/credential", "8001")
+	direct := directExitYAML("sample-d", "192.0.2.7")
+	for _, test := range []struct {
+		name     string
+		files    map[string]string
+		mentions []string // nil: loads
+	}{
+		{"direct_beside_proxy", map[string]string{"sample-a.yaml": proxied, "sample-d.yaml": direct}, nil},
+		{"direct_ipv6", map[string]string{"sample-d.yaml": directExitYAML("sample-d", "2001:db8::7")}, nil},
+		{"direct_with_host", map[string]string{"sample-d.yaml": direct + "  host: proxy.example.test\n"}, []string{"sample-d: proxy.host: not allowed with proxy.direct"}},
+		{"direct_with_port", map[string]string{"sample-d.yaml": direct + "  port: 8004\n"}, []string{"sample-d: proxy.port: not allowed with proxy.direct"}},
+		{"direct_with_references", map[string]string{"sample-d.yaml": direct + "  username_ref: op://example-proxies/proxy-account/username\n  password_ref: op://example-proxies/proxy-account/password\n"},
+			[]string{"sample-d: proxy.username_ref: not allowed with proxy.direct", "sample-d: proxy.password_ref: not allowed with proxy.direct"}},
+		{"direct_without_ip", map[string]string{"sample-d.yaml": strings.Replace(direct, "  expected_egress_ip: 192.0.2.7\n", "", 1)}, []string{"sample-d: proxy.expected_egress_ip"}},
+		{"direct_false", map[string]string{"sample-d.yaml": strings.Replace(direct, "direct: true", "direct: false", 1)}, []string{"sample-d: proxy.host", "sample-d: proxy.port", "sample-d: proxy.username_ref"}},
+		{"no_proxy", map[string]string{"sample-d.yaml": direct[:strings.Index(direct, "proxy:")]}, []string{"sample-d: proxy.host", "sample-d: proxy.expected_egress_ip"}},
+		{"two_direct", map[string]string{"sample-d.yaml": direct, "sample-e.yaml": directExitYAML("sample-e", "192.0.2.8")}, []string{"more than one direct account: sample-d, sample-e"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolve := func(_ context.Context, reference string) (string, error) {
+				return "synthetic-value-" + strings.TrimPrefix(reference, "op://"), nil
+			}
+			set, err := LoadAccounts(t.Context(), writeInventory(t, test.files), Claude, resolve, DefaultAccountConcurrency)
+			if test.mentions != nil {
+				if err == nil {
+					t.Fatal("invalid inventory accepted")
+				}
+				for _, mention := range test.mentions {
+					if !strings.Contains(err.Error(), mention) {
+						t.Fatalf("error %q does not name %q", err, mention)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := set.lookup("sample-d")
+			wantNetwork := map[bool]string{true: "tcp4", false: "tcp6"}[d.expectedIP.Is4()]
+			if d.direct != wantNetwork || d.exit != nil || d.proxyUsername != "" || d.proxyPassword != "" || d.exitName() != "direct" {
+				t.Fatalf("direct account: network %q, exit %v, proxy account set %t", d.direct, d.exit, d.proxyUsername != "" || d.proxyPassword != "")
+			}
+			if d.transport.Proxy != nil {
+				t.Fatal("direct transport has a proxy")
+			}
+			if a := set.lookup("sample-a"); a != nil && (a.direct != "" || a.exit == nil) {
+				t.Fatal("the account with a proxy became direct")
+			}
+			if got := set.knownValueReplacer().Replace("plain text"); got != "plain text" {
+				t.Fatalf("redaction of plain text gave %q", got)
+			}
+		})
+	}
+}
+
+// TestDirectAccountDials checks that every request of a direct account's transport (the
+// one inference, quota refresh and token renewal use) dials the target it names from the
+// gateway, in the family of expected_egress_ip only, through no proxy.
+func TestDirectAccountDials(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Proxy-Authorization") != "" {
+			t.Error("request carried proxy credentials")
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+	for _, ip := range []string{"192.0.2.7", "2001:db8::7"} {
+		t.Run(ip, func(t *testing.T) {
+			a, err := newAccount("sample-d", accountInput{Credential: claudeCredential{token: "sk-ant-oat01-synthetic-d"}, Direct: true, ExpectedIP: netip.MustParseAddr(ip)}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.transport.CloseIdleConnections()
+			var dialed []string
+			a.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+				dialed = append(dialed, network+" "+address)
+				return (&net.Dialer{}).DialContext(ctx, "tcp", upstream.Listener.Addr().String())
+			}
+			request, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://upstream.example.test:8080/", nil)
+			response, err := a.transport.RoundTrip(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			want := map[bool]string{true: "tcp4", false: "tcp6"}[netip.MustParseAddr(ip).Is4()] + " upstream.example.test:8080"
+			if response.StatusCode != http.StatusOK || !slices.Equal(dialed, []string{want}) {
+				t.Fatalf("status %d, dialed %v, want [%s]", response.StatusCode, dialed, want)
+			}
+		})
 	}
 }
