@@ -11,7 +11,7 @@ import (
 // management interface.
 func healthPauseReason(reason string) string {
 	switch reason {
-	case EgressMismatchReason, "upstream_401", session.QuotaPauseReason, NeedsImportReason:
+	case EgressMismatchReason, "upstream_401", session.QuotaPauseReason, NeedsImportReason, upstreamFailedReason:
 		return reason
 	}
 	return "manual"

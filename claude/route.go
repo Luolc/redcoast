@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Luolc/redcoast/session"
@@ -26,6 +27,7 @@ type requestState struct {
 	alias               string
 	upstreamStatus      int         // the upstream's status when a response arrived; 0 otherwise
 	upstreamUnavailable bool        // set by respondUpstreamUnavailable
+	upstreamErr         error       // the error respondUpstreamUnavailable answered for
 	cut                 error       // errIdleTimeout or errMaxDuration when the limits ended the request
 	meter               *usageMeter // reads the response's usage; nil when it is not read
 }
@@ -147,6 +149,7 @@ type router struct {
 	proxy    *httputil.ReverseProxy
 	limits   Limits
 	refusals refusalRows
+	failures failureRuns
 	renewals renewals
 	rounds   roundLock
 	now      func() time.Time // the clock Retry-After and pauses are measured on; tests inject the store's
@@ -194,6 +197,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if row.Result == "" {
 			row.Result = outcome(state, r.Context().Err() != nil || aborted != nil)
+		}
+		if row.Result == "upstream_failed" && accountFault(state, r.Context()) {
+			rt.upstreamFailed(state.alias)
 		}
 		if !refusedBeforeBinding[row.Result] || rt.refusals.allow(session.SourceOf(r.RemoteAddr), rt.now()) {
 			rt.record(row)
@@ -316,8 +322,8 @@ func outcome(state *requestState, interrupted bool) string {
 }
 
 // inspectUpstream runs on every upstream response before it is written back. It keeps
-// the upstream's status for the traffic row, hands the response to recordUpstream and
-// puts a usage meter on its body. The response passes through unchanged and is not
+// the upstream's status for the traffic row, hands the response to recordUpstream, ends
+// the account's run of upstream failures and puts a usage meter on its body. The response passes through unchanged and is not
 // replayed.
 func (rt *router) inspectUpstream(res *http.Response) error {
 	state, ok := res.Request.Context().Value(stateKey{}).(*requestState)
@@ -329,6 +335,7 @@ func (rt *router) inspectUpstream(res *http.Response) error {
 		source = "429"
 	}
 	rt.recordUpstream(res, source)
+	rt.failures.answered(accountFrom(res.Request.Context()).alias)
 	if ok {
 		if state.meter = newUsageMeter(res, rt.provider.Usage); state.meter != nil {
 			res.Body = state.meter
@@ -380,6 +387,84 @@ func (rt *router) recordUpstream(res *http.Response, source string) []session.Re
 		}
 	}
 	return readings
+}
+
+// The account the upstream could not be reached through upstreamFailureRun times in a
+// row within upstreamFailureWindow rests for upstreamFailurePause, so that the
+// sessions bound to it rebind instead of failing on it. The pause ends on its own: an
+// exit or an upstream route that recovers is chosen again without an operator, and
+// one that has not recovered fails another run and rests again.
+const (
+	upstreamFailureRun    = 5
+	upstreamFailureWindow = 2 * time.Minute
+	upstreamFailurePause  = 5 * time.Minute
+)
+
+// upstreamFailedReason is the pause reason of an account after a run of upstream
+// failures.
+const upstreamFailedReason = "upstream_failed"
+
+// accountFault reports whether a request the gateway answered for an unreachable
+// upstream counts against its account: no upstream response arrived, and the request
+// was not ended by the client (client is the client's request context, canceled when
+// the client leaves or its connection breaks), by a limit, or by the provider's guard,
+// none of which says anything about the account's route.
+func accountFault(state *requestState, client context.Context) bool {
+	return state.upstreamUnavailable && state.upstreamStatus == 0 && state.cut == nil &&
+		client.Err() == nil && !errors.Is(state.upstreamErr, errGuardRefused)
+}
+
+// upstreamFailed counts a failure against account alias and, when it completes a run,
+// pauses the account for upstreamFailurePause. The log line names only the alias.
+func (rt *router) upstreamFailed(alias string) {
+	now := rt.now()
+	if !rt.failures.fail(alias, now) {
+		return
+	}
+	until := now.Add(upstreamFailurePause)
+	ctx, cancel := context.WithTimeout(context.Background(), captureWriteTimeout)
+	defer cancel()
+	if err := rt.store.Pause(ctx, alias, until, upstreamFailedReason); err != nil {
+		log.Printf("account pause failed alias=%s", alias)
+		return
+	}
+	log.Printf("account paused alias=%s reason=%s failures=%d until=%s", alias, upstreamFailedReason, upstreamFailureRun, until.UTC().Format(time.RFC3339))
+}
+
+// failureRuns holds, by alias, the times of the upstream failures since the account's
+// last upstream response.
+type failureRuns struct {
+	mu   sync.Mutex
+	runs map[string][]time.Time
+}
+
+// fail notes a failure of alias at now and reports whether it completes a run:
+// upstreamFailureRun failures within upstreamFailureWindow with no upstream response
+// in between. A completed run starts over.
+func (f *failureRuns) fail(alias string, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.runs == nil {
+		f.runs = map[string][]time.Time{}
+	}
+	run := f.runs[alias]
+	for len(run) > 0 && now.Sub(run[0]) >= upstreamFailureWindow {
+		run = run[1:]
+	}
+	run = append(run, now)
+	if len(run) >= upstreamFailureRun {
+		delete(f.runs, alias)
+		return true
+	}
+	f.runs[alias] = run
+	return false
+}
+
+// answered ends alias's run: the upstream answered a request sent through the account.
+func (f *failureRuns) answered(alias string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.runs, alias)
 }
 
 // maxErrorBody bounds the part of a 401 body read to classify it.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -818,5 +819,243 @@ func TestRefusedRowsAreLimitedPerSource(t *testing.T) {
 	}
 	if rows := h.trafficRows(refusalRowsPerSource + 3); len(rows) != refusalRowsPerSource+3 || rows[len(rows)-1].result != "auth_failed" {
 		t.Fatalf("next window: rows=%+v", rows)
+	}
+}
+
+// flakyExit stands in for an account's exit whose mode a test switches: "ok" answers
+// 200 with a body naming the exit, "close" drops the connection without an answer,
+// "hold" answers nothing until the gateway gives up the request, and "upgrade"
+// answers 101.
+type flakyExit struct {
+	server *httptest.Server
+	mode   atomic.Value // string
+	seen   atomic.Int32
+	held   chan struct{}
+}
+
+// startFlakyExit starts a flaky exit in mode "ok".
+func startFlakyExit(t *testing.T) *flakyExit {
+	t.Helper()
+	e := &flakyExit{held: make(chan struct{}, 1)}
+	e.mode.Store("ok")
+	e.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		e.seen.Add(1)
+		// net/http cancels r's context when the gateway drops the connection only once
+		// the body has been read to its end.
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			return
+		}
+		switch e.mode.Load().(string) {
+		case "close":
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		case "hold":
+			select {
+			case e.held <- struct{}{}:
+			case <-r.Context().Done():
+				return
+			}
+			<-r.Context().Done()
+		case "upgrade":
+			w.Header().Set("Connection", "Upgrade")
+			w.Header().Set("Upgrade", "websocket")
+			w.WriteHeader(http.StatusSwitchingProtocols)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"exit":"A"}`)
+		}
+	}))
+	t.Cleanup(e.server.Close)
+	return e
+}
+
+// TestUpstreamFailuresPauseAccount checks that upstreamFailureRun requests in a row that
+// find an account's upstream unreachable pause the account for upstreamFailurePause:
+// the session's next request rebinds to the other account, and once the pause ends the
+// account is chosen again. Control arms: one failure fewer, failures the client caused
+// by leaving, and a run broken by an upstream response (a 101 the gateway rejects)
+// pause nothing, and the session's next request stays on the account.
+func TestUpstreamFailuresPauseAccount(t *testing.T) {
+	type step struct {
+		mode  string
+		count int
+	}
+	for _, arm := range []struct {
+		name   string
+		steps  []step
+		pauses bool
+	}{
+		{"run", []step{{"close", upstreamFailureRun}}, true},
+		{"one_short", []step{{"close", upstreamFailureRun - 1}}, false},
+		{"client_left", []step{{"hold", upstreamFailureRun}}, false},
+		{"answered_between", []step{{"close", upstreamFailureRun - 1}, {"upgrade", 1}, {"close", upstreamFailureRun - 1}}, false},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			h := newHarness(t)
+			exitA, exitB := startFlakyExit(t), startAccountExit(t, "B", 200)
+			exitAURL, err := url.Parse(exitA.server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.addWithExit("sample-a", "sk-ant-oat01-synthetic-token-a", exitAURL)
+			h.addWithExit("sample-b", "sk-ant-oat01-synthetic-token-b", exitB.url(t))
+			h.token, h.sessionID = h.issue()
+			server := h.gateway("http://127.0.0.1:1")
+			sent := 0
+			for _, s := range arm.steps {
+				exitA.mode.Store(s.mode)
+				for range s.count {
+					if s.mode == "hold" {
+						leave(t, h, server, exitA)
+					} else if got, _ := post(t, h, server, h.token, `{"messages":[]}`, "", ""); got != http.StatusBadGateway {
+						t.Fatalf("%s: status=%d", s.mode, got)
+					}
+					sent++
+					// The pause is written before the row; wait for the row so the next
+					// request sees it.
+					if rows := h.trafficRows(sent); len(rows) != sent || rows[sent-1].result != "upstream_failed" || rows[sent-1].alias != "sample-a" {
+						t.Fatalf("rows=%+v", rows)
+					}
+				}
+			}
+			exitA.mode.Store("ok")
+			paused := h.paused()
+			got, body := post(t, h, server, h.token, `{"messages":[]}`, "", "")
+			if !arm.pauses {
+				if len(paused) != 0 {
+					t.Fatalf("paused=%v", paused)
+				}
+				if alias, _, _ := h.binding(h.sessionID); got != 200 || body != `{"exit":"A"}` || alias != "sample-a" || len(exitB.seen()) != 0 {
+					t.Fatalf("next request: status=%d body=%q bound to %s, exit B saw %d", got, body, alias, len(exitB.seen()))
+				}
+				return
+			}
+			if len(paused) != 1 || paused["sample-a"] != upstreamFailedReason {
+				t.Fatalf("paused=%v", paused)
+			}
+			if alias, _, _ := h.binding(h.sessionID); got != 200 || body != `{"exit":"B"}` || alias != "sample-b" || exitA.seen.Load() != int32(sent) {
+				t.Fatalf("next request: status=%d body=%q bound to %s, exit A saw %d", got, body, alias, exitA.seen.Load())
+			}
+			h.clock = h.clock.Add(upstreamFailurePause - time.Millisecond)
+			if len(h.paused()) != 1 {
+				t.Fatal("pause ended early")
+			}
+			h.clock = h.clock.Add(time.Millisecond)
+			if len(h.paused()) != 0 {
+				t.Fatal("pause did not end")
+			}
+			h.token, h.sessionID = h.issue()
+			if got, body := post(t, h, server, h.token, `{"messages":[]}`, "", ""); got != 200 || body != `{"exit":"A"}` {
+				t.Fatalf("after the pause: status=%d body=%q", got, body)
+			}
+		})
+	}
+}
+
+// leave sends one inference request with the session credential and gives it up once
+// exit holds it, as a client that leaves does.
+func leave(t *testing.T, h *harness, server *httptest.Server, exit *flakyExit) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		select {
+		case <-exit.held:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	req, err := http.NewRequestWithContext(ctx, "POST", server.URL+"/v1/messages", strings.NewReader(`{"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := h.client().Do(req); err == nil {
+		_ = res.Body.Close()
+		t.Fatalf("a request the client left got status %d", res.StatusCode)
+	}
+}
+
+// TestGuardRefusalsPauseNothing checks that requests a provider's guard refuses, which
+// the gateway answers 502 without reaching the upstream, never count against the
+// account, however many arrive in a row; the next request reaches the upstream through
+// the same account.
+func TestGuardRefusalsPauseNothing(t *testing.T) {
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guarded := Claude
+	guarded.Guard = func(out *http.Request) error {
+		if out.Header.Get("X-Refuse") != "" {
+			return errors.New("refused by the guard")
+		}
+		return nil
+	}
+	h := newHarness(t, "sample-a", "sample-b")
+	rt := newRouter(h.store, h.accounts, target, guarded, accountTransport{})
+	rt.now = func() time.Time { return h.clock }
+	server := httptest.NewServer(rt)
+	t.Cleanup(server.Close)
+	for i := range upstreamFailureRun {
+		req, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/v1/messages", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Refuse", "1")
+		res, err := h.client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusBadGateway {
+			t.Fatalf("refused request: status=%d", res.StatusCode)
+		}
+		if rows := h.trafficRows(i + 1); len(rows) != i+1 || rows[i].result != "upstream_failed" {
+			t.Fatalf("rows=%+v", rows)
+		}
+	}
+	if paused := h.paused(); len(paused) != 0 {
+		t.Fatalf("paused=%v", paused)
+	}
+	if status := send(t, h, server, "POST", "/v1/messages", true); status != 200 || requests.Load() != 1 {
+		t.Fatalf("next request: status=%d upstream saw %d", status, requests.Load())
+	}
+	if alias, _, _ := h.binding(h.sessionID); alias != "sample-a" {
+		t.Fatalf("bound to %s", alias)
+	}
+}
+
+// TestFailureRunWindow checks that a run counts only failures within
+// upstreamFailureWindow: a failure that old drops out, so one more failure completes
+// no run, while the same failures a millisecond closer together complete one.
+func TestFailureRunWindow(t *testing.T) {
+	start := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	for _, arm := range []struct {
+		name  string
+		last  time.Duration
+		takes bool
+	}{
+		{"in_window", upstreamFailureWindow - time.Millisecond, true},
+		{"out_of_window", upstreamFailureWindow, false},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			var runs failureRuns
+			for range upstreamFailureRun - 1 {
+				if runs.fail("sample-a", start) {
+					t.Fatal("a run completed early")
+				}
+			}
+			if got := runs.fail("sample-a", start.Add(arm.last)); got != arm.takes {
+				t.Fatalf("failure after %v completed a run: %v", arm.last, got)
+			}
+		})
 	}
 }
