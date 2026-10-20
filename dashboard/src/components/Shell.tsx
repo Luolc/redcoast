@@ -25,7 +25,7 @@ import {
   type Route,
   type View,
 } from "../lib/route";
-import { healthState } from "../lib/stats";
+import { clientRows, healthState } from "../lib/stats";
 import type { Dashboard } from "../lib/types";
 import type { Theme } from "../lib/useData";
 import { providerName } from "../lib/words";
@@ -180,6 +180,14 @@ function NavItem({
   );
 }
 
+// The rows of Clients: one per machine and program, or per active machine
+// from a gateway that does not report programs.
+function clientCount(data: Dashboard): number {
+  return data.clients === undefined
+    ? data.machines.filter((m) => m.revoked_at === undefined).length
+    : clientRows(data).length;
+}
+
 export function Sidebar({
   data,
   route,
@@ -200,12 +208,7 @@ export function Sidebar({
           view="clients"
           current={v}
           icon={Terminal}
-          {...(data === null
-            ? {}
-            : {
-                count: data.machines.filter((m) => m.revoked_at === undefined)
-                  .length,
-              })}
+          {...(data === null ? {} : { count: clientCount(data) })}
         />
         <NavItem
           view="sessions"

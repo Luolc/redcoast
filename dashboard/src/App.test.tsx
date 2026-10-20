@@ -4,7 +4,7 @@ import { sampleDashboard } from "../fixtures/sample.ts";
 import { Page } from "./App";
 import { Sidebar } from "./components/Shell";
 import { HourBars, HourLines } from "./components/charts";
-import { formatCount, formatMs } from "./lib/format";
+import { formatCount, formatMs, formatPercent } from "./lib/format";
 import { durationSeries, hourSeries } from "./lib/stats";
 import type { Route } from "./lib/route";
 
@@ -233,4 +233,28 @@ it("labels a count axis in whole numbers when every hour is zero", () => {
     (m) => m[1],
   );
   expect(axis).toEqual(["0", "1", "2"]);
+});
+
+it("gives a client's share of all clients' requests on its page", () => {
+  const hourly = data.client_hourly ?? [];
+  const pi = hourly
+    .filter((h) => h.client_machine === "machine-a" && h.client === "pi")
+    .reduce((n, h) => n + h.requests, 0);
+  const all = hourly.reduce((n, h) => n + h.requests, 0);
+  expect(pi).toBeGreaterThan(0);
+  expect(page({ view: "client", arg: "machine-a/pi" })).toContain(
+    `${formatPercent(pi / all, 1)} of all clients`,
+  );
+});
+
+it("counts the rows of Clients in the sidebar", () => {
+  const count = (d: typeof data) =>
+    /href="#\/clients"[^]*?<span class="count">(\d+)</.exec(
+      renderToStaticMarkup(<Sidebar data={d} route={{ view: "overview" }} />),
+    )?.[1];
+  // The sample has four machine and program rows on two active machines.
+  expect(count(data)).toBe("4");
+  expect(count({ ...data, clients: undefined, client_hourly: undefined })).toBe(
+    "2",
+  );
 });

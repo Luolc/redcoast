@@ -39,8 +39,8 @@ export function Client({
         <Back />
         <PageHead title={title} sub={provider} />
         <Empty title={`No such client on ${provider}.`}>
-          It had no session in the last 7 days, or this gateway is older than
-          the page and does not report programs.
+          It had no session in the last 7 UTC days, or this gateway is older
+          than the page and does not report programs.
         </Empty>
       </>
     );
@@ -105,7 +105,7 @@ export function Client({
               </div>
               <p className="small muted">
                 {row.live} live {row.live === 1 ? "session" : "sessions"};{" "}
-                {row.sessions} created in the last 7 days.
+                {row.sessions} created in the last 7 UTC days.
               </p>
             </div>
           </div>

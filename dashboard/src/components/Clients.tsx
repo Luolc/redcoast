@@ -86,10 +86,10 @@ function ClientTable({ data }: { data: Dashboard }) {
   return (
     <Section
       title="Clients"
-      note="One row per client machine and program; sessions of the last 7 days, requests of the last 24 h"
+      note="One row per client machine and program; sessions created in the last 7 UTC days, today included; requests of the last 24 h"
     >
       {rows.length === 0 ? (
-        <Empty title="No sessions in the last 7 days." />
+        <Empty title="No sessions in the last 7 UTC days." />
       ) : (
         <div className="table-wrap">
           <table>
@@ -103,7 +103,7 @@ function ClientTable({ data }: { data: Dashboard }) {
                   Live sessions
                 </th>
                 <th scope="col" className="n">
-                  Sessions, 7 d
+                  Sessions, 7 UTC days
                 </th>
                 <th scope="col" className="n">
                   Requests, 24 h
