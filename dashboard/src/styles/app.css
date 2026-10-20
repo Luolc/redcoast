@@ -260,8 +260,9 @@ th.n {
 .content {
   padding: var(--t-space-6) var(--t-space-6) var(--t-space-12);
 }
+/* --t-width-main includes the side padding of .content. */
 .content > * {
-  max-width: var(--t-width-main);
+  max-width: calc(var(--t-width-main) - 2 * var(--t-space-6));
 }
 .content > .wide {
   max-width: none;
