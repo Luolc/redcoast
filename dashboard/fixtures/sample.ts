@@ -262,5 +262,37 @@ export function sampleDashboard(now: Date): Dashboard {
         reason: "unavailable",
       },
     ],
+    latency: {
+      hourly: [
+        {
+          hour: day(0),
+          requests: 405,
+          duration_p50_ms: 8_420,
+          duration_p95_ms: 41_900,
+        },
+      ],
+      accounts: [
+        {
+          alias: "sample-ab",
+          requests: 405,
+          duration_p50_ms: 8_420,
+          duration_p95_ms: 41_900,
+        },
+      ],
+      machines: [
+        {
+          client_machine: "local",
+          requests: 112,
+          duration_p50_ms: 6_150,
+          duration_p95_ms: 30_200,
+        },
+        {
+          client_machine: "machine-a",
+          requests: 293,
+          duration_p50_ms: 9_310,
+          duration_p95_ms: 44_800,
+        },
+      ],
+    },
   };
 }

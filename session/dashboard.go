@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"net/url"
 	"slices"
 	"time"
@@ -21,9 +22,9 @@ const (
 
 // failed is the SQL expression, over a traffic row aliased t, that is true when the row
 // counts as an error: a result other than ok, or a status of 400 or more (an inference
-// request the upstream answered with an error status is recorded with result ok). A CONNECT tunnel that the gateway's limits closed
-// (idle_timeout, max_duration) was open and carried traffic, so it is no error; an
-// inference stream they cut short is one.
+// request the upstream answered with an error status is recorded with result ok). A
+// CONNECT tunnel that the gateway's limits closed (idle_timeout, max_duration) was open
+// and carried traffic, so it is no error; an inference stream they cut short is one.
 const failed = `(t.result <> 'ok' AND NOT (t.kind = 'connect' AND t.result IN ('idle_timeout', 'max_duration'))
 	OR COALESCE(t.status, 0) >= 400)`
 
@@ -76,6 +77,7 @@ type Snapshot struct {
 	Destinations []Destination  `json:"destinations"`
 	Days         []DayCounts    `json:"days"`
 	History      []HistoryEntry `json:"history"`
+	Latency      LatencyView    `json:"latency"`
 }
 
 // AccountView is AccountStatus with the account's next plan change.
@@ -120,8 +122,10 @@ type ResultCount struct {
 }
 
 // UsagePoint is one hour's requests, bytes and errors of one account, client machine
-// and kind. Errors are the rows the failed expression matches; Limited, the rows with
-// result limited, are among them.
+// and kind. Errors are the rows the failed expression matches. Limited, among them, are
+// the rows with result limited: requests the gateway itself turned away because its
+// binding queue, the account's slots or the forward proxy's slots were full, not
+// upstream 429s, which are recorded with result ok and status 429.
 type UsagePoint struct {
 	Hour      time.Time `json:"hour"`
 	Alias     string    `json:"alias"`          // empty for requests carried on no account
@@ -141,6 +145,44 @@ type SourceCount struct {
 	Alias   string `json:"alias"`          // empty for requests carried on no account
 	Machine string `json:"client_machine"` // empty for requests of no session
 	Error   bool   `json:"error"`
+}
+
+// Latency is the spread of the durations of the inference requests in one group that
+// are no error (see failed), in milliseconds. A duration runs from the request's
+// arrival until its response finished streaming, so it is the whole request, not the
+// time to its first byte. CONNECT tunnels are left out: a tunnel's duration is how long
+// it stayed open. Percentiles are nearest-rank: the smallest duration with at least
+// that share of the group at or below it.
+type Latency struct {
+	Requests int   `json:"requests"`
+	P50      int64 `json:"duration_p50_ms"`
+	P95      int64 `json:"duration_p95_ms"`
+}
+
+// LatencyView is the latency of the last dashboardHours hours by hour, by account and
+// by client machine. A group without a request has no row.
+type LatencyView struct {
+	Hourly   []HourLatency    `json:"hourly"`
+	Accounts []AccountLatency `json:"accounts"`
+	Machines []MachineLatency `json:"machines"`
+}
+
+// HourLatency is the latency of one hour's requests, of every account and machine.
+type HourLatency struct {
+	Hour time.Time `json:"hour"`
+	Latency
+}
+
+// AccountLatency is the latency of one account's requests over the whole window.
+type AccountLatency struct {
+	Alias string `json:"alias"`
+	Latency
+}
+
+// MachineLatency is the latency of one client machine's requests over the whole window.
+type MachineLatency struct {
+	Machine string `json:"client_machine"`
+	Latency
 }
 
 // Destination is one CONNECT target as one account's session reached it on one route.
@@ -265,6 +307,9 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if out.Latency, err = r.latency(ctx, since); err != nil {
+		return Snapshot{}, err
+	}
 	dayStart := status.At.Truncate(24*time.Hour).AddDate(0, 0, 1-dashboardDays).UnixMilli()
 	err = collect(ctx, db, &out.Destinations, func(rows *sql.Rows) (Destination, error) {
 		var v Destination
@@ -295,6 +340,56 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		return Snapshot{}, err
 	}
 	return out, nil
+}
+
+// latency returns the latency of the inference requests since since that are no error.
+// SQLite has no percentile function, so the window's durations are read into memory,
+// one row per request, and sorted.
+func (r *Reader) latency(ctx context.Context, since int64) (LatencyView, error) {
+	type row struct {
+		hour           int64
+		alias, machine string
+		duration       int64
+	}
+	var rows []row
+	err := collect(ctx, r.store.db, &rows, func(rows *sql.Rows) (row, error) {
+		var v row
+		return v, rows.Scan(&v.hour, &v.alias, &v.machine, &v.duration)
+	}, `SELECT t.ts / 3600000 * 3600000, COALESCE(t.alias, ''), COALESCE(s.client_machine, ''), t.duration_ms
+		FROM traffic t LEFT JOIN sessions s ON s.id = t.session_id WHERE t.ts >= ? AND t.kind = 'inference' AND NOT `+failed, since)
+	if err != nil {
+		return LatencyView{}, err
+	}
+	hours, accounts, machines := map[int64][]int64{}, map[string][]int64{}, map[string][]int64{}
+	for _, v := range rows {
+		hours[v.hour] = append(hours[v.hour], v.duration)
+		accounts[v.alias] = append(accounts[v.alias], v.duration)
+		machines[v.machine] = append(machines[v.machine], v.duration)
+	}
+	out := LatencyView{Hourly: []HourLatency{}, Accounts: []AccountLatency{}, Machines: []MachineLatency{}}
+	for _, h := range slices.Sorted(maps.Keys(hours)) {
+		out.Hourly = append(out.Hourly, HourLatency{Hour: fromMillis(h), Latency: spread(hours[h])})
+	}
+	for _, a := range slices.Sorted(maps.Keys(accounts)) {
+		out.Accounts = append(out.Accounts, AccountLatency{Alias: a, Latency: spread(accounts[a])})
+	}
+	for _, m := range slices.Sorted(maps.Keys(machines)) {
+		out.Machines = append(out.Machines, MachineLatency{Machine: m, Latency: spread(machines[m])})
+	}
+	return out, nil
+}
+
+// spread returns the count and the nearest-rank 50th and 95th percentiles of the
+// durations, which it sorts in place. There is at least one duration.
+func spread(durations []int64) Latency {
+	slices.Sort(durations)
+	return Latency{Requests: len(durations), P50: percentile(durations, 50), P95: percentile(durations, 95)}
+}
+
+// percentile returns the nearest-rank pth percentile of sorted, which is not empty: the
+// element at rank ceil(p/100 * n), counting from 1.
+func percentile(sorted []int64, p int) int64 {
+	return sorted[(p*len(sorted)+99)/100-1]
 }
 
 // machines returns the registered machines with their live sessions and latest request.
