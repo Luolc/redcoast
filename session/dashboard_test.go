@@ -425,3 +425,35 @@ func TestDashboardTokens(t *testing.T) {
 		t.Fatalf("sample-b quota history = %+v", b.QuotaHistory)
 	}
 }
+
+// TestDashboardScanFails checks that when one of the two scans Snapshot runs at once
+// fails, Snapshot returns its error once both have stopped, with no connection left in
+// use. Dropping a column fails the scan that reads it: model only the hourly window,
+// route only the CONNECT rows.
+func TestDashboardScanFails(t *testing.T) {
+	for _, column := range []string{"model", "route"} {
+		t.Run(column, func(t *testing.T) {
+			ctx := context.Background()
+			c := newClock()
+			store, path := open(t, c)
+			for range 200 {
+				for _, kind := range []string{"inference", "connect"} {
+					if err := store.RecordTraffic(ctx, Traffic{At: c.Now().Add(-time.Hour), Kind: kind, Host: "api.example.com", Port: 443, Result: "ok"}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if _, err := store.db.Exec("ALTER TABLE traffic DROP COLUMN " + column); err != nil {
+				t.Fatal(err)
+			}
+			reader := openReader(t, path, c)
+			_, err := reader.Snapshot(ctx, accounts)
+			if err == nil || !strings.Contains(err.Error(), "no such column: "+column) {
+				t.Fatalf("Snapshot error = %v", err)
+			}
+			if inUse := reader.store.db.Stats().InUse; inUse != 0 {
+				t.Fatalf("%d connections still in use", inUse)
+			}
+		})
+	}
+}
