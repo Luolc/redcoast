@@ -2,9 +2,10 @@
 # two client shims, the dashboard page and SHA256SUMS over all five to a
 # GitHub Release when a v* tag is pushed (cmd/redcoast/README.md and
 # cmd/redcoast-client/README.md say how they are installed). Pushing the tag
-# is the release itself, so only the maintainer does it. The builds are
-# reproducible: the same commit, Go toolchain and Node and pnpm versions give
-# the same SHA-256. Only a commit on main whose CI passed there is released.
+# is the release itself; who may push it is in L13 and L18 of AGENTS.md. The
+# builds are reproducible: the same commit, Go toolchain and Node and pnpm
+# versions give the same SHA-256. Only a commit on main whose CI passed there
+# is released.
 
 name: Release
 
