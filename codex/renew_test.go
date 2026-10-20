@@ -280,7 +280,7 @@ func TestUnauthorizedRenewal(t *testing.T) {
 			}
 			if test.reason == claude.NeedsImportReason {
 				res := httptest.NewRecorder()
-				claude.NewEgress(g.accounts, g.store).HealthHandler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/health", nil))
+				claude.NewEgress(g.accounts, g.store, codexUpstream).HealthHandler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/health", nil))
 				if !strings.Contains(res.Body.String(), "sample-a: paused (needs_reimport)") {
 					t.Fatalf("health %s", res.Body)
 				}
@@ -639,7 +639,7 @@ func TestDashboardShowsCodexState(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	egress := claude.NewEgress(g.accounts, g.store)
+	egress := claude.NewEgress(g.accounts, g.store, codexUpstream)
 	egress.Problems = g.provider.Problems
 	dashboard := claude.NewDashboard(egress, claude.DashboardConfig{Reader: reader, Store: g.store, DBPath: filepath.Join(g.dir, "codex.sqlite")})
 	type view struct {

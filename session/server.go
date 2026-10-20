@@ -28,6 +28,9 @@ type Server struct {
 	entrypoints Entrypoints
 	candidates  func() []string // the accounts the inventory allows, as Bind takes them
 	issuing     func()          // called when an issue request starts; set only by tests
+
+	// SetAside names the candidates set aside, as Bind takes them; nil names none.
+	SetAside func() []string
 }
 
 // NewServer returns the session interface over store. candidates lists the accounts a
@@ -144,7 +147,11 @@ func (srv *Server) issue(w http.ResponseWriter, r *http.Request) {
 		_, err = srv.store.AuthenticateMachine(r.Context(), credential)
 	}
 	if err == nil {
-		err = srv.store.Available(r.Context(), srv.candidates())
+		var setAside []string
+		if srv.SetAside != nil {
+			setAside = srv.SetAside()
+		}
+		err = srv.store.Available(r.Context(), srv.candidates(), setAside...)
 	}
 	var issued Issued
 	if err == nil {

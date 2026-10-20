@@ -415,3 +415,57 @@ func TestEndPause(t *testing.T) {
 		t.Fatalf("got %q %v, want sample-a", b.Alias, err)
 	}
 }
+
+// TestSetAside checks candidates the caller sets aside: Bind and Available leave them
+// out as they leave out an account without a plan, so a session bound to one rebinds,
+// and when only quota-limited accounts are left the answer is ErrNoAccount, not
+// QuotaExhausted. Control arms: without the set-aside the same session stays on
+// sample-a, and two quota-paused accounts give QuotaExhausted.
+func TestSetAside(t *testing.T) {
+	t.Run("rebinds", func(t *testing.T) {
+		c := newClock()
+		store, _ := open(t, c)
+		token, b, err := newSession(t, store)
+		if err != nil || b.Alias != "sample-a" {
+			t.Fatalf("bound to %q, %v; want sample-a", b.Alias, err)
+		}
+		if b, err := store.Bind(t.Context(), token, accounts); err != nil || b.Alias != "sample-a" {
+			t.Fatalf("control arm: bound to %q, %v", b.Alias, err)
+		}
+		b, err = store.Bind(t.Context(), token, accounts, "sample-a")
+		if err != nil || b.Alias != "sample-b" || b.Reason != "unavailable" {
+			t.Fatalf("bound to %q (%s), %v; want sample-b (unavailable)", b.Alias, b.Reason, err)
+		}
+	})
+	for _, test := range []struct {
+		name      string
+		pauseA    bool
+		setAside  []string
+		exhausted bool
+	}{
+		{"quota_paused_both", true, nil, true},
+		{"set_aside_and_quota_paused", false, []string{"sample-a"}, false},
+		{"set_aside_while_quota_paused", true, []string{"sample-a"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c := newClock()
+			store, _ := open(t, c)
+			if test.pauseA {
+				pause(t, store, "sample-a", c.Now().Add(20*time.Minute), QuotaPauseReason)
+			}
+			pause(t, store, "sample-b", c.Now().Add(5*time.Minute), QuotaPauseReason)
+			issued, err := store.Issue(t.Context(), "machine-a", LocalSource, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, bindErr := store.Bind(t.Context(), issued.Token, accounts, test.setAside...)
+			availableErr := store.Available(t.Context(), accounts, test.setAside...)
+			for _, err := range []error{bindErr, availableErr} {
+				var exhausted *QuotaExhausted
+				if errors.As(err, &exhausted) != test.exhausted || errors.Is(err, ErrNoAccount) == test.exhausted {
+					t.Fatalf("Bind %v, Available %v; want QuotaExhausted %t", bindErr, availableErr, test.exhausted)
+				}
+			}
+		})
+	}
+}

@@ -211,14 +211,25 @@ func (a *Admin) serveHandoff(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"handoff": "ready"})
 }
 
-// serveStatus answers with the store's status for the current accounts.
+// serveStatus answers with the store's status for the current accounts, and the ones
+// the egress check set aside with its reason, as the health endpoint names them.
 func (a *Admin) serveStatus(w http.ResponseWriter, r *http.Request) {
-	status, err := a.store.Status(r.Context(), a.accounts.Candidates())
+	set := a.accounts.set.Load()
+	status, err := a.store.Status(r.Context(), set.Candidates())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "session store unavailable"})
 		return
 	}
-	writeJSON(w, http.StatusOK, status)
+	var setAside []string
+	for _, account := range set.sorted() {
+		if reason := account.setAside.Load(); reason != nil {
+			setAside = append(setAside, account.alias+": "+*reason)
+		}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		session.Status
+		SetAside []string `json:"set_aside,omitempty"`
+	}{status, setAside})
 }
 
 // servePause pauses an account of the current set; sessions bound to it rebind on

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -357,6 +359,44 @@ func TestProviderCommand(t *testing.T) {
 	for _, arguments := range [][]string{nil, {"claude"}, {"serve", "--config", "x"}, {"--config", "x"}, {"claude", "--config", "x"}, {"openai", "serve"}, {"codex"}} {
 		if _, _, err := providerCommand(arguments); !errors.Is(err, errUsage) {
 			t.Errorf("%q: got %v, want the usage", arguments, err)
+		}
+	}
+}
+
+// syntheticAccounts is a fixed account set for the session interface.
+type syntheticAccounts struct{ candidates, setAside []string }
+
+func (a syntheticAccounts) Candidates() []string { return a.candidates }
+func (a syntheticAccounts) SetAside() []string   { return a.setAside }
+
+// TestSessionServerLeavesOutSetAside checks the session interface the gateway serves:
+// with its only account set aside by the egress check, a launcher is refused with
+// no_account before a session is issued. Control arm: the same account not set aside
+// gets a session.
+func TestSessionServerLeavesOutSetAside(t *testing.T) {
+	store, err := session.Open(t.Context(), filepath.Join(t.TempDir(), "gateway.sqlite"), session.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetPlanSchedule(t.Context(), session.PlanPeriod{Alias: "sample-a", Plan: "pro", From: time.UnixMilli(0), Source: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{listen: "127.0.0.1:7801", forwardListen: "127.0.0.1:7802"}
+	for _, test := range []struct {
+		setAside []string
+		status   int
+	}{
+		{[]string{"sample-a"}, http.StatusServiceUnavailable},
+		{nil, http.StatusCreated},
+	} {
+		server := newSessionServer(cfg, store, syntheticAccounts{candidates: []string{"sample-a"}, setAside: test.setAside})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"client_machine":"machine-a"}`)))
+		// The body is not printed: an issued session's credential is in it.
+		refused := strings.Contains(recorder.Body.String(), `"no_account"`)
+		if recorder.Code != test.status || refused != (test.setAside != nil) {
+			t.Fatalf("set aside %v: status %d, no_account %t; want %d", test.setAside, recorder.Code, refused, test.status)
 		}
 	}
 }
