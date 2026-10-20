@@ -296,10 +296,7 @@ export function sampleDashboard(now: Date): Dashboard {
 // table of the sample adds up to the others.
 function traffic(
   now: Date,
-): Pick<
-  Dashboard,
-  "usage" | "result_sources" | "hourly" | "results" | "latency"
-> {
+): Pick<Dashboard, "usage" | "result_sources" | "latency"> {
   const last = Math.floor(now.getTime() / 3_600_000) * 3_600_000;
   const sources = [
     { alias: "sample-ab", machine: "machine-a", kind: "inference", base: 220 },
@@ -370,38 +367,6 @@ function traffic(
       error: !(result === "ok" && Number(status) < 400),
     };
   });
-  const results = new Map<string, Dashboard["results"][number]>();
-  for (const r of resultSources) {
-    const k = `${r.kind}\t${r.result}\t${String(r.status)}`;
-    const into = results.get(k);
-    if (into === undefined)
-      results.set(k, {
-        kind: r.kind,
-        result: r.result,
-        status: r.status,
-        count: r.count,
-      });
-    else into.count += r.count;
-  }
-  const hourly = new Map<string, Dashboard["hourly"][number]>();
-  for (const u of usage) {
-    const k = `${u.hour}\t${u.alias}\t${u.kind}`;
-    const into = hourly.get(k);
-    if (into === undefined)
-      hourly.set(k, {
-        hour: u.hour,
-        alias: u.alias,
-        kind: u.kind,
-        requests: u.requests,
-        bytes_up: u.bytes_up,
-        bytes_down: u.bytes_down,
-      });
-    else {
-      into.requests += u.requests;
-      into.bytes_up += u.bytes_up;
-      into.bytes_down += u.bytes_down;
-    }
-  }
   // Durations count the inference requests that are no error, as the
   // gateway's do; their percentiles are made up per group.
   const answered = (keep: (u: (typeof usage)[number]) => boolean) =>
@@ -445,8 +410,6 @@ function traffic(
     latency,
     usage,
     result_sources: resultSources,
-    hourly: [...hourly.values()],
-    results: [...results.values()],
   };
 }
 
