@@ -1167,5 +1167,9 @@ tbody tr.link {
 .crumbs a:hover {
   color: var(--t-accent);
 }
-.section-head h2 { flex: none; }
-.client-name a:hover { color: var(--t-accent); }
+.section-head h2 {
+  flex: none;
+}
+.client-name a:hover {
+  color: var(--t-accent);
+}
