@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +29,7 @@ type refreshExit struct {
 	received    []*http.Request
 	bodies      []string
 	shared      *overlap // when set, each request is held a moment and counted in it
+	onRequest   func()   // when set, called with each request before it is answered
 }
 
 // overlap counts the requests that a set of exits serve at the same time.
@@ -56,8 +59,11 @@ func startRefreshExit(t *testing.T, clock time.Time) *refreshExit {
 		body, _ := io.ReadAll(r.Body)
 		e.mu.Lock()
 		e.received, e.bodies = append(e.received, r), append(e.bodies, string(body))
-		status, utilization, shared := e.status, e.utilization, e.shared
+		status, utilization, shared, onRequest := e.status, e.utilization, e.shared, e.onRequest
 		e.mu.Unlock()
+		if onRequest != nil {
+			onRequest()
+		}
 		if shared != nil {
 			shared.enter()
 			defer shared.leave()
@@ -274,5 +280,115 @@ func TestRefreshAll(t *testing.T) {
 	}
 	if paused := h.paused(); len(paused) != 2 || paused["sample-d"] != "upstream_401" || paused["sample-e"] != EgressMismatchReason {
 		t.Fatalf("paused %v", paused)
+	}
+}
+
+// TestQuotaRecheck checks one round of the quota recheck over accounts that each have
+// their own exit: it refreshes an account whose reading at or over soft has passed its
+// reset, and one paused for quota whose rejected reading has, ending that pause; it
+// sends nothing for an account over soft whose reset is still ahead or unknown, one
+// under soft whose reset passed, or one paused for another reason, and logs nothing
+// for the last.
+func TestQuotaRecheck(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	var logged strings.Builder
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&logged)
+	past, ahead := h.clock.Add(-time.Minute), h.clock.Add(time.Hour)
+	stored := map[string]session.Reading{
+		"sample-a": {Window: session.Window5h, Utilization: 0.92, ResetAt: past},
+		"sample-b": {Window: session.Window5h, Utilization: 0.97, ResetAt: ahead},
+		"sample-c": {Window: session.Window5h, Utilization: 0.5, ResetAt: past},
+		"sample-d": {Window: session.Window5h, Utilization: 0.97, ResetAt: past},
+		"sample-e": {Window: session.Window7d, Utilization: 0.5, Status: "rejected", ResetAt: past},
+		"sample-f": {Window: session.Window5h, Utilization: 0.97, ResetAt: past},
+		"sample-g": {Window: session.Window5h, Utilization: 0.97},
+	}
+	exits := map[string]*refreshExit{}
+	for _, alias := range []string{"sample-a", "sample-b", "sample-c", "sample-d", "sample-e", "sample-f", "sample-g"} {
+		exit := startRefreshExit(t, h.clock)
+		exit.answer(200, "0.1")
+		exitURL, err := url.Parse(exit.server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.addWithExit(alias, "sk-ant-oat01-synthetic-token-"+alias, exitURL)
+		exits[alias] = exit
+		reading := stored[alias]
+		reading.Source = "response"
+		if err := h.store.RecordQuota(ctx, alias, []session.Reading{reading}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for alias, reason := range map[string]string{"sample-d": "upstream_401", "sample-e": session.QuotaPauseReason, "sample-f": "manual"} {
+		if err := h.store.Pause(ctx, alias, ahead, reason); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{}).recheckQuota(ctx)
+
+	for alias, sent := range map[string]int{"sample-a": 1, "sample-b": 0, "sample-c": 0, "sample-d": 0, "sample-e": 1, "sample-f": 0, "sample-g": 0} {
+		if exits[alias].requests() != sent {
+			t.Errorf("exit of %s received %d requests, want %d", alias, exits[alias].requests(), sent)
+		}
+		window := stored[alias].Window
+		q, err := h.store.LatestQuota(ctx, alias)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := map[int]string{0: "response", 1: "refresh"}[sent]; q[window].Source != want {
+			t.Errorf("%s: %s reading %+v, want source %s", alias, window, q[window], want)
+		}
+	}
+	if paused := h.paused(); len(paused) != 2 || paused["sample-d"] != "upstream_401" || paused["sample-f"] != "manual" {
+		t.Errorf("paused %v", paused)
+	}
+	for _, alias := range []string{"sample-d", "sample-f"} {
+		if strings.Contains(logged.String(), alias) {
+			t.Errorf("log names %s, paused for another reason:\n%s", alias, logged.String())
+		}
+	}
+}
+
+// TestQuotaRecheckStopsOnShutdown checks that a round of the quota recheck whose context
+// ends, before it starts or during a refresh, sends nothing more and logs nothing for
+// the accounts it did not reach.
+func TestQuotaRecheckStopsOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	h := newHarness(t)
+	var logged strings.Builder
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&logged)
+	exits := map[string]*refreshExit{}
+	for _, alias := range []string{"sample-a", "sample-b"} {
+		exit := startRefreshExit(t, h.clock)
+		exit.answer(200, "0.1")
+		exitURL, err := url.Parse(exit.server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.addWithExit(alias, "sk-ant-oat01-synthetic-token-"+alias, exitURL)
+		exits[alias] = exit
+		if err := h.store.RecordQuota(ctx, alias, []session.Reading{{Window: session.Window5h, Utilization: 0.97, ResetAt: h.clock.Add(-time.Minute), Source: "response"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rt := h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{})
+
+	canceled, stop := context.WithCancel(ctx)
+	stop()
+	rt.recheckQuota(canceled)
+	if exits["sample-a"].requests() != 0 || logged.Len() != 0 {
+		t.Fatalf("round canceled before it started: exit of sample-a received %d requests, log:\n%s", exits["sample-a"].requests(), logged.String())
+	}
+
+	exits["sample-a"].mu.Lock()
+	exits["sample-a"].onRequest = cancel
+	exits["sample-a"].mu.Unlock()
+	rt.recheckQuota(ctx)
+	if exits["sample-a"].requests() != 1 || exits["sample-b"].requests() != 0 || strings.Contains(logged.String(), "sample-b") {
+		t.Fatalf("round canceled during sample-a: exits received %d and %d requests, log:\n%s", exits["sample-a"].requests(), exits["sample-b"].requests(), logged.String())
 	}
 }
