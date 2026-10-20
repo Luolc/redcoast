@@ -603,3 +603,50 @@ type claudeHealth struct {
 	Status  string   `json:"status"`
 	Reasons []string `json:"reasons"`
 }
+
+// TestUsageRecorded forwards a synthetic Responses API stream and reads its model and
+// token counts back from the dashboard's snapshot: the model from response.created, the
+// counts from response.completed; the cached count is not taken apart. Control arm: a
+// stream that ends without response.completed reports no counts and adds nothing to
+// the model usage.
+func TestUsageRecorded(t *testing.T) {
+	g := newGateway(t)
+	stream := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_synthetic","model":"gpt-sample-1","status":"in_progress"}}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","delta":"synthetic"}` + "\n\n"
+	g.exit.setAnswer(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, stream)
+	})
+	if status, body := g.do(http.MethodPost, "/backend-api/codex/responses", "{}", nil); status != http.StatusOK || body != stream {
+		t.Fatalf("status %d, body changed: %t", status, body != stream)
+	}
+	stream += "event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_synthetic","model":"gpt-sample-1","usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":100},"output_tokens":7,"total_tokens":127}}}` + "\n\n"
+	if status, body := g.do(http.MethodPost, "/backend-api/codex/responses", "{}", nil); status != http.StatusOK || body != stream {
+		t.Fatalf("status %d, body changed: %t", status, body != stream)
+	}
+	reader, err := session.OpenReadOnly(filepath.Join(g.dir, "codex.sqlite"), session.Config{}, claude.DefaultLimits.MaxTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	// A row is written after the response reached the client: wait for both.
+	var snap session.Snapshot
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if snap, err = reader.Snapshot(t.Context(), []string{"sample-a"}); err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Usage) == 1 && snap.Usage[0].Requests == 2 || time.Now().After(deadline) {
+			break
+		}
+	}
+	want := session.Tokens{InputTokens: 120, OutputTokens: 7}
+	if len(snap.ModelUsage) != 1 || snap.ModelUsage[0].Model != "gpt-sample-1" || snap.ModelUsage[0].Alias != "sample-a" || snap.ModelUsage[0].Requests != 1 || snap.ModelUsage[0].Tokens != want {
+		t.Fatalf("model usage %+v", snap.ModelUsage)
+	}
+	if len(snap.Usage) != 1 || snap.Usage[0].Requests != 2 || snap.Usage[0].Tokens != want {
+		t.Fatalf("usage %+v", snap.Usage)
+	}
+}

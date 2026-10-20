@@ -28,6 +28,11 @@ const (
 const failed = `(t.result <> 'ok' AND NOT (t.kind = 'connect' AND t.result IN ('idle_timeout', 'max_duration'))
 	OR COALESCE(t.status, 0) >= 400)`
 
+// tokenSums is the SQL list, over traffic rows aliased t, of the sums of the four token
+// counts, zero for a group in which no row reported usage.
+const tokenSums = `COALESCE(SUM(t.input_tokens), 0), COALESCE(SUM(t.output_tokens), 0),
+	COALESCE(SUM(t.cache_read_tokens), 0), COALESCE(SUM(t.cache_creation_tokens), 0)`
+
 // Reader reads the dashboard's snapshot over a connection SQLite opens read-only, with
 // query_only on as well, so no statement it runs can write.
 type Reader struct {
@@ -73,6 +78,7 @@ type Snapshot struct {
 	Hourly       []HourTraffic  `json:"hourly"`
 	Results      []ResultCount  `json:"results"`
 	Usage        []UsagePoint   `json:"usage"`          // the hourly figures by account and client machine
+	ModelUsage   []ModelUsage   `json:"model_usage"`    // the hourly tokens by account and model
 	SourceCounts []SourceCount  `json:"result_sources"` // results by account and client machine
 	Destinations []Destination  `json:"destinations"`
 	Days         []DayCounts    `json:"days"`
@@ -80,10 +86,12 @@ type Snapshot struct {
 	Latency      LatencyView    `json:"latency"`
 }
 
-// AccountView is AccountStatus with the account's next plan change.
+// AccountView is AccountStatus with the account's next plan change and its quota
+// history over the length of each window.
 type AccountView struct {
 	AccountStatus
-	NextPlan *PlanStatus `json:"next_plan"` // the first period starting after now; null when none
+	NextPlan     *PlanStatus             `json:"next_plan"`     // the first period starting after now; null when none
+	QuotaHistory map[string][]QuotaPoint `json:"quota_history"` // by window, oldest first
 }
 
 // MachineView is a registered client machine with its live sessions and the latest
@@ -121,11 +129,13 @@ type ResultCount struct {
 	Count  int    `json:"count"`
 }
 
-// UsagePoint is one hour's requests, bytes and errors of one account, client machine
-// and kind. Errors are the rows the failed expression matches. Limited, among them, are
-// the rows with result limited: requests the gateway itself turned away because its
-// binding queue, the account's slots or the forward proxy's slots were full, not
-// upstream 429s, which are recorded with result ok and status 429.
+// UsagePoint is one hour's requests, bytes, errors and tokens of one account, client
+// machine and kind. Errors are the rows the failed expression matches. Limited, among
+// them, are the rows with result limited: requests the gateway itself turned away
+// because its binding queue, the account's slots or the forward proxy's slots were
+// full, not upstream 429s, which are recorded with result ok and status 429. The tokens
+// are the sums of what the responses reported (see Usage), errors included: a stream
+// cut short still used the tokens it reported.
 type UsagePoint struct {
 	Hour      time.Time `json:"hour"`
 	Alias     string    `json:"alias"`          // empty for requests carried on no account
@@ -136,6 +146,25 @@ type UsagePoint struct {
 	BytesDown int64     `json:"bytes_down"`
 	Errors    int       `json:"errors"`
 	Limited   int       `json:"limited"`
+	Tokens
+}
+
+// Tokens are sums of reported token counts.
+type Tokens struct {
+	InputTokens   int64 `json:"input_tokens"`
+	OutputTokens  int64 `json:"output_tokens"`
+	CacheRead     int64 `json:"cache_read_input_tokens"`
+	CacheCreation int64 `json:"cache_creation_input_tokens"`
+}
+
+// ModelUsage is one hour's tokens of one account and model, over the requests whose
+// response reported usage.
+type ModelUsage struct {
+	Hour     time.Time `json:"hour"`
+	Alias    string    `json:"alias"` // empty for requests carried on no account
+	Model    string    `json:"model"` // empty when the response named no model
+	Requests int       `json:"requests"`
+	Tokens
 }
 
 // SourceCount is a ResultCount of one account and client machine, with whether that
@@ -225,13 +254,16 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 	}
 	now := status.At.UnixMilli()
 	out := Snapshot{At: status.At, Soft: status.Soft, Hard: status.Hard, Accounts: []AccountView{}, Machines: []MachineView{}, Sessions: []LiveSession{}, Hourly: []HourTraffic{},
-		Results: []ResultCount{}, Usage: []UsagePoint{}, SourceCounts: []SourceCount{}, Destinations: []Destination{}, History: []HistoryEntry{}}
+		Results: []ResultCount{}, Usage: []UsagePoint{}, ModelUsage: []ModelUsage{}, SourceCounts: []SourceCount{}, Destinations: []Destination{}, History: []HistoryEntry{}}
 	db := r.store.db
 	if err := db.QueryRowContext(ctx, "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()").Scan(&out.DBBytes); err != nil {
 		return Snapshot{}, fmt.Errorf("database size: %v", err)
 	}
 	for _, a := range status.Accounts {
 		view := AccountView{AccountStatus: a}
+		if view.QuotaHistory, err = r.store.QuotaHistory(ctx, a.Alias); err != nil {
+			return Snapshot{}, err
+		}
 		var next PlanStatus
 		var from int64
 		err := db.QueryRowContext(ctx, "SELECT plan, effective_from FROM plan_schedule WHERE alias = ? AND effective_from > ? ORDER BY effective_from LIMIT 1", a.Alias, now).Scan(&next.Name, &from)
@@ -288,13 +320,25 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 	err = collect(ctx, db, &out.Usage, func(rows *sql.Rows) (UsagePoint, error) {
 		var v UsagePoint
 		var hour int64
-		err := rows.Scan(&hour, &v.Alias, &v.Machine, &v.Kind, &v.Requests, &v.BytesUp, &v.BytesDown, &v.Errors, &v.Limited)
+		err := rows.Scan(&hour, &v.Alias, &v.Machine, &v.Kind, &v.Requests, &v.BytesUp, &v.BytesDown, &v.Errors, &v.Limited,
+			&v.InputTokens, &v.OutputTokens, &v.CacheRead, &v.CacheCreation)
 		v.Hour = fromMillis(hour)
 		return v, err
 	}, `SELECT t.ts / 3600000 * 3600000 AS hour, COALESCE(t.alias, '') AS a, COALESCE(s.client_machine, '') AS m, t.kind,
-		COUNT(*), SUM(t.bytes_up), SUM(t.bytes_down), SUM(`+failed+`), SUM(t.result = 'limited')
+		COUNT(*), SUM(t.bytes_up), SUM(t.bytes_down), SUM(`+failed+`), SUM(t.result = 'limited'), `+tokenSums+`
 		FROM traffic t LEFT JOIN sessions s ON s.id = t.session_id WHERE t.ts >= ?
 		GROUP BY hour, a, m, t.kind ORDER BY hour, a, m, t.kind`, since)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	err = collect(ctx, db, &out.ModelUsage, func(rows *sql.Rows) (ModelUsage, error) {
+		var v ModelUsage
+		var hour int64
+		err := rows.Scan(&hour, &v.Alias, &v.Model, &v.Requests, &v.InputTokens, &v.OutputTokens, &v.CacheRead, &v.CacheCreation)
+		v.Hour = fromMillis(hour)
+		return v, err
+	}, `SELECT t.ts / 3600000 * 3600000 AS hour, COALESCE(t.alias, '') AS a, COALESCE(t.model, '') AS md, COUNT(*), `+tokenSums+`
+		FROM traffic t WHERE t.ts >= ? AND t.input_tokens IS NOT NULL GROUP BY hour, a, md ORDER BY hour, a, md`, since)
 	if err != nil {
 		return Snapshot{}, err
 	}

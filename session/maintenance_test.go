@@ -158,3 +158,24 @@ func TestRunRetentionKeepsLastRun(t *testing.T) {
 		t.Fatalf("last run = %+v", run)
 	}
 }
+
+// TestPruneQuotaHistory deletes the quota history readings older than the traffic
+// retention and keeps the one at the cutoff.
+func TestPruneQuotaHistory(t *testing.T) {
+	c := newClock()
+	store, _ := open(t, c)
+	ctx := context.Background()
+	cutoff := c.Now().Add(-DefaultTrafficRetention)
+	for _, at := range []time.Time{cutoff.Add(-time.Millisecond), cutoff, c.Now()} {
+		if _, err := store.db.Exec("INSERT INTO quota_history (alias, window, at, utilization) VALUES ('sample-a', '5h', ?, 0.5)", at.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pruned, err := store.Prune(ctx, Retention{Traffic: DefaultTrafficRetention, Sessions: DefaultSessionRetention})
+	if err != nil || pruned != (Pruned{QuotaHistory: 1}) {
+		t.Fatalf("pruned=%+v err=%v", pruned, err)
+	}
+	if got := count(t, store, "SELECT COUNT(*) FROM quota_history WHERE at >= ?", cutoff.UnixMilli()); got != 2 || count(t, store, "SELECT COUNT(*) FROM quota_history") != 2 {
+		t.Fatalf("readings left = %d, want the two within retention", got)
+	}
+}

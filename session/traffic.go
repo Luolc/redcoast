@@ -25,15 +25,38 @@ type Traffic struct {
 	ClaudeSession string // x-claude-code-session-id of an inference request, if any
 	ClaudeAgent   string // x-claude-code-agent-id of an inference request, if any
 	Request       string // method and path of a request the reverse proxy refused to forward; empty otherwise
+	Usage         *Usage // what the response of an inference request reported of its model and tokens; nil when nothing
+}
+
+// Usage is the model and token counts an upstream response reported, as the provider
+// counts them: Claude's input tokens leave out the ones read from or written to its
+// prompt cache, which it counts apart; Codex counts no cache tokens apart, and they
+// stay zero.
+type Usage struct {
+	Model         string // empty when the response named none
+	InputTokens   int64
+	OutputTokens  int64
+	CacheRead     int64
+	CacheCreation int64
 }
 
 // RecordTraffic appends t to the traffic table.
 func (s *Store) RecordTraffic(ctx context.Context, t Traffic) error {
+	var model sql.NullString
+	var tokens [4]sql.NullInt64
+	if u := t.Usage; u != nil {
+		model = nullable(u.Model)
+		for i, count := range []int64{u.InputTokens, u.OutputTokens, u.CacheRead, u.CacheCreation} {
+			tokens[i] = sql.NullInt64{Int64: count, Valid: true}
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO traffic (ts, session_id, alias, kind, host, port, bytes_up, bytes_down, duration_ms, result, status, claude_session_id, claude_agent_id, route, request)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO traffic (ts, session_id, alias, kind, host, port, bytes_up, bytes_down, duration_ms, result, status, claude_session_id, claude_agent_id, route, request,
+			model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.At.UnixMilli(), nullable(t.SessionID), nullable(t.Alias), t.Kind, t.Host, t.Port, t.BytesUp, t.BytesDown, t.Duration.Milliseconds(),
-		t.Result, nullableInt(t.Status), nullable(t.ClaudeSession), nullable(t.ClaudeAgent), nullable(t.Route), nullable(t.Request))
+		t.Result, nullableInt(t.Status), nullable(t.ClaudeSession), nullable(t.ClaudeAgent), nullable(t.Route), nullable(t.Request),
+		model, tokens[0], tokens[1], tokens[2], tokens[3])
 	if err != nil {
 		return fmt.Errorf("record traffic: %v", err)
 	}

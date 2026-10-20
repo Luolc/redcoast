@@ -43,6 +43,7 @@ func New(accountsDir, tokenURL string) claude.Provider {
 		NotSession: notSession,
 		Account:    l.account,
 		Readings:   quotaReadings,
+		Usage:      usage,
 		Refused:    l.refused,
 		Renew:      r.renew,
 		Import:     r.importLogin,
