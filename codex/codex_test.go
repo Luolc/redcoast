@@ -606,7 +606,8 @@ type claudeHealth struct {
 
 // TestUsageRecorded forwards a synthetic Responses API stream and reads its model and
 // token counts back from the dashboard's snapshot: the model from response.created, the
-// counts from response.completed; the cached count is not taken apart. Control arm: a
+// counts from response.completed, whose line carries a 256 KiB output as a long turn's
+// does; the cached count is not taken apart. Control arm: a
 // stream that ends without response.completed reports no counts and adds nothing to
 // the model usage.
 func TestUsageRecorded(t *testing.T) {
@@ -623,7 +624,7 @@ func TestUsageRecorded(t *testing.T) {
 		t.Fatalf("status %d, body changed: %t", status, body != stream)
 	}
 	stream += "event: response.completed\n" +
-		`data: {"type":"response.completed","response":{"id":"resp_synthetic","model":"gpt-sample-1","usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":100},"output_tokens":7,"total_tokens":127}}}` + "\n\n"
+		`data: {"type":"response.completed","response":{"id":"resp_synthetic","output":[{"type":"message","content":[{"type":"output_text","text":"` + strings.Repeat("x", 256<<10) + `"}]}],"usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":100},"output_tokens":7,"total_tokens":127}}}` + "\n\n"
 	if status, body := g.do(http.MethodPost, "/backend-api/codex/responses", "{}", nil); status != http.StatusOK || body != stream {
 		t.Fatalf("status %d, body changed: %t", status, body != stream)
 	}

@@ -81,8 +81,8 @@ func (s *Store) QuickCheck(ctx context.Context) error {
 
 // Prune deletes traffic rows and quota history readings older than r.Traffic,
 // binding_history rows closed longer ago than r.Sessions, and sessions ended longer ago
-// than r.Sessions together with their bindings row. A session that traffic or binding_history still refers to is
-// kept. Each batch is its own transaction.
+// than r.Sessions together with their bindings row. A session that traffic or
+// binding_history still refers to is kept. Each batch is its own transaction.
 func (s *Store) Prune(ctx context.Context, r Retention) (Pruned, error) {
 	trafficCutoff := s.now() - r.Traffic.Milliseconds()
 	sessionCutoff := s.now() - r.Sessions.Milliseconds()

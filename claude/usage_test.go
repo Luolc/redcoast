@@ -46,8 +46,9 @@ func gzipped(t *testing.T, data string) string {
 
 // TestUsageMeter reads Claude bodies through a meter one byte per read and in one read:
 // the reader gets the body unchanged, and the meter the model and counts of an
-// uncompressed or gzip stream or JSON body. A line too long to keep is skipped; a model of another shape is dropped and the counts kept; a
-// document with a negative count gives none of its counts. A JSON body over the limit,
+// uncompressed or gzip stream or JSON body. A line too long to keep is skipped; a
+// model of another shape is dropped and the counts kept; a document with a negative
+// count gives none of its counts. A JSON body over the limit,
 // or a body that reports no counts, gives nothing; a response that is not a 200, or
 // whose type or encoding the meter does not read, gets no meter.
 func TestUsageMeter(t *testing.T) {

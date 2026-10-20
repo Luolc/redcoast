@@ -16,11 +16,13 @@ import (
 // compressed one, is kept up to usageBodyLimit bytes; a compressed JSON body is
 // decompressed up to usageBodyLimit too, a compressed stream up to usageDecodedLimit.
 // An event stream is read line by line and a line longer than usageLineLimit is
-// skipped. Past a bound the meter reports less or nothing, never more.
+// skipped; the limit is a body's, since Codex's response.completed line carries the
+// whole response, its output included. Past a bound the meter reports less or
+// nothing, never more.
 const (
 	usageBodyLimit    = 1 << 20
 	usageDecodedLimit = 8 << 20
-	usageLineLimit    = 64 << 10
+	usageLineLimit    = usageBodyLimit
 )
 
 // maxTokens bounds one token count the meter accepts, far above any response's, so
