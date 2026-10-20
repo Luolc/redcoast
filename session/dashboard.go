@@ -4,11 +4,13 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -295,11 +297,8 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		}
 	}
 	since := now - dashboardHours*time.Hour.Milliseconds()
-	if err := r.window(ctx, since, &out); err != nil {
-		return Snapshot{}, err
-	}
 	dayStart := status.At.Truncate(24*time.Hour).AddDate(0, 0, 1-dashboardDays).UnixMilli()
-	connects, err := r.connects(ctx, dayStart, now)
+	connects, err := r.scan(ctx, since, dayStart, now, &out)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -331,6 +330,28 @@ func (r *Reader) history(ctx context.Context) ([]HistoryEntry, error) {
 		return v, err
 	}, "SELECT substr(session_id, 1, ?), alias, from_ts, to_ts, reason FROM binding_history ORDER BY id DESC LIMIT ?", shortID, dashboardHistory)
 	return history, err
+}
+
+// scan runs window and connects, which take most of a snapshot's time, at once, each
+// on a connection of its own. When one fails, the other is canceled, and scan returns
+// once both have stopped.
+func (r *Reader) scan(ctx context.Context, since, dayStart, now int64, out *Snapshot) (connectWindow, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var connects connectWindow
+	var connectsErr error
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if connects, connectsErr = r.connects(ctx, dayStart, now); connectsErr != nil {
+			cancel()
+		}
+	})
+	windowErr := r.window(ctx, since, out)
+	if windowErr != nil {
+		cancel()
+	}
+	wg.Wait()
+	return connects, errors.Join(windowErr, connectsErr)
 }
 
 // windowRow is what the hourly tables read of one traffic row.
