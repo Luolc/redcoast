@@ -32,14 +32,20 @@ const maxTokens = 1 << 40
 // UsageReport is what one JSON document of an upstream response says of the request's
 // usage: the model, and the token counts as the provider counts them (session.Usage).
 // An empty Model or a nil count says nothing about it. A count is the total so far for
-// the request, so a later document's count replaces an earlier one's.
+// the request, so a later document's count replaces an earlier one's. Final marks the
+// event that ends a successful stream; a client may leave once it has it.
 type UsageReport struct {
 	Model         string
 	InputTokens   *int64
 	OutputTokens  *int64
 	CacheRead     *int64
 	CacheCreation *int64
+	Final         bool
 }
+
+// usageMarkers are the words a stream line must name to be decoded: a document with
+// usage or a model, or Claude's message_stop, which names neither.
+var usageMarkers = [][]byte{[]byte(`"usage"`), []byte(`"model"`), []byte(`"message_stop"`)}
 
 // modelName is the shape of a model name the traffic table keeps. The name comes from
 // the upstream's response and the dashboard shows it, so another shape is dropped and
@@ -61,6 +67,7 @@ type usageMeter struct {
 	overflow bool   // kept passed usageBodyLimit
 	usage    session.Usage
 	found    bool // a document carried token counts
+	final    bool // a document was the stream's final event
 }
 
 // newUsageMeter returns a meter for res with read, or nil when res is not a 200 with
@@ -134,15 +141,18 @@ func (m *usageMeter) extend(part []byte) {
 }
 
 // event reads the data of one stream line. Both providers put each event's JSON on a
-// single data line; a line naming neither usage nor a model is not decoded.
+// single data line; a line naming none of usageMarkers is not decoded.
 func (m *usageMeter) event(line []byte) {
 	data, ok := bytes.CutPrefix(bytes.TrimSuffix(line, []byte("\r")), []byte("data:"))
 	if !ok {
 		return
 	}
 	data = bytes.TrimPrefix(data, []byte(" "))
-	if bytes.Contains(data, []byte(`"usage"`)) || bytes.Contains(data, []byte(`"model"`)) {
-		m.document(data)
+	for _, marker := range usageMarkers {
+		if bytes.Contains(data, marker) {
+			m.document(data)
+			return
+		}
 	}
 }
 
@@ -150,6 +160,7 @@ func (m *usageMeter) event(line []byte) {
 // negative or over maxTokens gives no counts.
 func (m *usageMeter) document(data []byte) {
 	report := m.read(data)
+	m.final = m.final || report.Final
 	if report.Model != "" {
 		m.usage.Model = report.Model
 	}
@@ -217,8 +228,8 @@ func (m *usageMeter) finish() {
 
 // claudeUsage reads a Messages API document: a response that is not streamed (type
 // message) carries the model and the usage; in a stream message_start carries them in
-// its message, and message_delta carries the counts so far in its usage. Other events
-// report nothing.
+// its message, message_delta carries the counts so far in its usage, and message_stop
+// is final. Other events report nothing.
 func claudeUsage(document []byte) UsageReport {
 	type tokens struct {
 		InputTokens   *int64 `json:"input_tokens"`
@@ -239,6 +250,8 @@ func claudeUsage(document []byte) UsageReport {
 		return UsageReport{}
 	}
 	switch {
+	case d.Type == "message_stop":
+		return UsageReport{Final: true}
 	case d.Type == "message_start" && d.Message != nil:
 		d.message = *d.Message
 	case d.Type == "message", d.Type == "message_delta":
