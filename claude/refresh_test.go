@@ -29,6 +29,7 @@ type refreshExit struct {
 	received    []*http.Request
 	bodies      []string
 	shared      *overlap // when set, each request is held a moment and counted in it
+	onRequest   func()   // when set, called with each request before it is answered
 }
 
 // overlap counts the requests that a set of exits serve at the same time.
@@ -58,8 +59,11 @@ func startRefreshExit(t *testing.T, clock time.Time) *refreshExit {
 		body, _ := io.ReadAll(r.Body)
 		e.mu.Lock()
 		e.received, e.bodies = append(e.received, r), append(e.bodies, string(body))
-		status, utilization, shared := e.status, e.utilization, e.shared
+		status, utilization, shared, onRequest := e.status, e.utilization, e.shared, e.onRequest
 		e.mu.Unlock()
+		if onRequest != nil {
+			onRequest()
+		}
 		if shared != nil {
 			shared.enter()
 			defer shared.leave()
@@ -343,5 +347,46 @@ func TestQuotaRecheck(t *testing.T) {
 		if strings.Contains(logged.String(), alias) {
 			t.Errorf("log names %s, paused for another reason:\n%s", alias, logged.String())
 		}
+	}
+}
+
+// TestQuotaRecheckStopsOnShutdown checks that a round of the quota recheck whose context
+// ends, before it starts or during a refresh, sends nothing more and logs nothing for
+// the accounts it did not reach.
+func TestQuotaRecheckStopsOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	h := newHarness(t)
+	var logged strings.Builder
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&logged)
+	exits := map[string]*refreshExit{}
+	for _, alias := range []string{"sample-a", "sample-b"} {
+		exit := startRefreshExit(t, h.clock)
+		exit.answer(200, "0.1")
+		exitURL, err := url.Parse(exit.server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.addWithExit(alias, "sk-ant-oat01-synthetic-token-"+alias, exitURL)
+		exits[alias] = exit
+		if err := h.store.RecordQuota(ctx, alias, []session.Reading{{Window: session.Window5h, Utilization: 0.97, ResetAt: h.clock.Add(-time.Minute), Source: "response"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rt := h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{})
+
+	canceled, stop := context.WithCancel(ctx)
+	stop()
+	rt.recheckQuota(canceled)
+	if exits["sample-a"].requests() != 0 || logged.Len() != 0 {
+		t.Fatalf("round canceled before it started: exit of sample-a received %d requests, log:\n%s", exits["sample-a"].requests(), logged.String())
+	}
+
+	exits["sample-a"].mu.Lock()
+	exits["sample-a"].onRequest = cancel
+	exits["sample-a"].mu.Unlock()
+	rt.recheckQuota(ctx)
+	if exits["sample-a"].requests() != 1 || exits["sample-b"].requests() != 0 || strings.Contains(logged.String(), "sample-b") {
+		t.Fatalf("round canceled during sample-a: exits received %d and %d requests, log:\n%s", exits["sample-a"].requests(), exits["sample-b"].requests(), logged.String())
 	}
 }

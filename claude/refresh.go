@@ -145,7 +145,9 @@ func (e *Entrypoint) RunQuotaRechecks(ctx context.Context, interval time.Duratio
 func (rt *router) recheckQuota(ctx context.Context) {
 	soft, _, err := rt.store.Thresholds(ctx)
 	if err != nil {
-		log.Printf("quota recheck: %v", err)
+		if ctx.Err() == nil {
+			log.Printf("quota recheck: %v", err)
+		}
 		return
 	}
 	for _, alias := range rt.accounts.Candidates() {
