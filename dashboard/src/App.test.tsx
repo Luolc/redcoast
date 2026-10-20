@@ -115,6 +115,17 @@ it("lets every page fill the main area of a wide screen", () => {
   );
 });
 
+it("keeps a list's rows and the topbar to readable widths", () => {
+  // A label and its bar or value stay within 40rem of each other.
+  expect(tokensCss).toContain("--t-width-list: 40rem;");
+  for (const sel of [".rank", ".kv"])
+    expect(rule(appCss, sel)).toContain("max-width: var(--t-width-list);");
+  // The topbar's contents are held to the page's width, as .content is.
+  expect(rule(appCss, ".topbar")).toContain(
+    "calc((100% - var(--t-width-main)) / 2 + var(--t-space-6))",
+  );
+});
+
 it("lines up each quota row on its first line", () => {
   expect(rule(appCss, ".quota-table td")).toContain("vertical-align: top;");
   expect(rule(appCss, ".quota-table th")).toContain("vertical-align: bottom;");

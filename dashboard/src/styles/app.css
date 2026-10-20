@@ -176,12 +176,18 @@ th.n {
   flex: 1;
   min-width: 0;
 }
+/* Its contents keep the page's edges, the page being centred past
+   --t-width-main (.content); a padding percentage is of the bar's width. */
 .topbar {
   height: var(--t-height-bar);
   display: flex;
   align-items: center;
   gap: var(--t-space-4);
-  padding: 0 var(--t-space-6);
+  padding: 0
+    max(
+      var(--t-space-6),
+      calc((100% - var(--t-width-main)) / 2 + var(--t-space-6))
+    );
   border-bottom: 1px solid var(--t-border-subtle);
 }
 .crumbs {
@@ -540,7 +546,9 @@ th.n {
   color: var(--t-text-muted);
   font-size: var(--t-text-sm);
 }
+/* Held narrow enough that a label and its value read as one row. */
 .kv {
+  max-width: var(--t-width-list);
   display: grid;
   grid-template-columns: 1fr auto;
   column-gap: var(--t-space-3);
@@ -876,8 +884,10 @@ tbody tr.link {
   text-underline-offset: 2px;
 }
 
-/* Ranked lists with a share bar (Overview, Monitor). */
+/* Ranked lists with a share bar (Overview, Monitor), held narrow enough
+   that a row's label, bar and count read as one. */
 .rank {
+  max-width: var(--t-width-list);
   display: flex;
   flex-direction: column;
   gap: 2px;
