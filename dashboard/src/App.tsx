@@ -1,67 +1,113 @@
+import type { ReactNode } from "react";
 import { Accounts } from "./components/Accounts";
-import { Machines, Sessions } from "./components/Clients";
-import { Days, History } from "./components/Days";
+import { Clients } from "./components/Clients";
+import { Exits } from "./components/Exits";
+import { Monitor } from "./components/Monitor";
 import { Overview } from "./components/Overview";
-import { Destinations, Hourly, Results } from "./components/Traffic";
-import { Flag } from "./components/ui";
-import { formatAge } from "./lib/format";
-import { useData, useNow } from "./lib/useData";
+import { Sessions } from "./components/Sessions";
+import { Sidebar, Topbar } from "./components/Shell";
+import { Status } from "./components/ui";
+import { formatAgo } from "./lib/format";
+import { routeHref, VIEW_NAMES, type Route } from "./lib/route";
+import type { Dashboard } from "./lib/types";
+import { useData, useNow, useRoute, useTheme } from "./lib/useData";
+import { providerName } from "./lib/words";
 
 const REFRESH_MS = 30_000;
 // Two missed refreshes: the page is showing old data.
 const STALE_MS = 2 * REFRESH_MS + 5_000;
 
+/** The page of route over data. */
+export function Page({
+  data,
+  now,
+  route,
+}: {
+  data: Dashboard;
+  now: Date;
+  route: Route;
+}) {
+  switch (route.view) {
+    case "overview":
+      return <Overview data={data} now={now} />;
+    case "clients":
+      return <Clients data={data} now={now} />;
+    case "sessions":
+      return <Sessions data={data} now={now} machine={route.arg} />;
+    case "accounts":
+      return <Accounts data={data} now={now} />;
+    case "exits":
+      return <Exits data={data} now={now} />;
+    case "monitor":
+      return <Monitor data={data} now={now} focus={route.arg} />;
+  }
+}
+
+function crumbs(data: Dashboard | null, route: Route): ReactNode[] {
+  const trail: ReactNode[] = [];
+  // Without a provider the trail's first place, "Gateway", already names it.
+  if (data?.gateway.provider !== undefined)
+    trail.push(
+      <a href={routeHref({ view: "overview" })}>
+        {providerName(data.gateway.provider)}
+      </a>,
+    );
+  if (route.view === "sessions" && route.arg !== undefined) {
+    trail.push(<a href={routeHref({ view: "sessions" })}>Sessions</a>);
+    trail.push(route.arg);
+  } else trail.push(VIEW_NAMES[route.view]);
+  return trail;
+}
+
 export function App() {
-  const { data, fetchError } = useData("./dashboard.json", REFRESH_MS);
+  const { data, fetchError, reload } = useData("./dashboard.json", REFRESH_MS);
   const now = useNow(1_000);
+  const route = useRoute();
+  const [theme, setTheme] = useTheme();
   return (
-    <main className="mx-auto max-w-7xl space-y-4 p-4">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h1 className="text-xl font-semibold">Claude 网关</h1>
-        <p className="text-sm text-muted-foreground">
-          只读；每 30 秒刷新。时间按洛杉矶显示，鼠标悬停看 UTC。
-        </p>
-      </header>
-      {fetchError === null ? null : (
-        <div
-          role="alert"
-          className="rounded-md border border-red-300 p-3 text-sm"
-        >
-          <Flag tone="bad">读取失败：{fetchError}</Flag>
-          {data === null
-            ? null
-            : `。下面是 ${formatAge(data.at, now)} 的数据。`}
-        </div>
-      )}
-      {data !== null &&
-      fetchError === null &&
-      now.getTime() - Date.parse(data.at) > STALE_MS ? (
-        <div
-          role="alert"
-          className="rounded-md border border-amber-300 p-3 text-sm"
-        >
-          <Flag tone="warn">
-            数据生成于 {formatAge(data.at, now)}，比刷新间隔旧。
-          </Flag>
-        </div>
-      ) : null}
-      {data === null ? (
-        fetchError === null ? (
-          <p className="text-sm text-muted-foreground">读取中…</p>
-        ) : null
-      ) : (
-        <>
-          <Overview data={data} now={now} />
-          <Accounts data={data} now={now} />
-          <Days data={data} />
-          <Destinations data={data} />
-          <Results data={data} />
-          <Hourly data={data} />
-          <Machines data={data} now={now} />
-          <Sessions data={data} now={now} />
-          <History data={data} />
-        </>
-      )}
-    </main>
+    <div className="shell">
+      <Sidebar data={data} route={route} />
+      <div className="main">
+        <Topbar
+          data={data}
+          crumbs={crumbs(data, route)}
+          now={now}
+          theme={theme}
+          setTheme={setTheme}
+          reload={reload}
+        />
+        <main className="content">
+          {fetchError === null ? null : (
+            <div role="alert" className="alert">
+              <Status
+                state={{ tone: "bad", word: `Could not read: ${fetchError}` }}
+              />
+              {data === null
+                ? null
+                : ` Showing the data of ${formatAgo(data.at, now)}.`}
+            </div>
+          )}
+          {data !== null &&
+          fetchError === null &&
+          now.getTime() - Date.parse(data.at) > STALE_MS ? (
+            <div role="alert" className="alert">
+              <Status
+                state={{
+                  tone: "warn",
+                  word: `The data is from ${formatAgo(data.at, now)}, older than the refresh interval.`,
+                }}
+              />
+            </div>
+          ) : null}
+          {data === null ? (
+            fetchError === null ? (
+              <p className="muted">Loading…</p>
+            ) : null
+          ) : (
+            <Page data={data} now={now} route={route} />
+          )}
+        </main>
+      </div>
+    </div>
   );
 }

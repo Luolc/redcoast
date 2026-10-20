@@ -33,20 +33,40 @@ export function formatTime(iso: string, zone: Zone, short = false): string {
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")} ${get("timeZoneName")}`;
 }
 
-/** A duration in its two largest units: `45s`, `3m 05s`, `2h 10m`, `3d 4h`. */
-export function formatDuration(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const pad = (n: number) => String(n).padStart(2, "0");
-  if (s < 60) return `${String(s)}s`;
-  if (s < 3600) return `${String(Math.floor(s / 60))}m ${pad(s % 60)}s`;
-  if (s < 86400)
-    return `${String(Math.floor(s / 3600))}h ${pad(Math.floor((s % 3600) / 60))}m`;
-  return `${String(Math.floor(s / 86400))}d ${String(Math.floor((s % 86400) / 3600))}h`;
+/** The hour and minute of iso in UTC, `09:00`. */
+export function formatClock(iso: string): string {
+  return iso.slice(11, 16);
 }
 
-/** How long ago iso was at now, `3m 05s 前`. */
-export function formatAge(iso: string, now: Date): string {
-  return `${formatDuration(now.getTime() - Date.parse(iso))} 前`;
+// A non-breaking space keeps a number on the line of its unit.
+const NB = "\u00a0";
+
+/** A span of time in its two largest units: `45 s`, `3 min`, `2 h 10 min`, `3 d 4 h`. */
+export function formatSpan(ms: number): string {
+  const m = Math.max(0, Math.floor(ms / 60_000));
+  if (ms < 60_000) return `${String(Math.max(0, Math.floor(ms / 1000)))}${NB}s`;
+  if (m < 60) return `${String(m)}${NB}min`;
+  if (m < 1440) {
+    const rest = m % 60;
+    return rest === 0
+      ? `${String(Math.floor(m / 60))}${NB}h`
+      : `${String(Math.floor(m / 60))}${NB}h ${String(rest)}${NB}min`;
+  }
+  const hours = Math.floor((m % 1440) / 60);
+  return hours === 0
+    ? `${String(Math.floor(m / 1440))}${NB}d`
+    : `${String(Math.floor(m / 1440))}${NB}d ${String(hours)}${NB}h`;
+}
+
+/** How long ago iso was at now, `7 min ago`. */
+export function formatAgo(iso: string, now: Date): string {
+  return `${formatSpan(now.getTime() - Date.parse(iso))} ago`;
+}
+
+/** How long until iso from now, `in 2 h 36 min`, or `due now` once it passed. */
+export function formatUntil(iso: string, now: Date): string {
+  const ms = Date.parse(iso) - now.getTime();
+  return ms <= 0 ? "due now" : `in ${formatSpan(ms)}`;
 }
 
 /** Bytes in binary units with one decimal: `512 B`, `1.5 KiB`, `2.0 GiB`. */
@@ -59,11 +79,16 @@ export function formatBytes(n: number): string {
     unit++;
   }
   return unit === 0
-    ? `${String(n)} B`
-    : `${value.toFixed(1)} ${units[unit] ?? ""}`;
+    ? `${String(n)}${NB}B`
+    : `${value.toFixed(1)}${NB}${units[unit] ?? ""}`;
 }
 
-/** A fraction as a whole percentage, `42%`. */
-export function formatPercent(fraction: number): string {
-  return `${String(Math.round(fraction * 100))}%`;
+/** A fraction as a percentage with digits decimals, `42%` or `1.2%`. */
+export function formatPercent(fraction: number, digits = 0): string {
+  return `${(fraction * 100).toFixed(digits)}%`;
+}
+
+/** A count with thousands separators, `6,405`. */
+export function formatCount(n: number): string {
+  return Math.round(n).toLocaleString("en-US");
 }
