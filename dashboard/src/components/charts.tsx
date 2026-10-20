@@ -162,7 +162,8 @@ export function Spark({
   const H = 40;
   const n = values.length;
   if (n < 2) return null;
-  const max = Math.max(...values, 1) * 1.1;
+  const top = Math.max(...values);
+  const max = (top > 0 ? top : 1) * 1.1;
   const x = (i: number) => (i * W) / (n - 1);
   const y = (v: number) => H - (v / max) * H;
   const last = values[n - 1] ?? 0;
