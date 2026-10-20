@@ -19,6 +19,14 @@ const (
 	idleReference    = 24 * time.Hour
 )
 
+// failed is the SQL expression, over a traffic row aliased t, that is true when the row
+// counts as an error: a result other than ok, or a status of 400 or more (an inference
+// request the upstream answered with an error status is recorded with result ok). A CONNECT tunnel that the gateway's limits closed
+// (idle_timeout, max_duration) was open and carried traffic, so it is no error; an
+// inference stream they cut short is one.
+const failed = `(t.result <> 'ok' AND NOT (t.kind = 'connect' AND t.result IN ('idle_timeout', 'max_duration'))
+	OR COALESCE(t.status, 0) >= 400)`
+
 // Reader reads the dashboard's snapshot over a connection SQLite opens read-only, with
 // query_only on as well, so no statement it runs can write.
 type Reader struct {
@@ -63,6 +71,8 @@ type Snapshot struct {
 	IdleSessions int            `json:"idle_sessions"` // live sessions without a request for idleReference
 	Hourly       []HourTraffic  `json:"hourly"`
 	Results      []ResultCount  `json:"results"`
+	Usage        []UsagePoint   `json:"usage"`          // the hourly figures by account and client machine
+	SourceCounts []SourceCount  `json:"result_sources"` // results by account and client machine
 	Destinations []Destination  `json:"destinations"`
 	Days         []DayCounts    `json:"days"`
 	History      []HistoryEntry `json:"history"`
@@ -109,6 +119,30 @@ type ResultCount struct {
 	Count  int    `json:"count"`
 }
 
+// UsagePoint is one hour's requests, bytes and errors of one account, client machine
+// and kind. Errors are the rows the failed expression matches; Limited, the rows with
+// result limited, are among them.
+type UsagePoint struct {
+	Hour      time.Time `json:"hour"`
+	Alias     string    `json:"alias"`          // empty for requests carried on no account
+	Machine   string    `json:"client_machine"` // empty for requests of no session
+	Kind      string    `json:"kind"`
+	Requests  int       `json:"requests"`
+	BytesUp   int64     `json:"bytes_up"`
+	BytesDown int64     `json:"bytes_down"`
+	Errors    int       `json:"errors"`
+	Limited   int       `json:"limited"`
+}
+
+// SourceCount is a ResultCount of one account and client machine, with whether that
+// result and status count as an error.
+type SourceCount struct {
+	ResultCount
+	Alias   string `json:"alias"`          // empty for requests carried on no account
+	Machine string `json:"client_machine"` // empty for requests of no session
+	Error   bool   `json:"error"`
+}
+
 // Destination is one CONNECT target as one account's session reached it on one route.
 type Destination struct {
 	Host      string    `json:"host"`
@@ -149,7 +183,7 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 	}
 	now := status.At.UnixMilli()
 	out := Snapshot{At: status.At, Soft: status.Soft, Hard: status.Hard, Accounts: []AccountView{}, Machines: []MachineView{}, Sessions: []LiveSession{}, Hourly: []HourTraffic{},
-		Results: []ResultCount{}, Destinations: []Destination{}, History: []HistoryEntry{}}
+		Results: []ResultCount{}, Usage: []UsagePoint{}, SourceCounts: []SourceCount{}, Destinations: []Destination{}, History: []HistoryEntry{}}
 	db := r.store.db
 	if err := db.QueryRowContext(ctx, "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()").Scan(&out.DBBytes); err != nil {
 		return Snapshot{}, fmt.Errorf("database size: %v", err)
@@ -204,6 +238,30 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		return v, rows.Scan(&v.Kind, &v.Result, &v.Status, &v.Count)
 	}, `SELECT kind, result, COALESCE(status, 0) AS st, COUNT(*) AS n FROM traffic WHERE ts >= ?
 		GROUP BY kind, result, st ORDER BY kind, n DESC, result, st`, since)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	// A row's client machine is its session's. Prune keeps every session a traffic row
+	// names, so only a row of no session has no machine.
+	err = collect(ctx, db, &out.Usage, func(rows *sql.Rows) (UsagePoint, error) {
+		var v UsagePoint
+		var hour int64
+		err := rows.Scan(&hour, &v.Alias, &v.Machine, &v.Kind, &v.Requests, &v.BytesUp, &v.BytesDown, &v.Errors, &v.Limited)
+		v.Hour = fromMillis(hour)
+		return v, err
+	}, `SELECT t.ts / 3600000 * 3600000 AS hour, COALESCE(t.alias, '') AS a, COALESCE(s.client_machine, '') AS m, t.kind,
+		COUNT(*), SUM(t.bytes_up), SUM(t.bytes_down), SUM(`+failed+`), SUM(t.result = 'limited')
+		FROM traffic t LEFT JOIN sessions s ON s.id = t.session_id WHERE t.ts >= ?
+		GROUP BY hour, a, m, t.kind ORDER BY hour, a, m, t.kind`, since)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	err = collect(ctx, db, &out.SourceCounts, func(rows *sql.Rows) (SourceCount, error) {
+		var v SourceCount
+		return v, rows.Scan(&v.Alias, &v.Machine, &v.Kind, &v.Result, &v.Status, &v.Error, &v.Count)
+	}, `SELECT COALESCE(t.alias, '') AS a, COALESCE(s.client_machine, '') AS m, t.kind, t.result, COALESCE(t.status, 0) AS st, `+failed+`, COUNT(*) AS n
+		FROM traffic t LEFT JOIN sessions s ON s.id = t.session_id WHERE t.ts >= ?
+		GROUP BY a, m, t.kind, t.result, st ORDER BY a, m, t.kind, n DESC, t.result, st`, since)
 	if err != nil {
 		return Snapshot{}, err
 	}
