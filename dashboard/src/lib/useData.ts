@@ -18,11 +18,12 @@ export function useData(url: string, everyMs: number): Loaded {
   });
   const [tick, setTick] = useState(0);
   useEffect(() => {
-    // One load at a time: a new one cancels the last, so an older answer
-    // never lands after a newer one.
+    // One load at a time: a scheduled load waits out one still in flight,
+    // however slow, and Refresh starts this effect again, which cancels it,
+    // so an older answer never lands after a newer one.
     let current: AbortController | null = null;
     async function load() {
-      current?.abort();
+      if (current !== null) return;
       const controller = new AbortController();
       current = controller;
       try {
@@ -36,6 +37,8 @@ export function useData(url: string, everyMs: number): Loaded {
       } catch (e) {
         if (!controller.signal.aborted)
           setState((l) => ({ ...l, fetchError: String(e) }));
+      } finally {
+        if (current === controller) current = null;
       }
     }
     void load();

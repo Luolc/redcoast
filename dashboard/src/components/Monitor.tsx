@@ -120,7 +120,7 @@ function AccountCards({ data, now }: { data: Dashboard; now: Date }) {
           <div className="card-head">
             <span className="client-name">{a.alias}</span>
             <span className="small muted">{a.plan?.name ?? "no plan"}</span>
-            <Status state={accountState(a, data.soft, data.hard)} pill />
+            <Status state={accountState(a, data.soft, data.hard, now)} pill />
           </div>
           {(["5h", "7d"] as const).map((w) => (
             <div className="win" key={w}>
