@@ -827,7 +827,8 @@ func TestRefusedRowsAreLimitedPerSource(t *testing.T) {
 // flakyExit stands in for an account's exit whose mode a test switches. In "down" no
 // connection to it can be made, and in "wait" getting one waits until the gateway
 // gives up the request. Once connected, "ok" answers 200 with a body naming the exit,
-// "close" drops the connection without an answer and "upgrade" answers 101.
+// "close" drops the connection without an answer, "silent" sends no answer until the
+// gateway gives up waiting for its head, and "upgrade" answers 101.
 type flakyExit struct {
 	server  *httptest.Server
 	mode    atomic.Value // string
@@ -849,6 +850,8 @@ func startFlakyExit(t *testing.T) *flakyExit {
 			if err == nil {
 				_ = conn.Close()
 			}
+		case "silent":
+			<-r.Context().Done()
 		case "upgrade":
 			w.Header().Set("Connection", "Upgrade")
 			w.Header().Set("Upgrade", "websocket")
@@ -863,7 +866,8 @@ func startFlakyExit(t *testing.T) *flakyExit {
 }
 
 // attach adds account alias to h behind e, whose mode then decides how the account's
-// connections go.
+// connections go. The account waits headTimeout for a response head instead of the
+// production 30 s.
 func (e *flakyExit) attach(t *testing.T, h *harness, alias, token string) {
 	t.Helper()
 	exitURL, err := url.Parse(e.server.URL)
@@ -871,6 +875,7 @@ func (e *flakyExit) attach(t *testing.T, h *harness, alias, token string) {
 		t.Fatal(err)
 	}
 	a := h.addWithExit(alias, token, exitURL)
+	a.transport.ResponseHeaderTimeout = headTimeout
 	through, closed := a.transport.Proxy, &url.URL{Scheme: "http", Host: "127.0.0.1:1"}
 	a.transport.Proxy = func(r *http.Request) (*url.URL, error) {
 		switch e.mode.Load().(string) {
@@ -888,14 +893,18 @@ func (e *flakyExit) attach(t *testing.T, h *harness, alias, token string) {
 	}
 }
 
-// TestUpstreamFailuresPauseAccount checks that upstreamFailureRun requests in a row for
-// which no connection through an account's exit can be made pause the account for
-// upstreamFailurePause: the session's next request rebinds to the other account, and
-// once the pause ends the account is chosen again. Control arms pause nothing, and the
-// session's next request stays on the account: one failure fewer; requests the client
-// left while the gateway waited for a connection; a run broken by an upstream response
-// (a 101 the gateway rejects); failures after a connection was made, whether the exit
-// dropped it or the client's body was malformed.
+// headTimeout is how long a flaky exit's account waits for a response head.
+const headTimeout = 200 * time.Millisecond
+
+// TestUpstreamFailuresPauseAccount checks that upstreamFailureRun requests in a row that
+// do not get through an account's exit pause the account for upstreamFailurePause: no
+// connection to the exit can be made, or once the exit has the whole request, with a
+// declared length or chunked, it drops the connection or sends no response head in
+// time. The session's next request rebinds
+// to the other account, and once the pause ends the account is chosen again. Control
+// arms pause nothing, and the session's next request stays on the account: one failure
+// fewer; requests the client left while the gateway waited for a connection; a run
+// broken by an upstream response (a 101 the gateway rejects); a malformed client body.
 func TestUpstreamFailuresPauseAccount(t *testing.T) {
 	type step struct {
 		mode  string
@@ -910,7 +919,9 @@ func TestUpstreamFailuresPauseAccount(t *testing.T) {
 		{"one_short", []step{{"down", upstreamFailureRun - 1}}, false},
 		{"client_left", []step{{"wait", upstreamFailureRun}}, false},
 		{"answered_between", []step{{"down", upstreamFailureRun - 1}, {"upgrade", 1}, {"down", upstreamFailureRun - 1}}, false},
-		{"after_connect", []step{{"close", upstreamFailureRun}}, false},
+		{"dropped", []step{{"close", upstreamFailureRun}}, true},
+		{"dropped_chunked", []step{{"close_chunked", upstreamFailureRun}}, true},
+		{"no_head", []step{{"silent", upstreamFailureRun}}, true},
 		{"malformed_body", []step{{"malformed", upstreamFailureRun}}, false},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
@@ -923,8 +934,11 @@ func TestUpstreamFailuresPauseAccount(t *testing.T) {
 			sent := 0
 			for _, s := range arm.steps {
 				mode := s.mode
-				if mode == "malformed" {
+				switch mode {
+				case "malformed":
 					mode = "ok"
+				case "close_chunked":
+					mode = "close"
 				}
 				exitA.mode.Store(mode)
 				for range s.count {
@@ -933,6 +947,10 @@ func TestUpstreamFailuresPauseAccount(t *testing.T) {
 						leave(t, h, server, exitA)
 					case "malformed":
 						sendMalformed(t, h, server)
+					case "close_chunked":
+						if got := postChunked(t, h, server); got != http.StatusBadGateway {
+							t.Fatalf("%s: status=%d", s.mode, got)
+						}
 					default:
 						if got, _ := post(t, h, server, h.token, `{"messages":[]}`, "", ""); got != http.StatusBadGateway {
 							t.Fatalf("%s: status=%d", s.mode, got)
@@ -1002,6 +1020,25 @@ func leave(t *testing.T, h *harness, server *httptest.Server, exit *flakyExit) {
 		_ = res.Body.Close()
 		t.Fatalf("a request the client left got status %d", res.StatusCode)
 	}
+}
+
+// postChunked sends one inference request with the session credential and a whole
+// chunked body, and returns the status.
+func postChunked(t *testing.T, h *harness, server *httptest.Server) int {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/v1/messages", strings.NewReader(`{"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength, req.TransferEncoding = -1, []string{"chunked"}
+	res, err := h.client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := res.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return res.StatusCode
 }
 
 // sendMalformed sends one inference request whose chunked body is malformed, on a

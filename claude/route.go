@@ -182,9 +182,11 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	row := session.Traffic{At: start.UTC(), Kind: "inference", Host: rt.upstream.Hostname(), Port: rt.port,
 		ClaudeSession: claudeID(r.Header, "X-Claude-Code-Session-Id"), ClaudeAgent: claudeID(r.Header, "X-Claude-Code-Agent-Id")}
-	up := &countingReader{ReadCloser: r.Body}
+	up := &countingReader{ReadCloser: r.Body, length: r.ContentLength}
 	if r.Body != nil && r.Body != http.NoBody {
 		r.Body = up
+	} else {
+		up.whole.Store(true)
 	}
 	down := &countingWriter{ResponseWriter: w}
 	line := requestLine(r)
@@ -201,7 +203,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if row.Result == "" {
 			row.Result = outcome(state, r.Context().Err() != nil || aborted != nil)
 		}
-		rt.upstreamFailed(r.Context(), state)
+		rt.upstreamFailed(r.Context(), state, up.complete())
 		if !refusedBeforeBinding[row.Result] || rt.refusals.allow(session.SourceOf(r.RemoteAddr), rt.now()) {
 			rt.record(row)
 		}
@@ -391,7 +393,7 @@ func (rt *router) recordUpstream(res *http.Response, source string) []session.Re
 	return readings
 }
 
-// An account for which no connection to the upstream could be made upstreamFailureRun
+// An account through which the upstream could not be reached upstreamFailureRun
 // times in a row within upstreamFailureWindow rests for upstreamFailurePause, so that
 // the sessions bound to it rebind instead of failing on it. The pause ends on its own:
 // an exit or an upstream route that recovers is chosen again without an operator, and
@@ -407,23 +409,25 @@ const (
 const upstreamFailedReason = "upstream_failed"
 
 // accountFault reports whether a request counts against its account: the gateway
-// answered it for an unreachable upstream (result upstream_failed) before the
-// transport got a connection for it, through the account's exit to the upstream, and
-// it was not ended by the client (client is the client's request context), by a limit,
-// or by the provider's guard. Getting a connection reads nothing of the request, so a
-// client cannot make it fail; what fails after it (a request the upstream drops, a
-// body the client breaks, a slow answer that times out) may be the request's doing,
-// and does not count.
-func accountFault(client context.Context, state *requestState) bool {
-	return state.upstreamUnavailable && !state.connected.Load() && state.cut == nil &&
-		client.Err() == nil && !errors.Is(state.upstreamErr, errGuardRefused)
+// answered it for an unreachable upstream (result upstream_failed) with no upstream
+// response (so not for a rejected upgrade), and it was not ended by the client (client
+// is the client's request context), by a limit, or by the provider's guard. A failure
+// before the transport got a connection for the request, through the account's exit
+// to the upstream, counts as it is: getting a connection reads nothing of the request.
+// A failure after it (a dropped connection, a timeout awaiting the response head)
+// counts only when bodyRead reports the client's body read to its end without an
+// error, so that a body the client breaks never counts.
+func accountFault(client context.Context, state *requestState, bodyRead bool) bool {
+	return state.upstreamUnavailable && state.upstreamStatus == 0 && state.cut == nil &&
+		client.Err() == nil && !errors.Is(state.upstreamErr, errGuardRefused) &&
+		(!state.connected.Load() || bodyRead)
 }
 
 // upstreamFailed counts a request that accountFault holds against its account and,
 // when it completes a run, pauses the account for upstreamFailurePause. The log line
 // names only the alias.
-func (rt *router) upstreamFailed(client context.Context, state *requestState) {
-	if !accountFault(client, state) {
+func (rt *router) upstreamFailed(client context.Context, state *requestState, bodyRead bool) {
+	if !accountFault(client, state, bodyRead) {
 		return
 	}
 	alias, now := state.alias, rt.now()
@@ -577,11 +581,15 @@ func claudeID(header http.Header, name string) string {
 }
 
 // countingReader counts the bytes read from a request body and reports them to the
-// request's watchdog once it has one.
+// request's watchdog once it has one. It also notes whether the body was read to its
+// end, its declared length or io.EOF, and whether a read failed.
 type countingReader struct {
 	io.ReadCloser
-	count int64
-	dog   *watchdog
+	count  int64
+	length int64 // the declared length; -1 when unknown
+	dog    *watchdog
+	whole  atomic.Bool
+	broken atomic.Bool
 }
 
 // Read reads from the body and adds to the count.
@@ -591,7 +599,18 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	if n > 0 && c.dog != nil {
 		c.dog.touch()
 	}
+	if err != nil && err != io.EOF {
+		c.broken.Store(true)
+	}
+	if err == io.EOF || c.length >= 0 && c.count >= c.length {
+		c.whole.Store(true)
+	}
 	return n, err
+}
+
+// complete reports whether the body was read to its end and no read failed.
+func (c *countingReader) complete() bool {
+	return c.whole.Load() && !c.broken.Load()
 }
 
 // countingWriter counts the body bytes written to the client and reports them to the
