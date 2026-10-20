@@ -33,8 +33,9 @@ th.n {
 }
 
 .icon {
-  width: var(--t-icon-md);
-  height: var(--t-icon-md);
+  --icon-size: var(--t-icon-md);
+  width: var(--icon-size);
+  height: var(--icon-size);
   fill: none;
   stroke: currentColor;
   stroke-width: var(--t-icon-stroke);
@@ -43,8 +44,28 @@ th.n {
   flex: none;
 }
 .icon.sm {
-  width: var(--t-icon-sm);
-  height: var(--t-icon-sm);
+  --icon-size: var(--t-icon-sm);
+}
+/* An icon beside text. The text keeps its baseline, so the pair sits on
+   the line of the text around it. The icon's bottom sits on that baseline
+   and is moved down to centre it on the letters, whose middle is 0.35em
+   above the baseline in the UI font; it takes no height of its own, so a
+   line with an icon is as tall as one without. */
+.status,
+.pace,
+.stale,
+.with-icon,
+.btn,
+.tools .item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--t-space-1);
+}
+:is(.status, .pace, .stale, .with-icon, .btn, .tools .item, .client-name)
+  > .icon {
+  position: relative;
+  top: calc(var(--icon-size) / 2 - 0.35em);
+  margin-top: calc(-1 * var(--icon-size));
 }
 
 /* Shell: fixed sidebar, breadcrumb bar, content. */
@@ -213,11 +234,6 @@ th.n {
   color: var(--t-text-muted);
   font-size: var(--t-text-sm);
 }
-.tools .item {
-  display: flex;
-  align-items: center;
-  gap: var(--t-space-1);
-}
 .seg {
   display: inline-flex;
   border: 1px solid var(--t-border-strong);
@@ -236,6 +252,12 @@ th.n {
   align-items: center;
   color: var(--t-text-muted);
 }
+/* A filter's label and count on one baseline, the line as tall as the
+   control so the pair stays centred in it. */
+.seg a {
+  align-items: baseline;
+  line-height: calc(var(--t-target) - 2px);
+}
 .seg > * + * {
   border-left: 1px solid var(--t-border-subtle);
 }
@@ -245,10 +267,7 @@ th.n {
   color: var(--t-accent);
 }
 .btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--t-space-1);
-  min-height: var(--t-target);
+  line-height: calc(var(--t-target) - 2px);
   padding: 0 var(--t-space-2);
   border: 1px solid var(--t-border-strong);
   border-radius: var(--t-radius-sm);
@@ -257,21 +276,15 @@ th.n {
   color: var(--t-text);
 }
 
+/* A page fills the main area at any width, every part edge to edge. */
 .content {
   padding: var(--t-space-6) var(--t-space-6) var(--t-space-12);
-}
-/* --t-width-main includes the side padding of .content. */
-.content > * {
-  max-width: calc(var(--t-width-main) - 2 * var(--t-space-6));
-}
-.content > .wide {
-  max-width: none;
 }
 
 /* Page heading: the serif is used here and in empty states only. */
 .page-head {
   display: flex;
-  align-items: flex-end;
+  align-items: baseline;
   gap: var(--t-space-4);
   margin-bottom: var(--t-space-4);
 }
@@ -284,14 +297,10 @@ th.n {
 }
 .page-head .sub {
   color: var(--t-text-muted);
-  padding-bottom: var(--t-space-1);
 }
 
 /* Status: a dot or an icon, always with a word. */
 .status {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--t-space-1);
   white-space: nowrap;
 }
 .status .dot {
@@ -421,7 +430,7 @@ th.n {
 }
 .red-chart .title {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--t-space-2);
   font-weight: var(--t-weight-medium);
   margin-bottom: var(--t-space-2);
@@ -429,6 +438,7 @@ th.n {
 .red-chart .title .key {
   margin-left: auto;
   display: flex;
+  align-items: baseline;
   gap: var(--t-space-3);
   color: var(--t-text-muted);
   font-weight: var(--t-weight-regular);
@@ -590,10 +600,18 @@ th {
   white-space: nowrap;
   background: var(--t-bg-panel);
 }
+/* A row's cells share a baseline, so small or mono text sits on the line
+   of the text beside it; the padding centres a line of body text in the
+   row's height. A sparkline has no baseline and is centred instead. */
 td {
-  padding: 0 var(--t-space-3);
+  padding: calc((var(--t-height-row) - var(--t-line-height-ui) * 1rem) / 2)
+    var(--t-space-3);
   height: var(--t-height-row);
   white-space: nowrap;
+  vertical-align: baseline;
+}
+td:has(> .spark) {
+  vertical-align: middle;
 }
 td.wrap {
   white-space: normal;
@@ -625,12 +643,54 @@ tbody tr.link {
 .mono {
   font-family: var(--t-font-mono);
 }
+/* An egress IP's line is as tall as a status pill wherever it is shown,
+   so the check under it is the same step below. */
+.ip {
+  line-height: var(--t-height-pill);
+}
+.ip + * {
+  margin-top: 2px;
+}
+/* The quota table. Every cell starts at the top with a first line as tall
+   as the status pill, so the names, pills, bars, percentages, addresses
+   and counts of a row sit on one line and the small text under each
+   starts on one line too. Headers sit on their bottom line. */
+.quota-table {
+  --quota-line: var(--t-height-pill);
+}
+.quota-table th {
+  vertical-align: bottom;
+}
+.quota-table td {
+  vertical-align: top;
+  padding-top: var(--t-space-3);
+  padding-bottom: var(--t-space-3);
+}
+.quota-table .client-name,
+.quota-table td.n,
+.quota-table .meter .pct,
+.quota-table td:has(> .muted.small:first-child) {
+  line-height: var(--quota-line);
+}
+.quota-table td > .status {
+  display: flex;
+  width: fit-content;
+  height: var(--quota-line);
+  box-sizing: border-box;
+}
+.quota-table td > :nth-child(2) {
+  margin-top: 2px;
+}
 /* The quota windows take the room; the account's email and plan wrap. */
 .quota-table th.win {
   width: 25%;
 }
 .quota-table .meter {
   min-width: 12rem;
+  column-gap: var(--t-space-3);
+}
+.quota-table .meter .when {
+  margin-top: 2px;
 }
 .quota-table .plan {
   min-width: 10rem;
@@ -638,7 +698,7 @@ tbody tr.link {
 }
 .client-name {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--t-space-2);
   font-weight: var(--t-weight-medium);
 }
@@ -707,8 +767,6 @@ tbody tr.link {
 .pace {
   color: var(--t-text-muted);
   white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
   gap: 2px;
 }
 .pace.over {
@@ -727,13 +785,13 @@ tbody tr.link {
   color: var(--t-text-muted);
   display: flex;
   flex-wrap: wrap;
+  align-items: baseline;
   column-gap: var(--t-space-2);
 }
 .meter .when .pace {
   margin-left: auto;
 }
 .meter .stale {
-  display: block;
   flex-basis: 100%;
 }
 
@@ -838,11 +896,16 @@ tbody tr.link {
   text-underline-offset: 2px;
 }
 
-/* Ranked lists with a share bar (Overview, Monitor). */
+/* Ranked lists with a share bar (Overview, Monitor), in as many columns
+   as fit and no more than there are items, each narrow enough that a
+   row's label, bar and count read as one. */
 .rank {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(var(--t-width-list), 100%), 1fr)
+  );
+  gap: 2px var(--t-space-6);
   font-size: var(--t-text-sm);
 }
 .rank-row {
@@ -856,6 +919,11 @@ tbody tr.link {
 }
 .rank-row.static {
   grid-template-columns: auto 1fr var(--t-width-share) 3.5rem;
+}
+/* The icon goes with the title, the first of the label's two lines. */
+.rank-row.static > .icon {
+  align-self: start;
+  margin-top: calc(2px + (1.25em - var(--icon-size)) / 2);
 }
 .rank-row .who {
   min-width: 0;
@@ -893,6 +961,12 @@ tbody tr.link {
 }
 .share-cell {
   white-space: nowrap;
+  text-align: right;
+}
+/* Room for "100.0%", so the bars of a column line up too. */
+.share-cell .num {
+  display: inline-block;
+  min-width: 3.4em;
 }
 .share-cell .share {
   display: inline-block;
@@ -1066,7 +1140,7 @@ tbody tr.link {
 }
 .card-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--t-space-2);
 }
 .card-head .pill {
@@ -1076,7 +1150,7 @@ tbody tr.link {
 .card .line {
   font-size: var(--t-text-sm);
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--t-space-1);
   flex-wrap: wrap;
 }

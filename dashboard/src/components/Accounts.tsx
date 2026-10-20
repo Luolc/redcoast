@@ -13,7 +13,7 @@ export function Egress({ account: a, now }: { account: Account; now: Date }) {
   const w = egressWording(a.egress_check?.outcome);
   return (
     <>
-      <div className="mono">{a.expected_egress_ip}</div>
+      <div className="mono ip">{a.expected_egress_ip}</div>
       <div className="small">
         <Status state={{ tone: w.tone, word: w.text }} />{" "}
         {a.egress_check === undefined ? null : (

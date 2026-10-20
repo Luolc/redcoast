@@ -97,5 +97,7 @@ export default defineConfig({
     // A zone that is neither of the two the page shows, so a test that
     // leans on the machine's local time fails everywhere alike.
     env: { TZ: "Asia/Shanghai" },
+    // The stylesheets as written, which the layout tests read.
+    css: { include: [/\/src\/styles\/[^/]+\.css/] },
   },
 });

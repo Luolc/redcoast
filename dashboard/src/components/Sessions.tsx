@@ -151,11 +151,13 @@ export function Sessions({
                     </td>
                     <td className="mono">{h.session}</td>
                     <td>
-                      <ArrowRightLeft
-                        className="icon sm faint"
-                        aria-hidden="true"
-                      />{" "}
-                      {h.alias}
+                      <span className="with-icon">
+                        <ArrowRightLeft
+                          className="icon sm faint"
+                          aria-hidden="true"
+                        />
+                        {h.alias}
+                      </span>
                     </td>
                     <td className="muted">
                       {h.to === undefined ? (

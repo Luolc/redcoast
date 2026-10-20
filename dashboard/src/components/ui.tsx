@@ -74,18 +74,15 @@ export function Section({
   title,
   note,
   id,
-  wide = false,
   children,
 }: {
   title: string;
   note?: ReactNode;
   id?: string;
-  /** Spans the whole content area instead of stopping at the page's width. */
-  wide?: boolean;
   children: ReactNode;
 }) {
   return (
-    <section className={wide ? "section wide" : "section"} id={id}>
+    <section className="section" id={id}>
       <div className="section-head">
         <h2>{title}</h2>
         {note === undefined ? null : <span className="note">{note}</span>}
@@ -197,8 +194,10 @@ export function Meter({
         {p === null ? null : <PaceText by={p.by} />}
         {stale ? (
           <span className="stale s-warn">
-            <Clock className="icon sm" aria-hidden="true" /> read{" "}
-            <Ago iso={quota.observed_at} now={now} />
+            <Clock className="icon sm" aria-hidden="true" />
+            <span>
+              read <Ago iso={quota.observed_at} now={now} />
+            </span>
           </span>
         ) : null}
       </span>

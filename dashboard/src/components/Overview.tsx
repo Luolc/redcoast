@@ -392,7 +392,6 @@ export function Overview({ data, now }: { data: Dashboard; now: Date }) {
       </Section>
       <Section
         title="Account quota"
-        wide
         note={`Soft limit ${formatPercent(data.soft)} (the tick on each bar), hard limit ${formatPercent(data.hard)}; the hollow mark is an even pace through the window`}
       >
         <AccountsTable data={data} now={now} />
