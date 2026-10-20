@@ -129,9 +129,9 @@ it("lines up each quota row on its first line", () => {
 it("sets each icon on the baseline of the text beside it", () => {
   // The pair keeps the text's baseline; the icon is centred on the letters
   // and adds no height to the line.
-  const pair = /\n\.status,\n\.pace,\n\.stale,\n\.with-icon \{[^}]*\}/.exec(
-    appCss,
-  )?.[0];
+  const pair =
+    /\n\.status,\n\.pace,\n\.stale,\n\.with-icon \{[^}]*\}/.exec(appCss)?.[0] ??
+    "";
   expect(pair).toContain("align-items: baseline;");
   const icon = rule(
     appCss,
