@@ -9,12 +9,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Luolc/redcoast/session"
@@ -28,6 +30,7 @@ type requestState struct {
 	upstreamStatus      int         // the upstream's status when a response arrived; 0 otherwise
 	upstreamUnavailable bool        // set by respondUpstreamUnavailable
 	upstreamErr         error       // the error respondUpstreamUnavailable answered for
+	connected           atomic.Bool // set once the transport holds a connection for the request
 	cut                 error       // errIdleTimeout or errMaxDuration when the limits ended the request
 	meter               *usageMeter // reads the response's usage; nil when it is not read
 }
@@ -273,6 +276,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(down, "gateway busy", http.StatusServiceUnavailable)
 		return
 	}
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { state.connected.Store(true) }})
 	serveWithLimits(rt.proxy, rt.limits, state, up, down, r.WithContext(withAccount(ctx, a, rt.now())))
 }
 
@@ -320,9 +324,9 @@ func outcome(state *requestState, interrupted bool) string {
 }
 
 // inspectUpstream runs on every upstream response before it is written back. It keeps
-// the upstream's status for the traffic row, hands the response to recordUpstream, ends
-// the account's run of upstream failures and puts a usage meter on its body. The response passes through unchanged and is not
-// replayed.
+// the upstream's status for the traffic row, hands the response to recordUpstream,
+// ends the account's run of upstream failures and puts a usage meter on its body. The
+// response passes through unchanged and is not replayed.
 func (rt *router) inspectUpstream(res *http.Response) error {
 	state, ok := res.Request.Context().Value(stateKey{}).(*requestState)
 	if ok {
@@ -387,10 +391,10 @@ func (rt *router) recordUpstream(res *http.Response, source string) []session.Re
 	return readings
 }
 
-// The account the upstream could not be reached through upstreamFailureRun times in a
-// row within upstreamFailureWindow rests for upstreamFailurePause, so that the
-// sessions bound to it rebind instead of failing on it. The pause ends on its own: an
-// exit or an upstream route that recovers is chosen again without an operator, and
+// An account for which no connection to the upstream could be made upstreamFailureRun
+// times in a row within upstreamFailureWindow rests for upstreamFailurePause, so that
+// the sessions bound to it rebind instead of failing on it. The pause ends on its own:
+// an exit or an upstream route that recovers is chosen again without an operator, and
 // one that has not recovered fails another run and rests again.
 const (
 	upstreamFailureRun    = 5
@@ -403,12 +407,15 @@ const (
 const upstreamFailedReason = "upstream_failed"
 
 // accountFault reports whether a request counts against its account: the gateway
-// answered it for an unreachable upstream (result upstream_failed), no upstream
-// response arrived, and it was not ended by the client (client is the client's request
-// context, canceled when the client leaves or its connection breaks), by a limit, or
-// by the provider's guard, none of which says anything about the account's route.
+// answered it for an unreachable upstream (result upstream_failed) before the
+// transport got a connection for it, through the account's exit to the upstream, and
+// it was not ended by the client (client is the client's request context), by a limit,
+// or by the provider's guard. Getting a connection reads nothing of the request, so a
+// client cannot make it fail; what fails after it (a request the upstream drops, a
+// body the client breaks, a slow answer that times out) may be the request's doing,
+// and does not count.
 func accountFault(client context.Context, state *requestState) bool {
-	return state.upstreamUnavailable && state.upstreamStatus == 0 && state.cut == nil &&
+	return state.upstreamUnavailable && !state.connected.Load() && state.cut == nil &&
 		client.Err() == nil && !errors.Is(state.upstreamErr, errGuardRefused)
 }
 
@@ -424,7 +431,7 @@ func (rt *router) upstreamFailed(client context.Context, state *requestState) {
 		return
 	}
 	until := now.Add(upstreamFailurePause)
-	ctx, cancel := context.WithTimeout(context.Background(), captureWriteTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(client), captureWriteTimeout)
 	defer cancel()
 	if err := rt.store.Pause(ctx, alias, until, upstreamFailedReason); err != nil {
 		log.Printf("account pause failed alias=%s", alias)
