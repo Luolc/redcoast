@@ -26,12 +26,22 @@ const (
 // sessionBatch is how many session IDs one lookup of the sessions table names.
 const sessionBatch = 500
 
+// handshakes are the results of refusals a client expects and follows at once with
+// another try: upgrade_declined, a WebSocket upgrade answered with 426, after which the
+// Codex CLI streams over HTTP, and challenged, a CONNECT without Proxy-Authorization
+// answered with 407, after which git and Chromium send their credential.
+var handshakes = map[string]bool{"upgrade_declined": true, "challenged": true}
+
 // failed reports whether a traffic row counts as an error: a result other than ok, or a
 // status of 400 or more (an inference request the upstream answered with an error
 // status is recorded with result ok); status is 0 when the row has none. A CONNECT
 // tunnel that the gateway's limits closed (idle_timeout, max_duration) was open and
-// carried traffic, so it is no error; an inference stream they cut short is one.
+// carried traffic, so it is no error; an inference stream they cut short is one. A
+// handshake is no error, whatever its status.
 func failed(kind, result string, status int) bool {
+	if handshakes[result] {
+		return false
+	}
 	closedByLimit := kind == "connect" && (result == "idle_timeout" || result == "max_duration")
 	return result != "ok" && !closedByLimit || status >= 400
 }
@@ -175,7 +185,7 @@ type SourceCount struct {
 }
 
 // Latency is the spread of the durations of the inference requests in one group that
-// are no error (see failed), in milliseconds. A duration runs from the request's
+// were forwarded and are no error (see failed), in milliseconds. A duration runs from the request's
 // arrival until its response finished streaming, so it is the whole request, not the
 // time to its first byte. CONNECT tunnels are left out: a tunnel's duration is how long
 // it stayed open. Percentiles are nearest-rank: the smallest duration with at least
@@ -456,7 +466,7 @@ func (r *Reader) window(ctx context.Context, since int64, out *Snapshot) error {
 			}).Requests++
 		}
 
-		if v.kind == "inference" && !isError {
+		if v.kind == "inference" && v.result == "ok" && !isError {
 			hours[v.hour] = append(hours[v.hour], v.duration)
 			accounts[v.alias] = append(accounts[v.alias], v.duration)
 			machines[source.machine] = append(machines[source.machine], v.duration)

@@ -446,22 +446,31 @@ func newQuotaRefreshFixture(t *testing.T, aliases ...string) *quotaRefreshFixtur
 // Retry-After header and the body.
 func (f *quotaRefreshFixture) post(t *testing.T) (int, string, map[string]any) {
 	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, f.server.URL+"/quota/refresh", nil)
+	status, retryAfter, body, err := f.tryPost(t.Context())
 	if err != nil {
 		t.Fatal(err)
+	}
+	return status, retryAfter, body
+}
+
+// tryPost is post for a goroutine other than the test's, which must not call t.Fatal.
+func (f *quotaRefreshFixture) tryPost(ctx context.Context) (int, string, map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.server.URL+"/quota/refresh", nil)
+	if err != nil {
+		return 0, "", nil, err
 	}
 	req.Header.Set("Origin", f.server.URL)
 	req.Header.Set(QuotaRefreshHeader, "refresh")
 	res, err := f.server.Client().Do(req)
 	if err != nil {
-		t.Fatal(err)
+		return 0, "", nil, err
 	}
 	defer func() { _ = res.Body.Close() }()
 	var body map[string]any
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
-		t.Fatal(err)
+		return 0, "", nil, err
 	}
-	return res.StatusCode, res.Header.Get("Retry-After"), body
+	return res.StatusCode, res.Header.Get("Retry-After"), body, nil
 }
 
 // settle waits until no dashboard round is pending or running.
@@ -583,8 +592,8 @@ func TestRefreshRoundsTakeTurns(t *testing.T) {
 		}
 	})
 	wg.Go(func() {
-		if status, _, _ := f.post(t); status != http.StatusAccepted {
-			t.Errorf("POST /quota/refresh: status=%d", status)
+		if status, _, _, err := f.tryPost(t.Context()); err != nil || status != http.StatusAccepted {
+			t.Errorf("POST /quota/refresh: status=%d err=%v", status, err)
 		}
 	})
 	wg.Go(func() { f.rt.recheckQuota(t.Context()) })

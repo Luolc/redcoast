@@ -134,10 +134,10 @@ func main() {
 		func(ctx context.Context) error { return entrypoint.RunQuotaRechecks(ctx, quotaRecheck) },
 		func(ctx context.Context) error { return dashboard.RunQuotaRefresh(ctx) },
 		func(ctx context.Context) error {
-			return claude.Serve(ctx, l.health, cfg.readOnly(egress.HealthHandler()))
+			return claude.Serve(ctx, l.health, cfg.hostGuarded(egress.HealthHandler()))
 		},
 		func(ctx context.Context) error {
-			return claude.Serve(ctx, l.dashboard, cfg.readOnly(dashboard.Handler()))
+			return claude.Serve(ctx, l.dashboard, cfg.hostGuarded(dashboard.Handler()))
 		},
 		func(ctx context.Context) error { return claude.Serve(ctx, l.reverse, entrypoint.Reverse) },
 		func(ctx context.Context) error { return claude.Serve(ctx, l.forward, entrypoint.Forward) },
@@ -204,9 +204,9 @@ func newSessionServer(cfg config, store *session.Store, accounts sessionAccounts
 	return sessions
 }
 
-// readOnly is how /health and the dashboard are served: only to requests that name the
-// gateway by one of cfg.hostNames.
-func (cfg config) readOnly(handler http.Handler) http.Handler {
+// hostGuarded is how /health and the dashboard are served: only to requests that name
+// the gateway by one of cfg.hostNames.
+func (cfg config) hostGuarded(handler http.Handler) http.Handler {
 	return claude.HostGuard(cfg.hostNames, handler)
 }
 

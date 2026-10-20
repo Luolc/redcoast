@@ -28,6 +28,24 @@ export function refreshOffer(
   };
 }
 
+/** Why the gateway refused a refresh, and the reading the page showed then. */
+export interface Refusal {
+  text: string;
+  at: string; // the `at` of the dashboard.json shown when the answer came
+}
+
+/**
+ * The refusal to show beside the button: only until the next reading of the
+ * gateway, which gives the state the refusal came from, such as the wait
+ * after a round.
+ */
+export function shownRefusal(
+  refusal: Refusal | null,
+  at: string,
+): string | null {
+  return refusal?.at === at ? refusal.text : null;
+}
+
 /**
  * Asks the gateway to refresh every account's quota. Resolves to null once
  * the gateway started a round or joined the one running, otherwise to why

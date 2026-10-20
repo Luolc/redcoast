@@ -117,7 +117,9 @@ func connectOn(t *testing.T, conn net.Conn, target, authorization string) (net.C
 // and the traffic row: a tunnel through the bound account's exit carries bytes both
 // ways with the account's credentials, a rejecting or unreachable exit fails without
 // any other connection, a missing or wrong session credential is refused with 407
-// before any connection, and requests other than CONNECT are refused.
+// before any connection, recorded as challenged when Proxy-Authorization is missing
+// and auth_failed when it is unreadable or names no session, and requests other than
+// CONNECT are refused.
 func TestForwardProxy(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -131,7 +133,7 @@ func TestForwardProxy(t *testing.T) {
 		{"exit_rejects", 407, true, "session", 502, "egress_failed"},
 		{"exit_unreachable", 0, true, "session", 502, "egress_failed"},
 		{"not_connect", 200, false, "session", 405, "refused"},
-		{"no_credential", 200, true, "", 407, "auth_failed"},
+		{"no_credential", 200, true, "", 407, "challenged"},
 		{"unknown_credential", 200, true, "sk-ant-gws-" + strings.Repeat("C", 43), 407, "auth_failed"},
 		{"not_session_credential", 200, true, "sk-ant-oat01-" + strings.Repeat("C", 43), 407, "not_session"},
 		{"not_basic", 200, true, "bearer", 407, "auth_failed"},
@@ -487,7 +489,8 @@ func TestShutdownWaitsForOpenTunnel(t *testing.T) {
 
 // TestForwardRefusedRowsAreLimitedPerSource sends more CONNECTs with an unknown session
 // credential from one address than a window records: only refusalRowsPerSource of them
-// get a row, and a tunnel with a valid session still does. Control arm: once the
+// get a row, and neither do later ones with a credential not of the session shape or
+// with none, while a tunnel with a valid session still does. Control arm: once the
 // loopback address is over its limit, the first refusal from another address is still
 // recorded, and the loopback address's next one is not.
 func TestForwardRefusedRowsAreLimitedPerSource(t *testing.T) {
@@ -515,6 +518,10 @@ func TestForwardRefusedRowsAreLimitedPerSource(t *testing.T) {
 	// Not of the session shape: counted against the same limit.
 	for range 2 {
 		refuse(proxyAuthorization("sk-ant-oat01-" + strings.Repeat("B", 43)))
+	}
+	// Without Proxy-Authorization, challenged: counted against the same limit too.
+	for range 2 {
+		refuse("")
 	}
 	conn, _, response := connect(t, address, "api.example.test:443", proxyAuthorization(h.token))
 	if response.StatusCode != 200 {
