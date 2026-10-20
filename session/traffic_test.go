@@ -56,11 +56,14 @@ func TestRecordTraffic(t *testing.T) {
 	}
 }
 
-// undoV7 turns a version-7 file back into a version-6 one, but for user_version.
-var undoV7 = []string{
+// undoV8 turns a version-8 file back into a version-7 one, but for user_version.
+var undoV8 = []string{"ALTER TABLE traffic DROP COLUMN failure"}
+
+// undoV7 turns a version-8 file back into a version-6 one, but for user_version.
+var undoV7 = append(slices.Clone(undoV8),
 	"ALTER TABLE traffic DROP COLUMN model", "ALTER TABLE traffic DROP COLUMN input_tokens", "ALTER TABLE traffic DROP COLUMN output_tokens",
 	"ALTER TABLE traffic DROP COLUMN cache_read_tokens", "ALTER TABLE traffic DROP COLUMN cache_creation_tokens", "DROP TABLE quota_history",
-}
+)
 
 // TestMigrateAddsRoute opens a version-4 file, written before the direct route
 // existed: its CONNECT rows with a target become account, and the row with an invalid
@@ -289,5 +292,57 @@ func TestMigrateFromVersion6(t *testing.T) {
 	}
 	if got := count(t, migrated, "SELECT COUNT(*) FROM quota_history"); got != 1 {
 		t.Fatalf("quota history after a reading = %d rows, want 1", got)
+	}
+}
+
+// TestMigrateFromVersion7 opens a version-7 file while the process that wrote it still
+// holds it open, as in a handoff: the old rows have no failure; the old process's
+// insert, which names the version-7 columns, still succeeds and leaves it NULL; the new
+// process records one. Control arm: before the migration the version-7 file has no
+// failure column.
+func TestMigrateFromVersion7(t *testing.T) {
+	c := newClock()
+	old, path := open(t, c)
+	ctx := context.Background()
+	for _, statement := range append(undoV8, "PRAGMA user_version = 7") {
+		if _, err := old.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The insert of the version-7 RecordTraffic, verbatim.
+	const v7Insert = `
+		INSERT INTO traffic (ts, session_id, alias, kind, host, port, bytes_up, bytes_down, duration_ms, result, status, claude_session_id, claude_agent_id, route, request,
+			model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	insertV7 := func() error {
+		_, err := old.db.ExecContext(ctx, v7Insert, 0, nil, "sample-a", "inference", "api.anthropic.com", 443, 0, 0, 0, "upstream_failed", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		return err
+	}
+	if err := insertV7(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.db.Exec("SELECT failure FROM traffic"); err == nil {
+		t.Fatal("failure column present before the migration")
+	}
+	migrated, err := Open(ctx, path, Config{Now: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = migrated.Close() }()
+	var version int
+	if err := migrated.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	if err := insertV7(); err != nil {
+		t.Fatalf("version-7 insert after the migration: %v", err)
+	}
+	if err := migrated.RecordTraffic(ctx, Traffic{Kind: "inference", Host: "api.anthropic.com", Port: 443, Result: "upstream_failed", Failure: "reset"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(t, migrated, "SELECT COUNT(*) FROM traffic WHERE failure IS NULL"); got != 2 {
+		t.Fatalf("rows without failure = %d, want the two version-7 rows", got)
+	}
+	if got := count(t, migrated, "SELECT COUNT(*) FROM traffic WHERE failure = 'reset'"); got != 1 {
+		t.Fatalf("rows with failure = %d, want 1", got)
 	}
 }

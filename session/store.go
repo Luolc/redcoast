@@ -35,7 +35,7 @@ const (
 
 // schemaVersion is stored in PRAGMA user_version. Each version's tables are created by
 // migrate when the file's version is lower.
-const schemaVersion = 7
+const schemaVersion = 8
 
 // schema creates the tables of version 1. Timestamps are Unix milliseconds in UTC.
 const schema = `
@@ -261,7 +261,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	for _, step := range []struct {
 		version int
 		apply   func(context.Context, *sql.Tx) error
-	}{{1, s.migrateToV1}, {2, migrateToV2}, {3, migrateToV3}, {4, migrateToV4}, {5, migrateToV5}, {6, migrateToV6}, {7, migrateToV7}} {
+	}{{1, s.migrateToV1}, {2, migrateToV2}, {3, migrateToV3}, {4, migrateToV4}, {5, migrateToV5}, {6, migrateToV6}, {7, migrateToV7}, {8, migrateToV8}} {
 		if version < step.version {
 			if err := step.apply(ctx, tx); err != nil {
 				return err
@@ -352,6 +352,15 @@ func migrateToV6(ctx context.Context, tx *sql.Tx) error {
 func migrateToV7(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, schemaV7); err != nil {
 		return fmt.Errorf("session store migration v7: %v", err)
+	}
+	return nil
+}
+
+// migrateToV8 adds why the upstream could not be reached, for each inference request
+// the gateway answered in its place. Older rows and other results stay NULL.
+func migrateToV8(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, "ALTER TABLE traffic ADD COLUMN failure TEXT"); err != nil {
+		return fmt.Errorf("session store migration v8: %v", err)
 	}
 	return nil
 }

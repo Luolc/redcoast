@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"regexp"
@@ -24,10 +25,13 @@ import (
 type requestState struct {
 	sessionID           string
 	alias               string
-	upstreamStatus      int         // the upstream's status when a response arrived; 0 otherwise
-	upstreamUnavailable bool        // set by respondUpstreamUnavailable
-	cut                 error       // errIdleTimeout or errMaxDuration when the limits ended the request
-	meter               *usageMeter // reads the response's usage; nil when it is not read
+	upstreamStatus      int            // the upstream's status when a response arrived; 0 otherwise
+	upstreamUnavailable bool           // set by respondUpstreamUnavailable
+	failure             string         // why the upstream could not be reached, set with upstreamUnavailable
+	forwarded           time.Time      // when the request was handed to the reverse proxy
+	phases              upstreamPhases // how far the request got toward the upstream
+	cut                 error          // errIdleTimeout or errMaxDuration when the limits ended the request
+	meter               *usageMeter    // reads the response's usage; nil when it is not read
 }
 
 // stateKey is the context key of the request's *requestState.
@@ -187,7 +191,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// after the response started. Record first, then re-panic so net/http still
 		// aborts the client connection.
 		aborted := recover()
-		row.BytesUp, row.BytesDown, row.Status = up.count, down.count, state.upstreamStatus
+		row.BytesUp, row.BytesDown, row.Status, row.Failure = up.count, down.count, state.upstreamStatus, state.failure
 		row.Duration = time.Since(start)
 		if state.meter != nil {
 			row.Usage = state.meter.result()
@@ -269,7 +273,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(down, "gateway busy", http.StatusServiceUnavailable)
 		return
 	}
-	serveWithLimits(rt.proxy, rt.limits, state, up, down, r.WithContext(withAccount(ctx, a, rt.now())))
+	state.forwarded = time.Now()
+	forwarded := httptrace.WithClientTrace(withAccount(ctx, a, rt.now()), state.phases.trace())
+	serveWithLimits(rt.proxy, rt.limits, state, up, down, r.WithContext(forwarded))
 }
 
 // screenResult is the result of a request the provider's screen answered with status.

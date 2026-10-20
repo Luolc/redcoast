@@ -25,6 +25,7 @@ type Traffic struct {
 	ClaudeSession string // x-claude-code-session-id of an inference request, if any
 	ClaudeAgent   string // x-claude-code-agent-id of an inference request, if any
 	Request       string // method and path of a request the reverse proxy refused to forward; empty otherwise
+	Failure       string // why the upstream could not be reached when the gateway answered in its place; empty otherwise
 	Usage         *Usage // what the response of an inference request reported of its model and tokens; nil when nothing
 }
 
@@ -52,11 +53,11 @@ func (s *Store) RecordTraffic(ctx context.Context, t Traffic) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO traffic (ts, session_id, alias, kind, host, port, bytes_up, bytes_down, duration_ms, result, status, claude_session_id, claude_agent_id, route, request,
-			model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, failure)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.At.UnixMilli(), nullable(t.SessionID), nullable(t.Alias), t.Kind, t.Host, t.Port, t.BytesUp, t.BytesDown, t.Duration.Milliseconds(),
 		t.Result, nullableInt(t.Status), nullable(t.ClaudeSession), nullable(t.ClaudeAgent), nullable(t.Route), nullable(t.Request),
-		model, tokens[0], tokens[1], tokens[2], tokens[3])
+		model, tokens[0], tokens[1], tokens[2], tokens[3], nullable(t.Failure))
 	if err != nil {
 		return fmt.Errorf("record traffic: %v", err)
 	}
