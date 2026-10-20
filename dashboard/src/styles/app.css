@@ -648,6 +648,9 @@ tbody tr.link {
 .ip {
   line-height: var(--t-height-pill);
 }
+.ip + * {
+  margin-top: 2px;
+}
 /* The quota table. Every cell starts at the top with a first line as tall
    as the status pill, so the names, pills, bars, percentages, addresses
    and counts of a row sit on one line and the small text under each

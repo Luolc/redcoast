@@ -177,6 +177,7 @@ it("right-aligns Clients' share and steps the egress check alike", () => {
   expect(rule(appCss, ".share-cell")).toContain("text-align: right;");
   // The IP's line has one height in the quota table, on Exits and Monitor.
   expect(rule(appCss, ".ip")).toContain("line-height: var(--t-height-pill);");
+  expect(rule(appCss, ".ip + *")).toContain("margin-top: 2px;");
   expect(
     renderToStaticMarkup(
       <Page data={data} now={now} route={{ view: "exits" }} />,
