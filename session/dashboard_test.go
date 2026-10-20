@@ -41,7 +41,7 @@ func TestDashboardEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"machines", "sessions", "hourly", "results", "usage", "result_sources", "clients", "client_hourly", "destinations", "history"} {
+	for _, table := range []string{"machines", "sessions", "usage", "result_sources", "clients", "client_hourly", "destinations", "history"} {
 		if !strings.Contains(string(body), `"`+table+`":[]`) {
 			t.Fatalf("empty table %s is not an empty array: %s", table, body)
 		}
@@ -147,11 +147,11 @@ func TestDashboardSnapshot(t *testing.T) {
 		t.Fatalf("destinations = %+v", snap.Destinations)
 	}
 	results := map[string]int{}
-	for _, r := range snap.Results {
+	for _, r := range snap.SourceCounts {
 		results[r.Kind+"/"+r.Result] += r.Count
 	}
 	if results["connect/ok"] != 2 || results["connect/limited"] != 1 || results["connect/egress_failed"] != 1 || results["inference/limited"] != 1 {
-		t.Fatalf("results = %+v", snap.Results)
+		t.Fatalf("result sources = %+v", snap.SourceCounts)
 	}
 	today := DayCounts{Day: time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC), LimitedInference: 1, LimitedConnect: 1, TunnelPeak: 2, SessionPeak: 2, Leaked: 1}
 	if snap.Days[6] != today || snap.Days[4].TunnelPeak != 1 || snap.Days[5].SessionPeak != 1 || snap.Days[0].TunnelPeak != 1 {
@@ -289,10 +289,6 @@ func TestDashboardUsageBySource(t *testing.T) {
 		if !slices.Equal(got[k], w) {
 			t.Errorf("result sources %+v = %+v, want %+v", k, got[k], w)
 		}
-	}
-	// The existing tables keep their grouping: hourly by account and kind only.
-	if len(snap.Hourly) != 4 || len(snap.Results) == 0 {
-		t.Fatalf("hourly = %+v, results = %+v", snap.Hourly, snap.Results)
 	}
 }
 

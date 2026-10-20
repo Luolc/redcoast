@@ -77,9 +77,7 @@ type Snapshot struct {
 	Accounts     []AccountView  `json:"accounts"`
 	Machines     []MachineView  `json:"machines"`
 	Sessions     []LiveSession  `json:"sessions"`
-	IdleSessions int            `json:"idle_sessions"` // live sessions without a request for idleReference
-	Hourly       []HourTraffic  `json:"hourly"`
-	Results      []ResultCount  `json:"results"`
+	IdleSessions int            `json:"idle_sessions"`  // live sessions without a request for idleReference
 	Usage        []UsagePoint   `json:"usage"`          // the hourly figures by account and client machine
 	ModelUsage   []ModelUsage   `json:"model_usage"`    // the hourly tokens by account and model
 	SourceCounts []SourceCount  `json:"result_sources"` // results by account and client machine
@@ -119,16 +117,6 @@ type LiveSession struct {
 	// launcher did not report a valid one.
 	Client        string `json:"client"`
 	ClientVersion string `json:"client_version"`
-}
-
-// HourTraffic is one hour's requests and bytes of one account and kind.
-type HourTraffic struct {
-	Hour      time.Time `json:"hour"`
-	Alias     string    `json:"alias"` // empty for requests carried on no account
-	Kind      string    `json:"kind"`
-	Requests  int       `json:"requests"`
-	BytesUp   int64     `json:"bytes_up"`
-	BytesDown int64     `json:"bytes_down"`
 }
 
 // ResultCount is how many rows of one kind ended with one result and status.
@@ -263,8 +251,8 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		return Snapshot{}, err
 	}
 	now := status.At.UnixMilli()
-	out := Snapshot{At: status.At, Soft: status.Soft, Hard: status.Hard, Accounts: []AccountView{}, Machines: []MachineView{}, Sessions: []LiveSession{}, Hourly: []HourTraffic{},
-		Results: []ResultCount{}, Usage: []UsagePoint{}, ModelUsage: []ModelUsage{}, SourceCounts: []SourceCount{}, Destinations: []Destination{}, History: []HistoryEntry{}}
+	out := Snapshot{At: status.At, Soft: status.Soft, Hard: status.Hard, Accounts: []AccountView{}, Machines: []MachineView{}, Sessions: []LiveSession{},
+		Usage: []UsagePoint{}, ModelUsage: []ModelUsage{}, SourceCounts: []SourceCount{}, Destinations: []Destination{}, History: []HistoryEntry{}}
 	db := r.store.db
 	if err := db.QueryRowContext(ctx, "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()").Scan(&out.DBBytes); err != nil {
 		return Snapshot{}, fmt.Errorf("database size: %v", err)
@@ -400,10 +388,6 @@ func (r *Reader) window(ctx context.Context, since int64, out *Snapshot) error {
 		return err
 	}
 
-	type hourKey struct {
-		hour        int64
-		alias, kind string
-	}
 	type resultKey struct {
 		kind, result string
 		status       int
@@ -424,29 +408,22 @@ func (r *Reader) window(ctx context.Context, since int64, out *Snapshot) error {
 		hour            int64
 		machine, client string
 	}
-	hourly, results, usage := map[hourKey]*HourTraffic{}, map[resultKey]*ResultCount{}, map[usageKey]*UsagePoint{}
-	models, sources, clients := map[modelKey]*ModelUsage{}, map[sourceKey]*SourceCount{}, map[clientKey]*ClientHour{}
+	usage, models := map[usageKey]*UsagePoint{}, map[modelKey]*ModelUsage{}
+	sources, clients := map[sourceKey]*SourceCount{}, map[clientKey]*ClientHour{}
 	hours, accounts, machines := map[int64][]int64{}, map[string][]int64{}, map[string][]int64{}
 	for _, v := range rows {
-		source, joined := sessions[v.session.String]
-		joined = joined && v.session.Valid
+		var source sessionSource
+		joined := false
+		if v.session.Valid {
+			source, joined = sessions[v.session.String]
+		}
 		isError := failed(v.kind, v.result, v.status)
 		limited := 0
 		if v.result == "limited" {
 			limited = 1
 		}
 
-		h := entry(hourly, hourKey{v.hour, v.alias, v.kind}, func(k hourKey) HourTraffic {
-			return HourTraffic{Hour: fromMillis(k.hour), Alias: k.alias, Kind: k.kind}
-		})
-		h.Requests++
-		h.BytesUp += v.bytesUp
-		h.BytesDown += v.bytesDown
-
 		result := resultKey{v.kind, v.result, v.status}
-		entry(results, result, func(k resultKey) ResultCount {
-			return ResultCount{Kind: k.kind, Result: k.result, Status: k.status}
-		}).Count++
 
 		u := entry(usage, usageKey{v.hour, v.alias, source.machine, v.kind}, func(k usageKey) UsagePoint {
 			return UsagePoint{Hour: fromMillis(k.hour), Alias: k.alias, Machine: k.machine, Kind: k.kind}
@@ -486,12 +463,6 @@ func (r *Reader) window(ctx context.Context, since int64, out *Snapshot) error {
 		}
 	}
 
-	out.Hourly = sortedValues(hourly, func(a, b *HourTraffic) int {
-		return cmp.Or(a.Hour.Compare(b.Hour), cmp.Compare(a.Alias, b.Alias), cmp.Compare(a.Kind, b.Kind))
-	})
-	out.Results = sortedValues(results, func(a, b *ResultCount) int {
-		return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(b.Count, a.Count), cmp.Compare(a.Result, b.Result), cmp.Compare(a.Status, b.Status))
-	})
 	out.Usage = sortedValues(usage, func(a, b *UsagePoint) int {
 		return cmp.Or(a.Hour.Compare(b.Hour), cmp.Compare(a.Alias, b.Alias), cmp.Compare(a.Machine, b.Machine), cmp.Compare(a.Kind, b.Kind))
 	})

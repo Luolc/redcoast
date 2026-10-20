@@ -36,7 +36,7 @@ func referenceTables(t *testing.T, r *Reader, now time.Time) Snapshot {
 	nowMs := now.UnixMilli()
 	since := nowMs - dashboardHours*time.Hour.Milliseconds()
 	dayStart := now.Truncate(24*time.Hour).AddDate(0, 0, 1-dashboardDays).UnixMilli()
-	out := Snapshot{Hourly: []HourTraffic{}, Results: []ResultCount{}, Usage: []UsagePoint{}, ModelUsage: []ModelUsage{}, SourceCounts: []SourceCount{},
+	out := Snapshot{Usage: []UsagePoint{}, ModelUsage: []ModelUsage{}, SourceCounts: []SourceCount{},
 		ClientHourly: []ClientHour{}, Destinations: []Destination{}}
 	check := func(err error) {
 		t.Helper()
@@ -44,19 +44,6 @@ func referenceTables(t *testing.T, r *Reader, now time.Time) Snapshot {
 			t.Fatal(err)
 		}
 	}
-	check(collect(ctx, db, &out.Hourly, func(rows *sql.Rows) (HourTraffic, error) {
-		var v HourTraffic
-		var hour int64
-		err := rows.Scan(&hour, &v.Alias, &v.Kind, &v.Requests, &v.BytesUp, &v.BytesDown)
-		v.Hour = fromMillis(hour)
-		return v, err
-	}, `SELECT ts / 3600000 * 3600000 AS hour, COALESCE(alias, '') AS a, kind, COUNT(*), SUM(bytes_up), SUM(bytes_down)
-		FROM traffic WHERE ts >= ? GROUP BY hour, a, kind ORDER BY hour, a, kind`, since))
-	check(collect(ctx, db, &out.Results, func(rows *sql.Rows) (ResultCount, error) {
-		var v ResultCount
-		return v, rows.Scan(&v.Kind, &v.Result, &v.Status, &v.Count)
-	}, `SELECT kind, result, COALESCE(status, 0) AS st, COUNT(*) AS n FROM traffic WHERE ts >= ?
-		GROUP BY kind, result, st ORDER BY kind, n DESC, result, st`, since))
 	check(collect(ctx, db, &out.Usage, func(rows *sql.Rows) (UsagePoint, error) {
 		var v UsagePoint
 		var hour int64
@@ -187,7 +174,7 @@ func referenceDays(t *testing.T, r *Reader, start, now int64) []DayCounts {
 
 // seedReference fills store with made-up sessions and traffic rows drawn from a fixed
 // seed: more sessions than one lookup batch reads, rows across nine days and a little
-// after now, NULL and empty columns, rows of a missing session, launch metadata that
+// after now, NULL and empty columns, rows of a missing session and of a session with an empty ID, launch metadata that
 // names no known client or that SQLite cannot parse, and the window bounds exactly.
 func seedReference(t *testing.T, store *Store, now time.Time, maxTunnel time.Duration) {
 	t.Helper()
@@ -223,6 +210,8 @@ func seedReference(t *testing.T, store *Store, now time.Time, maxTunnel time.Dur
 			id, "hash-"+id, pick("machine-a", "machine-b", "machine-c"), metas[rng.IntN(len(metas))], created, created+rng.Int64N(hour), ended, reason)
 		ids = append(ids, id)
 	}
+	// A session with an empty ID, which a row of no session must not join.
+	exec("INSERT INTO sessions VALUES ('', 'hash-empty', 'machine-c', '192.0.2.1:5000', NULL, ?, ?, NULL, NULL)", nowMs-day, nowMs-day)
 	tsOf := func() int64 {
 		switch rng.IntN(12) {
 		case 0:
@@ -237,7 +226,7 @@ func seedReference(t *testing.T, store *Store, now time.Time, maxTunnel time.Dur
 	}
 	for range 6000 {
 		ts := tsOf()
-		session := pick(nil, "missing-session", ids[rng.IntN(len(ids))], ids[rng.IntN(len(ids))], ids[rng.IntN(len(ids))])
+		session := pick(nil, "", "missing-session", ids[rng.IntN(len(ids))], ids[rng.IntN(len(ids))], ids[rng.IntN(len(ids))])
 		alias := pick(nil, "", "sample-a", "sample-b")
 		kind := pick("inference", "connect").(string)
 		result := pick("ok", "ok", "ok", "limited", "idle_timeout", "max_duration", "egress_failed", "upstream_failed")
@@ -286,8 +275,6 @@ func TestDashboardMatchesReference(t *testing.T) {
 		got, want any
 		size      int
 	}{
-		{"hourly", snap.Hourly, want.Hourly, len(want.Hourly)},
-		{"results", snap.Results, want.Results, len(want.Results)},
 		{"usage", snap.Usage, want.Usage, len(want.Usage)},
 		{"model_usage", snap.ModelUsage, want.ModelUsage, len(want.ModelUsage)},
 		{"result_sources", snap.SourceCounts, want.SourceCounts, len(want.SourceCounts)},
