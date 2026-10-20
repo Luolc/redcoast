@@ -16,7 +16,7 @@ import (
 
 // Windows of the dashboard's tables.
 const (
-	dashboardHours   = 24 // hourly traffic and result counts
+	dashboardHours   = 24 // the hourly tables, result sources and latency
 	dashboardDays    = 7  // daily counts and CONNECT destinations, by UTC day
 	dashboardHistory = 50 // binding history rows
 	shortID          = 8  // characters of a session ID the dashboard shows
