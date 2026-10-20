@@ -286,8 +286,9 @@ func TestRefreshAll(t *testing.T) {
 // TestQuotaRecheck checks one round of the quota recheck over accounts that each have
 // their own exit: it refreshes an account whose reading at or over soft has passed its
 // reset, and one paused for quota whose rejected reading has, ending that pause; it
-// sends nothing for an account over soft whose reset is still ahead, one under soft
-// whose reset passed, or one paused for another reason, and logs nothing for the last.
+// sends nothing for an account over soft whose reset is still ahead or unknown, one
+// under soft whose reset passed, or one paused for another reason, and logs nothing
+// for the last.
 func TestQuotaRecheck(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
@@ -302,9 +303,10 @@ func TestQuotaRecheck(t *testing.T) {
 		"sample-d": {Window: session.Window5h, Utilization: 0.97, ResetAt: past},
 		"sample-e": {Window: session.Window7d, Utilization: 0.5, Status: "rejected", ResetAt: past},
 		"sample-f": {Window: session.Window5h, Utilization: 0.97, ResetAt: past},
+		"sample-g": {Window: session.Window5h, Utilization: 0.97},
 	}
 	exits := map[string]*refreshExit{}
-	for _, alias := range []string{"sample-a", "sample-b", "sample-c", "sample-d", "sample-e", "sample-f"} {
+	for _, alias := range []string{"sample-a", "sample-b", "sample-c", "sample-d", "sample-e", "sample-f", "sample-g"} {
 		exit := startRefreshExit(t, h.clock)
 		exit.answer(200, "0.1")
 		exitURL, err := url.Parse(exit.server.URL)
@@ -327,7 +329,7 @@ func TestQuotaRecheck(t *testing.T) {
 
 	h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{}).recheckQuota(ctx)
 
-	for alias, sent := range map[string]int{"sample-a": 1, "sample-b": 0, "sample-c": 0, "sample-d": 0, "sample-e": 1, "sample-f": 0} {
+	for alias, sent := range map[string]int{"sample-a": 1, "sample-b": 0, "sample-c": 0, "sample-d": 0, "sample-e": 1, "sample-f": 0, "sample-g": 0} {
 		if exits[alias].requests() != sent {
 			t.Errorf("exit of %s received %d requests, want %d", alias, exits[alias].requests(), sent)
 		}
