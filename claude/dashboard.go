@@ -1,12 +1,14 @@
 package claude
 
 import (
+	"compress/gzip"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,7 +99,8 @@ type dashboardAccount struct {
 	Concurrency int          `json:"concurrency"`
 }
 
-// Handler returns the dashboard's routes.
+// Handler returns the dashboard's routes, compressed with gzip for a request that
+// accepts it.
 func (d *Dashboard) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dashboard.json", func(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +114,7 @@ func (d *Dashboard) Handler() http.Handler {
 	if d.cfg.Dir != "" {
 		mux.Handle("GET /{$}", page(d.cfg.Dir))
 	}
-	return mux
+	return compressed(mux)
 }
 
 // view reads everything the dashboard shows.
@@ -202,6 +205,85 @@ func page(dir string) http.Handler {
 		}
 		http.ServeContent(w, r, "index.html", info.ModTime(), file)
 	})
+}
+
+// compressed compresses next's 200 answers with gzip for a request that accepts it. A
+// Range header is dropped first, so the page is never answered with a part of the
+// compressed body: such a request gets the whole page, still allowed by RFC 9110.
+// Other statuses, 304 and 404 among them, pass as they are.
+func compressed(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Vary", "Accept-Encoding")
+		if !acceptsGzip(r.Header) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		r = r.Clone(r.Context())
+		r.Header.Del("Range")
+		gw := &gzipWriter{ResponseWriter: w}
+		next.ServeHTTP(gw, r)
+		if gw.gz != nil {
+			_ = gw.gz.Close()
+		}
+	})
+}
+
+// acceptsGzip reports whether Accept-Encoding gives gzip, or else *, a weight above 0.
+func acceptsGzip(header http.Header) bool {
+	gzipQ, anyQ := -1.0, -1.0
+	for _, value := range header.Values("Accept-Encoding") {
+		for entry := range strings.SplitSeq(value, ",") {
+			coding, params, _ := strings.Cut(entry, ";")
+			q := 1.0
+			for param := range strings.SplitSeq(params, ";") {
+				name, weight, ok := strings.Cut(param, "=")
+				if !ok || !strings.EqualFold(strings.TrimSpace(name), "q") {
+					continue
+				}
+				// A weight that does not parse counts as 0.
+				q, _ = strconv.ParseFloat(strings.TrimSpace(weight), 64)
+			}
+			switch strings.ToLower(strings.TrimSpace(coding)) {
+			case "gzip", "x-gzip":
+				gzipQ = q
+			case "*":
+				anyQ = q
+			}
+		}
+	}
+	if gzipQ >= 0 {
+		return gzipQ > 0
+	}
+	return anyQ > 0
+}
+
+// gzipWriter compresses the body when the answer's status is 200.
+type gzipWriter struct {
+	http.ResponseWriter
+	gz          *gzip.Writer // nil until a 200 answer starts
+	wroteHeader bool
+}
+
+func (g *gzipWriter) WriteHeader(status int) {
+	if !g.wroteHeader && status == http.StatusOK {
+		header := g.Header()
+		header.Del("Content-Length")
+		header.Del("Accept-Ranges")
+		header.Set("Content-Encoding", "gzip")
+		g.gz = gzip.NewWriter(g.ResponseWriter)
+	}
+	g.wroteHeader = true
+	g.ResponseWriter.WriteHeader(status)
+}
+
+func (g *gzipWriter) Write(p []byte) (int, error) {
+	if !g.wroteHeader {
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.gz == nil {
+		return g.ResponseWriter.Write(p)
+	}
+	return g.gz.Write(p)
 }
 
 // commitOf returns the commit that an inventory link to inventories/<commit> names. It
