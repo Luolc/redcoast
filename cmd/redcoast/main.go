@@ -120,8 +120,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	sessions := session.NewServer(store, entrypoints(cfg), accounts.Candidates)
-	sessions.SetAside = accounts.SetAside
+	sessions := newSessionServer(cfg, store, accounts)
 	l, err := listenAndNotify(upg, cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -187,6 +186,21 @@ func entrypoints(cfg config) session.Entrypoints {
 	_, reverse, _ := net.SplitHostPort(cfg.listen)
 	_, forward, _ := net.SplitHostPort(cfg.forwardListen)
 	return session.Entrypoints{ReverseProxy: "https://" + net.JoinHostPort(cfg.serverName, reverse), ForwardProxy: net.JoinHostPort(cfg.serverName, forward)}
+}
+
+// sessionAccounts is what the session interface reads of the account set: the
+// candidates and those the egress check set aside (claude.Accounts).
+type sessionAccounts interface {
+	Candidates() []string
+	SetAside() []string
+}
+
+// newSessionServer returns the session interface over store, refusing a session when
+// no account of accounts could serve it, set-aside ones left out.
+func newSessionServer(cfg config, store *session.Store, accounts sessionAccounts) *session.Server {
+	sessions := session.NewServer(store, entrypoints(cfg), accounts.Candidates)
+	sessions.SetAside = accounts.SetAside
+	return sessions
 }
 
 // readOnly is how /health and the dashboard are served: only to requests that name the

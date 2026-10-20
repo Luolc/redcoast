@@ -581,3 +581,34 @@ func TestUpstreamReachKeepsPauses(t *testing.T) {
 		t.Fatalf("%d CONNECTs to the upstream in the second sweep, want 2 (none for sample-c)", n)
 	}
 }
+
+// TestReloadMigrationSkipsSetAside checks that a reload's migration does not move a
+// session to an account the egress check set aside: the session bound to sample-a,
+// whose token changes, is left unplaced while sample-b is set aside. Control arm:
+// with sample-b not set aside the session moves to it.
+func TestReloadMigrationSkipsSetAside(t *testing.T) {
+	for _, setAside := range []bool{true, false} {
+		t.Run(map[bool]string{true: "set_aside", false: "reachable"}[setAside], func(t *testing.T) {
+			h := newReloadHarness(t, aAndB)
+			if h.send(h.token) != 200 || h.bound(h.sessionID) != "sample-a" {
+				t.Fatal("session not on sample-a")
+			}
+			if setAside {
+				reason := "exit cannot reach api.anthropic.com: 403"
+				h.accounts.set.Load().lookup("sample-b").setAside.Store(&reason)
+			}
+			h.rewrite(map[string]string{"sample-a": "op://example-vault/token-a-new/credential", "sample-b": "op://example-vault/token-b/credential"})
+			r, err := h.reload(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, wantMoved, wantUnplaced := "sample-b", 1, 0
+			if setAside {
+				want, wantMoved, wantUnplaced = "", 0, 1
+			}
+			if r.Moved != wantMoved || r.Unplaced != wantUnplaced || h.bound(h.sessionID) != want {
+				t.Fatalf("reload %+v, session on %q; want moved %d, unplaced %d, on %q", r, h.bound(h.sessionID), wantMoved, wantUnplaced, want)
+			}
+		})
+	}
+}
