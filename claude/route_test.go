@@ -345,51 +345,80 @@ func TestRestartKeepsSessionAndBinding(t *testing.T) {
 // TestTrafficTableKeepsNoBody (E3.12) checks the whole SQLite file for a marker sent in
 // a request body and in a response body: zero hits, while the session ID and the
 // Claude Code session ID from the request header are found. A header value of another
-// shape is dropped.
+// shape is dropped. The JSON and event-stream arms go through the usage meter: the row
+// keeps the model and the token counts it reads and nothing of the text around them.
 func TestTrafficTableKeepsNoBody(t *testing.T) {
 	const marker = "synthetic-body-marker-0f9e8d7c"
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := io.Copy(io.Discard, r.Body); err != nil {
-			return
-		}
-		if _, err := io.WriteString(w, `{"text":"`+marker+`"}`); err != nil {
-			return
-		}
-	}))
-	defer upstream.Close()
-	h := newHarness(t, "sample-a")
-	server := h.gateway(upstream.URL)
-	const claudeSession = "abcdef01-2345-4678-89ab-cdef01234567"
-	if status, _ := post(t, h, server, h.token, `{"messages":[{"role":"user","content":"`+marker+`"}]}`, claudeSession, "not a valid id!"); status != 200 {
-		t.Fatalf("status=%d", status)
+	const usage = `"usage":{"input_tokens":11,"output_tokens":22}`
+	arms := []struct {
+		name, contentType, body string
+		metered                 bool
+	}{
+		{"plain", "", `{"text":"` + marker + `"}`, false},
+		{"json", "application/json", `{"type":"message","model":"claude-sample-1","content":[{"type":"text","text":"` + marker + `"}],` + usage + `}`, true},
+		{"stream", "text/event-stream", `data: {"type":"message_start","message":{"model":"claude-sample-1","content":[],"usage":{"input_tokens":11,"output_tokens":1}}}` + "\n\n" +
+			`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"` + marker + `"}}` + "\n\n" +
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":22}}` + "\n\n", true},
 	}
-	rows := h.trafficRows(1)
-	if len(rows) != 1 || rows[0].claudeSession != claudeSession || rows[0].claudeAgent != "" {
-		t.Fatalf("rows=%+v", rows)
+	for _, arm := range arms {
+		t.Run(arm.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					return
+				}
+				if arm.contentType != "" {
+					w.Header().Set("Content-Type", arm.contentType)
+				}
+				if _, err := io.WriteString(w, arm.body); err != nil {
+					return
+				}
+			}))
+			defer upstream.Close()
+			h := newHarness(t, "sample-a")
+			server := h.gateway(upstream.URL)
+			const claudeSession = "abcdef01-2345-4678-89ab-cdef01234567"
+			if status, _ := post(t, h, server, h.token, `{"messages":[{"role":"user","content":"`+marker+`"}]}`, claudeSession, "not a valid id!"); status != 200 {
+				t.Fatalf("status=%d", status)
+			}
+			rows := h.trafficRows(1)
+			if len(rows) != 1 || rows[0].claudeSession != claudeSession || rows[0].claudeAgent != "" {
+				t.Fatalf("rows=%+v", rows)
+			}
+			if arm.metered {
+				var model string
+				var input, output int64
+				if err := h.openFile().QueryRow("SELECT COALESCE(model, ''), COALESCE(input_tokens, -1), COALESCE(output_tokens, -1) FROM traffic").Scan(&model, &input, &output); err != nil {
+					t.Fatal(err)
+				}
+				if model != "claude-sample-1" || input != 11 || output != 22 {
+					t.Fatalf("usage row: model=%q input=%d output=%d", model, input, output)
+				}
+			}
+			if err := h.store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var file []byte
+			for _, suffix := range []string{"", "-wal"} {
+				data, err := os.ReadFile(h.path + suffix)
+				if err != nil && suffix == "" {
+					t.Fatal(err)
+				}
+				file = append(file, data...)
+			}
+			if strings.Contains(string(file), marker) {
+				t.Fatal("a body reached the SQLite file")
+			}
+			for _, kept := range []string{h.sessionID, claudeSession} {
+				if !strings.Contains(string(file), kept) {
+					t.Fatalf("control value %s not found in the file", kept)
+				}
+			}
+			if strings.Contains(string(file), h.token) {
+				t.Fatal("the session credential reached the SQLite file")
+			}
+			h.open()
+		})
 	}
-	if err := h.store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	var file []byte
-	for _, suffix := range []string{"", "-wal"} {
-		data, err := os.ReadFile(h.path + suffix)
-		if err != nil && suffix == "" {
-			t.Fatal(err)
-		}
-		file = append(file, data...)
-	}
-	if strings.Contains(string(file), marker) {
-		t.Fatal("a body reached the SQLite file")
-	}
-	for _, kept := range []string{h.sessionID, claudeSession} {
-		if !strings.Contains(string(file), kept) {
-			t.Fatalf("control value %s not found in the file", kept)
-		}
-	}
-	if strings.Contains(string(file), h.token) {
-		t.Fatal("the session credential reached the SQLite file")
-	}
-	h.open()
 }
 
 // TestClaudeIDHeadersCannotCarryCredentials checks the boundary the two Claude Code
