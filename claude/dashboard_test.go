@@ -122,7 +122,7 @@ func TestDashboardLinks(t *testing.T) {
 	t.Cleanup(func() { _ = reader.Close() })
 	read := func(t *testing.T, links []DashboardLink, host string, overTLS bool) json.RawMessage {
 		t.Helper()
-		handler := NewDashboard(NewEgress(h.accounts, h.store), DashboardConfig{Provider: "codex", Links: links, Reader: reader, Store: h.store, DBPath: h.path}).Handler()
+		handler := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "codex", Links: links, Reader: reader, Store: h.store, DBPath: h.path}).Handler()
 		request := httptest.NewRequest(http.MethodGet, "/dashboard.json", nil)
 		request.Host = host
 		if overTLS {
@@ -208,7 +208,7 @@ func TestDashboardFrontend(t *testing.T) {
 		root      int
 	}{{"built", built, http.StatusOK}, {"no_index", unbuilt, http.StatusNotFound}, {"missing", filepath.Join(built, "missing"), http.StatusNotFound}} {
 		t.Run(arm.name, func(t *testing.T) {
-			handler := NewDashboard(NewEgress(h.accounts, h.store), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Dir: arm.dir}).Handler()
+			handler := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Dir: arm.dir}).Handler()
 			for path, want := range map[string]int{"/": arm.root, "/dashboard.json": http.StatusOK, "/assets/index.js": http.StatusNotFound, "/assets/": http.StatusNotFound, "/index.html": http.StatusNotFound} {
 				recorder := httptest.NewRecorder()
 				handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
@@ -232,7 +232,7 @@ func dashboardServer(t *testing.T, dir string) *httptest.Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	server := httptest.NewServer(NewDashboard(NewEgress(h.accounts, h.store), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Dir: dir}).Handler())
+	server := httptest.NewServer(NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Dir: dir}).Handler())
 	t.Cleanup(server.Close)
 	return server
 }
