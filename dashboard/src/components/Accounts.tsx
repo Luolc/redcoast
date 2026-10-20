@@ -1,4 +1,7 @@
+import { RefreshCw } from "lucide-react";
+import { useEffect, useState } from "react";
 import { formatCount, formatPercent, formatTokens } from "../lib/format";
+import { refreshOffer, requestQuotaRefresh } from "../lib/quotaRefresh";
 import {
   accountState,
   byModel,
@@ -58,6 +61,62 @@ function Plan({ account: a }: { account: Account }) {
         </>
       )}
     </div>
+  );
+}
+
+// While a round runs, the page reads the gateway this often, not every
+// 30 s, so that the readings and the button follow the round closely.
+const RUNNING_RELOAD_MS = 5_000;
+
+/**
+ * The button that has the gateway refresh every account's quota, with its
+ * state; nothing at a gateway that cannot refresh.
+ */
+export function QuotaRefreshButton({
+  data,
+  now,
+  reload,
+}: {
+  data: Dashboard;
+  now: Date;
+  reload: () => void;
+}) {
+  const state = data.gateway.quota_refresh;
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const running = state?.running === true;
+  useEffect(() => {
+    if (!running) return;
+    const timer = setTimeout(reload, RUNNING_RELOAD_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [running, data.at, reload]);
+  if (state === undefined || state === null) return null;
+  const offer = refreshOffer(state, now);
+  const note = error ?? offer.note;
+  return (
+    <>
+      {note === null ? null : (
+        <span role={error === null ? "status" : "alert"}>{note} </span>
+      )}
+      <button
+        type="button"
+        className="btn"
+        disabled={!offer.enabled || sending}
+        onClick={() => {
+          setSending(true);
+          void requestQuotaRefresh().then((failed) => {
+            setError(failed);
+            setSending(false);
+            reload();
+          });
+        }}
+      >
+        <RefreshCw className="icon sm" aria-hidden="true" />
+        Refresh all quota
+      </button>
+    </>
   );
 }
 
@@ -241,7 +300,15 @@ function byAccount(rows: NonNullable<Dashboard["model_usage"]>): string {
     .join(" · ");
 }
 
-export function Accounts({ data, now }: { data: Dashboard; now: Date }) {
+export function Accounts({
+  data,
+  now,
+  reload,
+}: {
+  data: Dashboard;
+  now: Date;
+  reload: () => void;
+}) {
   return (
     <>
       <PageHead
@@ -251,6 +318,7 @@ export function Accounts({ data, now }: { data: Dashboard; now: Date }) {
       <Section
         title="Accounts"
         note={`Soft limit ${formatPercent(data.soft)}, hard limit ${formatPercent(data.hard)}. A reading older than 30 min is marked with the time it was read. Egress checks and requests in flight are the process's memory since it started.`}
+        action={<QuotaRefreshButton data={data} now={now} reload={reload} />}
       >
         <AccountsTable data={data} now={now} />
       </Section>

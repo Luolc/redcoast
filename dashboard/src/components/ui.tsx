@@ -73,11 +73,13 @@ export function PageHead({ title, sub }: { title: string; sub: ReactNode }) {
 export function Section({
   title,
   note,
+  action,
   id,
   children,
 }: {
   title: string;
   note?: ReactNode;
+  action?: ReactNode; // at the right of the head
   id?: string;
   children: ReactNode;
 }) {
@@ -86,6 +88,7 @@ export function Section({
       <div className="section-head">
         <h2>{title}</h2>
         {note === undefined ? null : <span className="note">{note}</span>}
+        {action === undefined ? null : <span className="right">{action}</span>}
       </div>
       {children}
     </section>

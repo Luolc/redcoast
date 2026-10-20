@@ -140,6 +140,7 @@ type router struct {
 	limits   Limits
 	refusals refusalRows
 	renewals renewals
+	rounds   roundLock
 	now      func() time.Time // the clock Retry-After and pauses are measured on; tests inject the store's
 }
 

@@ -2,6 +2,8 @@ package claude
 
 import (
 	"compress/gzip"
+	"context"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,7 +22,7 @@ import (
 var commitName = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // DashboardConfig is what the dashboard reads besides the accounts and the egress
-// checks. Every field is read, none is written.
+// checks. Every field is read, none is written; only QuotaRefresh starts anything.
 type DashboardConfig struct {
 	Provider  string          // this process's provider, claude or codex
 	Links     []DashboardLink // the other providers' dashboards; nil for none
@@ -33,6 +35,9 @@ type DashboardConfig struct {
 	Tunnels   func() (open, limit int)
 	Backup    func() backup.Status // nil when no backups are configured
 	Dir       string               // holds the dashboard page, index.html, served at /; empty for none
+	// QuotaRefresh is the refresh POST /quota/refresh starts; nil when the provider
+	// cannot refresh, and the endpoint answers 501.
+	QuotaRefresh *QuotaRefresh
 }
 
 // DashboardLink is another provider's dashboard, which the page offers as a link: the
@@ -44,8 +49,8 @@ type DashboardLink struct {
 	URL      string `json:"url"`
 }
 
-// Dashboard is the read-only view of the gateway: GET /dashboard.json, and the
-// page at / when a directory is configured. It reads the
+// Dashboard is the view of the gateway: GET /dashboard.json, the page at / when a
+// directory is configured, and POST /quota/refresh, its one action. It reads the
 // store through a read-only connection and the in-memory state of this process, and
 // shows no credential, credential hash or full session ID.
 type Dashboard struct {
@@ -80,6 +85,7 @@ type gatewayView struct {
 	Backup          *backupView          `json:"backup"` // null when no backups are configured
 	OpenTunnels     int                  `json:"open_tunnels"`
 	TunnelLimit     int                  `json:"tunnel_limit"`
+	QuotaRefresh    *QuotaRefreshState   `json:"quota_refresh"` // null when the provider cannot refresh
 }
 
 // backupView is the backup's last runs. The error text stays in the log: it comes from
@@ -111,10 +117,54 @@ func (d *Dashboard) Handler() http.Handler {
 		}
 		writeJSON(w, http.StatusOK, view)
 	})
+	mux.HandleFunc("POST /quota/refresh", d.serveQuotaRefresh)
 	if d.cfg.Dir != "" {
 		mux.Handle("GET /{$}", page(d.cfg.Dir))
 	}
 	return compressed(mux)
+}
+
+// QuotaRefreshHeader is the header, with the value refresh, that a POST /quota/refresh
+// must carry. A page of another origin cannot add it without a CORS preflight, which
+// the dashboard does not answer.
+const QuotaRefreshHeader = "X-Redcoast-Action"
+
+// serveQuotaRefresh starts a refresh of every account in the background and answers at
+// once: 202 {"started": true}, or {"started": false} when it joins the round pending or
+// running; 429 with Retry-After while the wait after the last round lasts; 501 when the
+// provider cannot refresh. The request must carry exactly one Origin, the page's own
+// (HostGuard lets a request without one through), and QuotaRefreshHeader; otherwise it
+// gets 403 and starts nothing.
+func (d *Dashboard) serveQuotaRefresh(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r.Header["Origin"], r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request"})
+		return
+	}
+	if values := r.Header.Values(QuotaRefreshHeader); len(values) != 1 || values[0] != "refresh" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": QuotaRefreshHeader + ": refresh is required"})
+		return
+	}
+	if d.cfg.QuotaRefresh == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "this gateway cannot refresh"})
+		return
+	}
+	started, wait := d.cfg.QuotaRefresh.Request()
+	if wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "a refresh ran recently"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"started": started})
+}
+
+// RunQuotaRefresh runs the rounds POST /quota/refresh starts until ctx is canceled;
+// without a QuotaRefresh it only waits for ctx.
+func (d *Dashboard) RunQuotaRefresh(ctx context.Context) error {
+	if d.cfg.QuotaRefresh == nil {
+		<-ctx.Done()
+		return nil
+	}
+	return d.cfg.QuotaRefresh.Run(ctx)
 }
 
 // view reads everything the dashboard shows.
@@ -157,6 +207,10 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 	}
 	if d.cfg.Tunnels != nil {
 		view.Gateway.OpenTunnels, view.Gateway.TunnelLimit = d.cfg.Tunnels()
+	}
+	if d.cfg.QuotaRefresh != nil {
+		state := d.cfg.QuotaRefresh.State()
+		view.Gateway.QuotaRefresh = &state
 	}
 	return view, nil
 }

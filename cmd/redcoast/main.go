@@ -132,6 +132,7 @@ func main() {
 		func(ctx context.Context) error { return egress.Run(ctx, cfg.egressInterval) },
 		func(ctx context.Context) error { return entrypoint.RunRenewals(ctx, renewalSweep) },
 		func(ctx context.Context) error { return entrypoint.RunQuotaRechecks(ctx, quotaRecheck) },
+		func(ctx context.Context) error { return dashboard.RunQuotaRefresh(ctx) },
 		func(ctx context.Context) error {
 			return claude.Serve(ctx, l.health, cfg.readOnly(egress.HealthHandler()))
 		},
@@ -169,7 +170,7 @@ func main() {
 // import of entrypoint when gateway's provider has them.
 func offerAccountActions(admin *claude.Admin, gateway claude.Provider, entrypoint *claude.Entrypoint) {
 	if gateway.Probe != nil {
-		admin.Refresh = entrypoint.Refresh
+		admin.Refresh, admin.RefreshAll = entrypoint.Refresh, entrypoint.RefreshAll
 	}
 	if gateway.Import != nil && gateway.Renew != nil {
 		admin.Import = entrypoint.Import
@@ -242,7 +243,7 @@ func newDashboard(cfg config, store *session.Store, backups *backup.Backup, egre
 	if err != nil {
 		return dashboard{}, err
 	}
-	dc := claude.DashboardConfig{Provider: cfg.provider, Links: cfg.dashboardLinks, Reader: reader, Store: store, DBPath: cfg.sessionDB, Version: version, Inventory: cfg.inventory, Started: started, Tunnels: entrypoint.Tunnels, Dir: cfg.dashboardDir}
+	dc := claude.DashboardConfig{Provider: cfg.provider, Links: cfg.dashboardLinks, Reader: reader, Store: store, DBPath: cfg.sessionDB, Version: version, Inventory: cfg.inventory, Started: started, Tunnels: entrypoint.Tunnels, Dir: cfg.dashboardDir, QuotaRefresh: claude.NewQuotaRefresh(entrypoint)}
 	if cfg.dashboardDir != "" {
 		if info, err := os.Stat(filepath.Join(cfg.dashboardDir, "index.html")); err != nil || !info.Mode().IsRegular() {
 			log.Printf("dashboard: %s has no index.html; / answers 404, /dashboard.json is served", cfg.dashboardDir)

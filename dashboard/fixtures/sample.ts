@@ -43,6 +43,11 @@ export function sampleDashboard(now: Date): Dashboard {
       backup: { last_success: at(-17) },
       open_tunnels: 7,
       tunnel_limit: 256,
+      quota_refresh: {
+        running: false,
+        last_started: at(-41),
+        last_finished: at(-40),
+      },
     },
     db_bytes: 12_582_912,
     accounts: [

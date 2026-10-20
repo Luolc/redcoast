@@ -24,6 +24,9 @@ type Admin struct {
 	Handoff func() error
 	// Refresh reads an account's quota again from the upstream; nil refuses every refresh.
 	Refresh func(ctx context.Context, alias string) (Refreshed, error)
+	// RefreshAll refreshes every account, one after another, once no other round runs,
+	// and hands each outcome to each; nil refuses a refresh of all accounts.
+	RefreshAll func(ctx context.Context, each func(alias string, refreshed Refreshed, err error)) error
 	// Import replaces an account's login and renews it; nil refuses every import.
 	Import func(ctx context.Context, alias string, login []byte) error
 }
@@ -296,19 +299,19 @@ func (a *Admin) serveRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveRefreshAll refreshes every account of the current set, one after another, and
-// answers with one result per account in alias order: the outcome of its refresh, or
-// {"alias", "skipped"} for an account paused for a reason other than quota (nothing is
-// sent, as with the 409 of a single refresh), or {"alias", "error"}. A failed account
-// does not stop the ones after it.
+// serveRefreshAll refreshes every account of the current set, one after another, once
+// no other round runs, and answers with one result per account in alias order: the
+// outcome of its refresh, or {"alias", "skipped"} for an account paused for a reason
+// other than quota (nothing is sent, as with the 409 of a single refresh), or {"alias",
+// "error"}. A failed account does not stop the ones after it. A client that goes away
+// ends the round, with nothing to answer.
 func (a *Admin) serveRefreshAll(w http.ResponseWriter, r *http.Request) {
-	if a.Refresh == nil {
+	if a.RefreshAll == nil {
 		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "this gateway cannot refresh"})
 		return
 	}
 	results := []any{}
-	for _, alias := range a.accounts.Candidates() {
-		refreshed, err := a.Refresh(r.Context(), alias)
+	err := a.RefreshAll(r.Context(), func(alias string, refreshed Refreshed, err error) {
 		var paused pausedError
 		switch {
 		case errors.As(err, &paused):
@@ -318,6 +321,10 @@ func (a *Admin) serveRefreshAll(w http.ResponseWriter, r *http.Request) {
 		default:
 			results = append(results, refreshed)
 		}
+	})
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "refresh stopped"})
+		return
 	}
 	writeJSON(w, http.StatusOK, results)
 }
