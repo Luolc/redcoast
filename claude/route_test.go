@@ -741,7 +741,8 @@ func TestRequestAllowlist(t *testing.T) {
 
 // TestRefusedRowsAreLimitedPerSource sends more refused requests from one address than
 // a window records: only refusalRowsPerSource of them get a row, whether the
-// credential is unknown or not of the session shape, a request with a valid session
+// credential is unknown or not of the session shape or the screen declines an upgrade
+// with 426, a request with a valid session
 // still does, and the next window records refusals again. Control arm: once
 // the loopback address is over its limit, the first refusal from another address is
 // still recorded, and the loopback address's next one is not.
@@ -752,6 +753,12 @@ func TestRefusedRowsAreLimitedPerSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt := h.router(target, accountTransport{})
+	rt.provider.Screen = func(r *http.Request) (int, string) {
+		if r.Header.Get("X-Synthetic-Upgrade") != "" {
+			return http.StatusUpgradeRequired, "synthetic upgrade declined"
+		}
+		return 0, ""
+	}
 	server := httptest.NewServer(rt)
 	t.Cleanup(server.Close)
 	unknown := "sk-ant-gws-" + strings.Repeat("B", 43)
@@ -763,6 +770,23 @@ func TestRefusedRowsAreLimitedPerSource(t *testing.T) {
 		}
 		if status, _ := post(t, h, server, token, `{}`, "", ""); status != 401 {
 			t.Fatalf("status=%d", status)
+		}
+	}
+	// Declined upgrades count against the same limit too.
+	for range 2 {
+		req, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/v1/messages", strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Synthetic-Upgrade", "websocket")
+		res, err := h.clientFor(unknown).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, res.Body)
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusUpgradeRequired {
+			t.Fatalf("upgrade: status=%d", res.StatusCode)
 		}
 	}
 	if status, _ := post(t, h, server, h.token, `{}`, "", ""); status != 200 {

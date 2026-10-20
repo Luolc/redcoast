@@ -2436,7 +2436,7 @@ class Run:
         row["account_alias"]
         == (
           args.account
-          if row["result"] not in ["auth_failed", "no_account", "refused"]
+          if row["result"] not in ["challenged", "auth_failed", "no_account", "refused"]
           else None
         )
         for row in proxy_log

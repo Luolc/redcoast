@@ -239,6 +239,12 @@ func TestDashboardUsageBySource(t *testing.T) {
 	since := now.Add(-24 * time.Hour)
 	record(since, "", "", "inference", "auth_failed", 0)
 	record(since.Add(-time.Millisecond), one.ID, "sample-a", "inference", "ok", 500)
+	// Handshakes of no session in the same hour, no error even with an error status, and
+	// a CONNECT whose credential is unknown, which is one.
+	record(since, "", "", "inference", "upgrade_declined", 0)
+	record(since, "", "", "connect", "challenged", 0)
+	record(since, "", "", "connect", "challenged", 407)
+	record(since, "", "", "connect", "auth_failed", 0)
 
 	snap, err := openReader(t, path, c).Snapshot(ctx, accounts)
 	if err != nil {
@@ -246,7 +252,8 @@ func TestDashboardUsageBySource(t *testing.T) {
 	}
 	at11 := time.Date(2026, 10, 6, 11, 0, 0, 0, time.UTC)
 	want := []UsagePoint{
-		{Hour: since, Kind: "inference", Requests: 1, BytesUp: 10, BytesDown: 100, Errors: 1},
+		{Hour: since, Kind: "connect", Requests: 3, BytesUp: 30, BytesDown: 300, Errors: 1},
+		{Hour: since, Kind: "inference", Requests: 2, BytesUp: 20, BytesDown: 200, Errors: 1},
 		{Hour: at11, Alias: "sample-a", Machine: "devbox-1", Kind: "connect", Requests: 4, BytesUp: 40, BytesDown: 400, Errors: 2, Limited: 1},
 		{Hour: at11, Alias: "sample-a", Machine: "devbox-1", Kind: "inference", Requests: 5, BytesUp: 50, BytesDown: 500, Errors: 3, Limited: 1},
 		{Hour: at11, Alias: "sample-a", Machine: "devbox-2", Kind: "inference", Requests: 1, BytesUp: 10, BytesDown: 100},
@@ -272,6 +279,9 @@ func TestDashboardUsageBySource(t *testing.T) {
 	}
 	wantCounts := map[key][]count{
 		{"", "", "inference", "auth_failed"}:                     {{0, 1, true}},
+		{"", "", "inference", "upgrade_declined"}:                {{0, 1, false}},
+		{"", "", "connect", "challenged"}:                        {{0, 1, false}, {407, 1, false}},
+		{"", "", "connect", "auth_failed"}:                       {{0, 1, true}},
 		{"sample-a", "devbox-1", "inference", "ok"}:              {{200, 1, false}, {399, 1, false}, {400, 1, true}},
 		{"sample-a", "devbox-1", "inference", "idle_timeout"}:    {{200, 1, true}},
 		{"sample-a", "devbox-1", "inference", "limited"}:         {{0, 1, true}},
@@ -321,11 +331,13 @@ func TestDashboardLatency(t *testing.T) {
 	}
 	// A single request of sample-b on devbox-2, on the window's first millisecond.
 	record(since, two.ID, "sample-b", "inference", "ok", 200, 250)
-	// Left out: a tunnel, errors, and a request a millisecond before the window.
+	// Left out: a tunnel, errors, a request refused before forwarding that is no error,
+	// and a request a millisecond before the window.
 	record(at11, one.ID, "sample-a", "connect", "ok", 200, 3_600_000)
 	record(at11, one.ID, "sample-a", "inference", "ok", 500, 60_000)
 	record(at11, one.ID, "sample-a", "inference", "incomplete", 200, 60_000)
 	record(at11, one.ID, "sample-b", "inference", "limited", 0, 60_000)
+	record(at11, one.ID, "sample-a", "inference", "upgrade_declined", 0, 60_000)
 	record(since.Add(-time.Millisecond), two.ID, "sample-b", "inference", "ok", 200, 60_000)
 
 	snap, err := openReader(t, path, c).Snapshot(ctx, accounts)

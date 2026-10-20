@@ -15,8 +15,9 @@ import (
 )
 
 // TestProviderHooks checks the hooks a provider adds to the reverse proxy: the prefix
-// its upstream URL stands for, the screen that answers before authentication and the
-// guard on outgoing requests. The control arm runs the same requests through a provider
+// its upstream URL stands for, the screen that answers before authentication, whose
+// 426 is recorded as upgrade_declined and any other status as refused, and the guard
+// on outgoing requests. The control arm runs the same requests through a provider
 // without the screen and the guard, and they reach the upstream.
 func TestProviderHooks(t *testing.T) {
 	var mu sync.Mutex
@@ -40,6 +41,9 @@ func TestProviderHooks(t *testing.T) {
 		if r.Header.Get("Upgrade") != "" {
 			return http.StatusUpgradeRequired, "upgrade refused"
 		}
+		if r.Header.Get("X-Screen") != "" {
+			return http.StatusBadRequest, "screened"
+		}
 		return 0, ""
 	}
 	hooked.Guard = func(out *http.Request) error {
@@ -57,6 +61,7 @@ func TestProviderHooks(t *testing.T) {
 	}{
 		{"prefix", hooked, "", 200, "/base/v1/messages"},
 		{"screened", hooked, "Upgrade", 426, ""},
+		{"screened_other", hooked, "X-Screen", 400, ""},
 		{"guarded", hooked, "X-Refuse", 502, ""},
 		{"no_screen", plain, "Upgrade", 200, "/base/v1/messages"},
 		{"no_guard", plain, "X-Refuse", 200, "/base/v1/messages"},
@@ -86,9 +91,9 @@ func TestProviderHooks(t *testing.T) {
 			if res.StatusCode != test.status || test.path == "" && len(paths) != 0 || test.path != "" && (len(paths) != 1 || paths[0] != test.path) {
 				t.Fatalf("status %d, upstream saw %v; want %d and %q", res.StatusCode, paths, test.status, test.path)
 			}
-			if test.name == "screened" {
-				if rows := h.trafficRows(1); len(rows) != 1 || rows[0].result != "refused" || rows[0].request != "POST /api/x/v1/messages" {
-					t.Fatalf("screened request's row: %+v", rows)
+			if result := map[string]string{"screened": "upgrade_declined", "screened_other": "refused"}[test.name]; result != "" {
+				if rows := h.trafficRows(1); len(rows) != 1 || rows[0].result != result || rows[0].request != "POST /api/x/v1/messages" {
+					t.Fatalf("screened request's row: %+v, want %s", rows, result)
 				}
 			}
 		})
