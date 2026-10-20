@@ -77,7 +77,7 @@ it("renders each page of the sample", () => {
 // The declarations of the rule whose selector is exactly sel.
 function rule(css: string, sel: string): string {
   const at = css.indexOf(`\n${sel} {`);
-  expect(at, sel).toBeGreaterThanOrEqual(0);
+  if (at < 0) throw new Error(`no rule ${sel}`);
   return css.slice(at, css.indexOf("}", at));
 }
 
@@ -101,16 +101,18 @@ it("lets every page fill the main area of a wide screen", () => {
     "exits",
     "monitor",
   ] as const;
-  for (const view of views) {
-    const html = renderToStaticMarkup(
-      <Page data={data} now={now} route={{ view }} />,
-    );
-    const classes = [...html.matchAll(/<section class="([^"]*)"/g)].map(
-      (m) => m[1],
-    );
-    expect(classes.length, view).toBeGreaterThan(0);
-    expect(new Set(classes), view).toEqual(new Set(["section"]));
-  }
+  const classes = (view: (typeof views)[number]) => [
+    ...new Set(
+      [
+        ...renderToStaticMarkup(
+          <Page data={data} now={now} route={{ view }} />,
+        ).matchAll(/<section class="([^"]*)"/g),
+      ].map((m) => m[1]),
+    ),
+  ];
+  expect(Object.fromEntries(views.map((v) => [v, classes(v)]))).toEqual(
+    Object.fromEntries(views.map((v) => [v, ["section"]])),
+  );
 });
 
 it("lines up each quota row on its first line", () => {
