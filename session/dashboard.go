@@ -336,7 +336,16 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 	if out.Days, err = r.days(ctx, dayStart, now); err != nil {
 		return Snapshot{}, err
 	}
-	err = collect(ctx, db, &out.History, func(rows *sql.Rows) (HistoryEntry, error) {
+	if out.History, err = r.history(ctx); err != nil {
+		return Snapshot{}, err
+	}
+	return out, nil
+}
+
+// history returns the latest dashboardHistory rows of the binding history.
+func (r *Reader) history(ctx context.Context) ([]HistoryEntry, error) {
+	history := []HistoryEntry{}
+	err := collect(ctx, r.store.db, &history, func(rows *sql.Rows) (HistoryEntry, error) {
 		var v HistoryEntry
 		var from int64
 		var to sql.NullInt64
@@ -347,10 +356,7 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		}
 		return v, err
 	}, "SELECT substr(session_id, 1, ?), alias, from_ts, to_ts, reason FROM binding_history ORDER BY id DESC LIMIT ?", shortID, dashboardHistory)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	return out, nil
+	return history, err
 }
 
 // latency returns the latency of the inference requests since since that are no error.
