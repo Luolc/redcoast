@@ -368,3 +368,75 @@ it("ends a quota history at the current reading when it is newer", () => {
     `5 h window over the last 5 h: ${String(kept.length + 1)} readings, from ${formatPercent(first.utilization)} to ${formatPercent(current.utilization)}`,
   );
 });
+
+it("says how input is counted by the provider, not by the counts", () => {
+  const zeroCache = {
+    ...data,
+    model_usage: (data.model_usage ?? []).map((m) => ({
+      ...m,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    })),
+  };
+  const claude = page({ view: "accounts" }, zeroCache);
+  expect(claude).toContain("input leaves out the cache reads and writes");
+  expect(claude).toContain("Cache read");
+  const codex = page(
+    { view: "accounts" },
+    { ...zeroCache, gateway: { ...data.gateway, provider: "codex" } },
+  );
+  expect(codex).toContain("input includes cached tokens");
+  expect(codex).not.toContain("Cache read");
+});
+
+it("gives each machine's tokens and each model's accounts", () => {
+  const usage = data.usage ?? [];
+  const machine = (name: string) => {
+    const rows = usage.filter((u) => u.client_machine === name);
+    const sum = (k: "input_tokens" | "output_tokens") =>
+      rows.reduce((n, u) => n + (u[k] ?? 0), 0);
+    return `${formatTokens(sum("input_tokens"))} · ${formatTokens(sum("output_tokens"))}`;
+  };
+  // The check reads each machine's tokens only if theirs differ.
+  expect(machine("machine-a")).not.toBe(machine("machine-b"));
+  const clients = page({ view: "clients" });
+  expect(clients).toContain(machine("machine-a"));
+  expect(clients).toContain(machine("machine-b"));
+
+  const accounts = page({ view: "accounts" });
+  const lists = ["claude-sample-large", "claude-sample-small"].map((model) => {
+    const counts = new Map<string, number>();
+    for (const m of data.model_usage ?? [])
+      if (m.model === model)
+        counts.set(m.alias, (counts.get(m.alias) ?? 0) + m.requests);
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([alias, n]) => `${alias} ${formatCount(n)}`)
+      .join(" · ");
+  });
+  expect(lists[0]).not.toBe(lists[1]);
+  for (const list of lists) expect(accounts).toContain(list);
+});
+
+it("places the last reset and the first reading on the history's time axis", () => {
+  const [ab] = data.accounts;
+  const q = ab?.quota["5h"];
+  const first = ab?.quota_history?.["5h"]?.[0];
+  if (q?.reset_at === undefined || first === undefined)
+    throw new Error("the sample has no 5 h history");
+  const span = 5 * 3_600_000;
+  const to = Date.parse(data.at);
+  const from = to - span;
+  // The card's curve before it is measured: 320 wide, 72 high.
+  const x = (t: number) => ((t - from) / (to - from)) * 320;
+  const y = (u: number) => 72 - u * 72;
+  const html = renderToStaticMarkup(
+    <Page data={data} now={now} route={{ view: "monitor" }} />,
+  );
+  expect(html).toContain(
+    `class="reset" x1="${String(x(Date.parse(q.reset_at) - span))}"`,
+  );
+  expect(html).toContain(
+    `class="used" points="${x(Date.parse(first.at)).toFixed(1)},${y(first.utilization).toFixed(1)} `,
+  );
+});

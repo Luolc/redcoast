@@ -6,7 +6,7 @@ import {
   type TokenCounts,
 } from "../lib/stats";
 import type { Account, Dashboard } from "../lib/types";
-import { egressWording, providerName } from "../lib/words";
+import { cacheApart, egressWording, providerName } from "../lib/words";
 import { Ago, Empty, Meter, PageHead, Section, Status, Time } from "./ui";
 
 export function Egress({ account: a, now }: { account: Account; now: Date }) {
@@ -158,10 +158,7 @@ function Models({ data }: { data: Dashboard }) {
   if (data.model_usage === undefined) return null;
   const rows = data.model_usage;
   const models = byModel(rows);
-  // Codex counts no cache tokens apart; its columns would be zeros.
-  const cache = models.some(
-    (m) => m.tokens.cacheRead > 0 || m.tokens.cacheWrite > 0,
-  );
+  const cache = cacheApart(data.gateway.provider);
   return (
     <Section
       title="Models"

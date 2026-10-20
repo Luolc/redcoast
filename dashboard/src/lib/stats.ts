@@ -441,3 +441,16 @@ export function byModel(rows: ModelRow[]): ModelTotal[] {
         : a.model.localeCompare(b.model),
     );
 }
+
+/**
+ * The tokens of each hour of the 24 h window, oldest first, as hourSeries
+ * places its counts; null throughout when no row reports tokens.
+ */
+export function hourTokens(
+  rows: UsagePoint[],
+  at: string,
+): (TokenCounts | null)[] {
+  return windowHours(at).map((t) =>
+    tokenTotal(rows.filter((r) => Date.parse(r.hour) === t)),
+  );
+}

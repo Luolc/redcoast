@@ -416,7 +416,8 @@ export function QuotaCurve({
   const x = (t: number) =>
     ((Math.min(Math.max(t, from), to) - from) / (to - from)) * W;
   const y = (u: number) => H - Math.min(Math.max(u, 0), 1) * H;
-  const corners = steps(readings);
+  const inSpan = reset !== null && reset > from && reset < to;
+  const lines = steps(readings, inSpan ? reset : null);
   const last = readings.at(-1);
   return (
     <div className="curve" ref={ref}>
@@ -426,19 +427,22 @@ export function QuotaCurve({
         aria-label={label}
       >
         <line className="soft" x1={0} x2={W} y1={y(soft)} y2={y(soft)} />
-        {reset === null || reset <= from || reset >= to ? null : (
+        {!inSpan ? null : (
           <line className="reset" x1={x(reset)} x2={x(reset)} y1={0} y2={H}>
             <title>{`Reset at ${formatClock(new Date(reset).toISOString())} UTC`}</title>
           </line>
         )}
-        {corners.length < 2 ? null : (
-          <polyline
-            className="used"
-            points={corners
-              .map(([t, u]) => `${x(t).toFixed(1)},${y(u).toFixed(1)}`)
-              .join(" ")}
-          />
-        )}
+        {lines
+          .filter((r) => r.length > 1)
+          .map((r) => (
+            <polyline
+              key={r[0]?.join(",")}
+              className="used"
+              points={r
+                .map(([t, u]) => `${x(t).toFixed(1)},${y(u).toFixed(1)}`)
+                .join(" ")}
+            />
+          ))}
         {last === undefined ? null : (
           <circle
             className="d"

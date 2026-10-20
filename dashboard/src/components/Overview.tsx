@@ -21,10 +21,11 @@ import {
   hourSeries,
   total,
   type HourCounts,
+  hourTokens,
   tokenTotal,
 } from "../lib/stats";
 import type { Dashboard } from "../lib/types";
-import { providerName } from "../lib/words";
+import { cacheApart, providerName } from "../lib/words";
 import { AccountsTable } from "./Accounts";
 import { HourBars, HourLines } from "./charts";
 import { Empty, PageHead, Section, Share, Status } from "./ui";
@@ -56,10 +57,7 @@ function Traffic({ data }: { data: Dashboard }) {
   const rate = errorRate(all);
   const machines = byMachine(data.usage);
   const tokens = tokenTotal(data.usage);
-  const hourTokens = (hour: string) =>
-    tokenTotal(
-      (data.usage ?? []).filter((u) => Date.parse(u.hour) === Date.parse(hour)),
-    );
+  const perHour = hourTokens(data.usage, data.at);
   const worst = peak(hours, "errors");
   const kinds = errorKinds(data.result_sources ?? []);
   const highest = machines
@@ -89,8 +87,8 @@ function Traffic({ data }: { data: Dashboard }) {
                   {tokens === null ? null : (
                     <>
                       <br />
-                      Tokens: {formatTokens(hourTokens(h.hour)?.input ?? 0)} in
-                      · {formatTokens(hourTokens(h.hour)?.output ?? 0)} out
+                      Tokens: {formatTokens(perHour[i]?.input ?? 0)} in ·{" "}
+                      {formatTokens(perHour[i]?.output ?? 0)} out
                     </>
                   )}
                 </>
@@ -114,8 +112,7 @@ function Traffic({ data }: { data: Dashboard }) {
               out
             </div>
           )}
-          {tokens === null ||
-          tokens.cacheRead + tokens.cacheWrite === 0 ? null : (
+          {tokens === null || !cacheApart(data.gateway.provider) ? null : (
             <div className="figs-sub">
               Cache{" "}
               <span className="num">{formatTokens(tokens.cacheRead)}</span> read

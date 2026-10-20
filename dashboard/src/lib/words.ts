@@ -71,3 +71,11 @@ export function providerName(provider: string | undefined): string {
   if (provider === undefined) return "Gateway";
   return PROVIDERS[provider] ?? provider;
 }
+
+/**
+ * Whether the provider counts cache reads and writes apart from input:
+ * Claude does; Codex counts cached tokens in input and reports no cache.
+ */
+export function cacheApart(provider: string | undefined): boolean {
+  return provider !== "codex";
+}

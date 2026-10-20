@@ -13,6 +13,7 @@ import {
   errorRateState,
   failures,
   hourSeries,
+  hourTokens,
   pace,
   recentBindings,
   sessionState,
@@ -479,4 +480,30 @@ describe("tokens", () => {
       ["", 1, 10],
     ]);
   });
+});
+
+it("puts each hour's tokens in the window, null without any reported", () => {
+  const at = "2026-10-07T12:20:00Z";
+  const withTokens = (hour: string, input: number) => ({
+    ...usage(hour, "machine-a", 1),
+    input_tokens: input,
+    output_tokens: 1,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
+  const hours = hourTokens(
+    [
+      withTokens("2026-10-07T12:00:00Z", 5),
+      withTokens("2026-10-07T12:00:00Z", 7),
+      withTokens("2026-10-07T11:00:00Z", 3),
+    ],
+    at,
+  );
+  expect(hours).toHaveLength(25);
+  expect(hours.at(-1)?.input).toBe(12);
+  expect(hours.at(-2)?.input).toBe(3);
+  expect(hours[0]).toBeNull();
+  expect(
+    hourTokens([usage("2026-10-07T12:00:00Z", "machine-a", 1)], at).at(-1),
+  ).toBeNull();
 });
