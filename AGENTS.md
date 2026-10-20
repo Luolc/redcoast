@@ -272,7 +272,7 @@ A lower-ranking provision or a principal may depart from a higher-ranking provis
 - R262 When you assert something of every item of a list, or that there are no others, say how the list was produced and whether it covers the whole range you assert it of.
 - R263 When you run, from a directory not known to be a checkout of the repository you mean, a command that would take its repository from the working directory, name that repository in the command, or first confirm that the working directory is inside it.
 - R264 Once a check has given different results in two environments that were meant to be equivalent, rely only on its result from the environment in which what it checks runs, or one set up the same way.
-- L19 Send each request that an experiment, probe or debugging session makes to a provider's real upstream for an account through the exit that the account's inventory file names under `proxy`, never directly from the machine the work runs on or through any other exit; when that exit cannot be used, send nothing to the upstream for that account and tell whoever delegated the work what stops it.
+- L19 Send each request that an experiment, probe or debugging session makes to a provider's real upstream for an account through the exit that the account's inventory file names under `proxy`, never directly from the machine the work runs on or through any other exit; when that exit cannot be used, send the request by no other route and tell whoever delegated the work what stops it.
 
 ## Writing Rules
 

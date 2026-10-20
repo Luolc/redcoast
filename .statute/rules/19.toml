@@ -16,7 +16,7 @@ uses = ["instructions", "review"]
 en = "Send a request to a provider's real upstream for an account only through that account's exit"
 
 [text.statement]
-en = "Send each request that an experiment, probe or debugging session makes to a provider's real upstream for an account through the exit that the account's inventory file names under `proxy`, never directly from the machine the work runs on or through any other exit; when that exit cannot be used, send nothing to the upstream for that account and tell whoever delegated the work what stops it."
+en = "Send each request that an experiment, probe or debugging session makes to a provider's real upstream for an account through the exit that the account's inventory file names under `proxy`, never directly from the machine the work runs on or through any other exit; when that exit cannot be used, send the request by no other route and tell whoever delegated the work what stops it."
 
 [text.reason]
 en = '''
@@ -27,7 +27,7 @@ The means already exist: each account file of the inventory names its exit under
 
 [text.verification]
 en = '''
-A request is for an account when it carries the account's credential, or when its result is used to show what the gateway or that account can reach upstream or how the upstream answers it. A provider's real upstream is a host of the provider itself, such as the API or login host the gateway forwards to, not a fake upstream. The exit cannot be used when the account file names none, its credentials cannot be resolved where the work runs, or it refuses or fails the request; its refusal is a result to report, not a reason to try another route.
+A request is for an account when it carries the account's credential, or when its result is used to show what the gateway or that account can reach upstream or how the upstream answers it. A provider's real upstream is a host of the provider itself, such as the API or login host the gateway forwards to, not a fake upstream. The exit cannot be used when the account file names none, its credentials cannot be resolved where the work runs, or it refuses the request or keeps failing it; sending it again through the same exit is allowed, and a refusal is a result to report, not a reason to try another route. The login to the provider that a person does in a browser when a login is imported (`docs/design.md`) is not such a request, even during a debugging session.
 
 This rule grants nothing: whether a real request may be sent at all is for the other rules and the task. It does not reach CI, which sends no request to a real account ({@rule:11}).
 
