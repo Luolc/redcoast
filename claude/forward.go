@@ -157,12 +157,6 @@ func (f *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record.Account, row.SessionID, row.Alias = a.alias, binding.SessionID, binding.Alias
-	// From the gateway's own address no exit bounds what a tunnel reaches.
-	if row.Route == "account" && a.direct != "" && row.Port != directAccountPort {
-		record.Result = "refused"
-		http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
-		return
-	}
 	select {
 	case f.slots <- struct{}{}:
 		defer func() { <-f.slots }()
@@ -173,7 +167,6 @@ func (f *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	exit, reader := f.open(w, r, a, &record)
 	if exit == nil {
-		record.Result = "egress_failed"
 		return
 	}
 	defer closeQuietly(exit)
@@ -211,10 +204,20 @@ func (f *forwardProxy) recordTraffic(row session.Traffic, source string) {
 
 // open connects to the far side of r's tunnel on record.Route: the target itself on
 // the direct route and on the account route of a direct account, a CONNECT through a's
-// exit on the account route otherwise. It returns the
-// connection and the reader positioned at the tunnel's first byte, or nil after
-// answering w with 502.
+// exit on the account route otherwise. It returns the connection and the reader
+// positioned at the tunnel's first byte, or nil after answering w and setting
+// record.Result: 403 and refused for a port a direct account does not reach, 502 and
+// egress_failed when the far side cannot be reached.
 func (f *forwardProxy) open(w http.ResponseWriter, r *http.Request, a *account, record *connectRecord) (net.Conn, io.Reader) {
+	record.Result = "egress_failed"
+	// From the gateway's own address no exit bounds what a tunnel reaches.
+	if record.Route == "account" && a.direct != "" {
+		if _, port := splitTarget(r.Host); port != directAccountPort {
+			record.Result = "refused"
+			http.Error(w, "CONNECT target not allowed", http.StatusForbidden)
+			return nil, nil
+		}
+	}
 	if record.Route == "direct" || a.direct != "" {
 		dialer := publicDialer{dial: f.dial, resolve: f.resolve}
 		if record.Route == "account" {

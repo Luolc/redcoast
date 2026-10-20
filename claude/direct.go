@@ -129,12 +129,6 @@ func accountTarget(target string) bool {
 	return hostName.MatchString(strings.ToLower(strings.TrimSuffix(host, ".")))
 }
 
-// dialDirect resolves a listed target's host and dials its public addresses, as
-// publicDialer does.
-func (f *forwardProxy) dialDirect(ctx context.Context, target string) (net.Conn, error) {
-	return publicDialer{dial: f.dial, resolve: f.resolve}.dialPublic(ctx, target)
-}
-
 // publicDialer connects to a client's target from the gateway's own address: on the
 // direct route, and on the account route of a direct account, where network limits the
 // addresses to the account's family.
