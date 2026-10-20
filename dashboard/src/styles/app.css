@@ -897,12 +897,12 @@ tbody tr.link {
 }
 
 /* Ranked lists with a share bar (Overview, Monitor), in as many columns
-   as fit, each narrow enough that a row's label, bar and count read as
-   one. */
+   as fit and no more than there are items, each narrow enough that a
+   row's label, bar and count read as one. */
 .rank {
   display: grid;
   grid-template-columns: repeat(
-    auto-fill,
+    auto-fit,
     minmax(min(var(--t-width-list), 100%), 1fr)
   );
   gap: 2px var(--t-space-6);

@@ -124,6 +124,8 @@ it("lays a ranked list out in columns that fill its panel", () => {
   expect(rule(appCss, ".rank")).toContain(
     "minmax(min(var(--t-width-list), 100%), 1fr)",
   );
+  // No empty columns past the last item on a very wide screen.
+  expect(rule(appCss, ".rank")).toContain("auto-fit,");
   expect(rule(appCss, ".kv")).not.toContain("max-width");
 });
 
