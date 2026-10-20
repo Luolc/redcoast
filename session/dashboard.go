@@ -267,19 +267,9 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		return Snapshot{}, fmt.Errorf("database size: %v", err)
 	}
 	for _, a := range status.Accounts {
-		view := AccountView{AccountStatus: a}
-		if view.QuotaHistory, err = r.store.QuotaHistory(ctx, a.Alias); err != nil {
+		view, err := r.account(ctx, a, now)
+		if err != nil {
 			return Snapshot{}, err
-		}
-		var next PlanStatus
-		var from int64
-		err := db.QueryRowContext(ctx, "SELECT plan, effective_from FROM plan_schedule WHERE alias = ? AND effective_from > ? ORDER BY effective_from LIMIT 1", a.Alias, now).Scan(&next.Name, &from)
-		switch {
-		case err == nil:
-			next.From = fromMillis(from)
-			view.NextPlan = &next
-		case err != sql.ErrNoRows:
-			return Snapshot{}, fmt.Errorf("read next plan: %v", err)
 		}
 		out.Accounts = append(out.Accounts, view)
 	}
@@ -451,6 +441,26 @@ func spread(durations []int64) Latency {
 // element at rank ceil(p/100 * n), counting from 1.
 func percentile(sorted []int64, p int) int64 {
 	return sorted[(p*len(sorted)+99)/100-1]
+}
+
+// account returns a's view: its next plan change after now and its quota history.
+func (r *Reader) account(ctx context.Context, a AccountStatus, now int64) (AccountView, error) {
+	view := AccountView{AccountStatus: a}
+	var err error
+	if view.QuotaHistory, err = r.store.QuotaHistory(ctx, a.Alias); err != nil {
+		return AccountView{}, err
+	}
+	var next PlanStatus
+	var from int64
+	err = r.store.db.QueryRowContext(ctx, "SELECT plan, effective_from FROM plan_schedule WHERE alias = ? AND effective_from > ? ORDER BY effective_from LIMIT 1", a.Alias, now).Scan(&next.Name, &from)
+	switch {
+	case err == nil:
+		next.From = fromMillis(from)
+		view.NextPlan = &next
+	case err != sql.ErrNoRows:
+		return AccountView{}, fmt.Errorf("read next plan: %v", err)
+	}
+	return view, nil
 }
 
 // machines returns the registered machines with their live sessions and latest request.
