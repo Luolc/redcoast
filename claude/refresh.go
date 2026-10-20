@@ -138,9 +138,10 @@ func (e *Entrypoint) RunQuotaRechecks(ctx context.Context, interval time.Duratio
 // a stored reading at or over the soft threshold, or rejected, whose reset has passed.
 // Selection prefers other accounts to such an account, or never chooses it, so no
 // response would read its quota again. A quota pause needs no rule of its own: it ends
-// at the earliest reset its 429 reported, and the 429's readings are rejected or over
-// hard. An account paused for another reason is skipped without a log line, since
-// refresh sends it nothing; a failed refresh is logged and tried again next round.
+// by itself at the earliest reset its 429 reported, and a rejected window is rechecked
+// at its own reset. An account paused for another reason is skipped without a log
+// line, since refresh sends it nothing; a failed refresh is logged and tried again
+// next round. A round cut short by shutdown logs nothing for the accounts left.
 func (rt *router) recheckQuota(ctx context.Context) {
 	soft, _, err := rt.store.Thresholds(ctx)
 	if err != nil {
@@ -148,6 +149,9 @@ func (rt *router) recheckQuota(ctx context.Context) {
 		return
 	}
 	for _, alias := range rt.accounts.Candidates() {
+		if ctx.Err() != nil {
+			return
+		}
 		readings, err := rt.store.LatestQuota(ctx, alias)
 		if err != nil {
 			log.Printf("quota recheck alias=%s: %v", alias, err)
