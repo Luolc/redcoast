@@ -4,7 +4,12 @@ import { sampleDashboard } from "../fixtures/sample.ts";
 import { Page } from "./App";
 import { Sidebar } from "./components/Shell";
 import { HourBars, HourLines } from "./components/charts";
-import { formatCount, formatMs } from "./lib/format";
+import {
+  formatCount,
+  formatMs,
+  formatPercent,
+  formatTokens,
+} from "./lib/format";
 import { durationSeries, hourSeries } from "./lib/stats";
 import type { Route } from "./lib/route";
 
@@ -233,4 +238,205 @@ it("labels a count axis in whole numbers when every hour is zero", () => {
     (m) => m[1],
   );
   expect(axis).toEqual(["0", "1", "2"]);
+});
+
+it("gives a client's share of all clients' requests on its page", () => {
+  const hourly = data.client_hourly ?? [];
+  const pi = hourly
+    .filter((h) => h.client_machine === "machine-a" && h.client === "pi")
+    .reduce((n, h) => n + h.requests, 0);
+  const all = hourly.reduce((n, h) => n + h.requests, 0);
+  expect(pi).toBeGreaterThan(0);
+  expect(page({ view: "client", arg: "machine-a/pi" })).toContain(
+    `${formatPercent(pi / all, 1)} of all clients`,
+  );
+});
+
+it("counts the rows of Clients in the sidebar", () => {
+  const count = (d: typeof data) =>
+    /href="#\/clients"[^]*?<span class="count">(\d+)</.exec(
+      renderToStaticMarkup(<Sidebar data={d} route={{ view: "overview" }} />),
+    )?.[1];
+  // The sample has four machine and program rows on two active machines.
+  expect(count(data)).toBe("4");
+  expect(count({ ...data, clients: undefined, client_hourly: undefined })).toBe(
+    "2",
+  );
+});
+
+it("shows the tokens of the day on Overview and by model on Accounts", () => {
+  const usage = data.usage ?? [];
+  const input = usage.reduce((n, u) => n + (u.input_tokens ?? 0), 0);
+  const output = usage.reduce((n, u) => n + (u.output_tokens ?? 0), 0);
+  expect(formatTokens(input)).not.toBe(formatTokens(output));
+  expect(page({ view: "overview" })).toContain(
+    `Tokens ${formatTokens(input)} in · ${formatTokens(output)} out`,
+  );
+  const read = usage.reduce((n, u) => n + (u.cache_read_input_tokens ?? 0), 0);
+  const written = usage.reduce(
+    (n, u) => n + (u.cache_creation_input_tokens ?? 0),
+    0,
+  );
+  expect(page({ view: "overview" })).toContain(
+    `Cache ${formatTokens(read)} read · ${formatTokens(written)} written`,
+  );
+
+  const large = (data.model_usage ?? []).filter(
+    (m) => m.model === "claude-sample-large",
+  );
+  const requests = large.reduce((n, m) => n + m.requests, 0);
+  const largeIn = large.reduce((n, m) => n + m.input_tokens, 0);
+  const largeOut = large.reduce((n, m) => n + m.output_tokens, 0);
+  expect(page({ view: "accounts" })).toContain(
+    `${formatCount(requests)}${formatTokens(largeIn)}${formatTokens(largeOut)}`,
+  );
+});
+
+it("draws each window's quota history on Monitor's account cards", () => {
+  const [ab] = data.accounts;
+  const history = ab?.quota_history?.["5h"] ?? [];
+  const last = history.at(-1);
+  const first = history[0];
+  if (ab === undefined || first === undefined || last === undefined)
+    throw new Error("the sample has no quota history");
+  const current = ab.quota["5h"];
+  const readings =
+    current !== undefined &&
+    Date.parse(current.observed_at) > Date.parse(last.at)
+      ? [...history, current]
+      : history;
+  const html = renderToStaticMarkup(
+    <Page data={data} now={now} route={{ view: "monitor" }} />,
+  );
+  expect(html).toContain(
+    `5 h window over the last 5 h: ${String(readings.length)} readings, from ${formatPercent(first.utilization)} to ${formatPercent(readings.at(-1)?.utilization ?? 0)}`,
+  );
+  expect(page({ view: "monitor" })).toContain("Pruned quota readings");
+});
+
+it("shows no tokens, models or quota history from a gateway that has none", () => {
+  const older = {
+    ...data,
+    model_usage: undefined,
+    usage: (data.usage ?? []).map((u) => ({
+      ...u,
+      input_tokens: undefined,
+      output_tokens: undefined,
+      cache_read_input_tokens: undefined,
+      cache_creation_input_tokens: undefined,
+    })),
+    accounts: data.accounts.map((a) => ({ ...a, quota_history: undefined })),
+  };
+  expect(page({ view: "overview" }, older)).not.toContain("Tokens");
+  expect(page({ view: "clients" }, older)).not.toContain("Tokens, 24 h");
+  expect(page({ view: "accounts" }, older)).not.toContain("Models");
+  const monitor = renderToStaticMarkup(
+    <Page data={older} now={now} route={{ view: "monitor" }} />,
+  );
+  expect(monitor).not.toContain('class="curve"');
+  expect(
+    renderToStaticMarkup(
+      <Page data={data} now={now} route={{ view: "monitor" }} />,
+    ),
+  ).toContain('class="curve"');
+});
+
+it("ends a quota history at the current reading when it is newer", () => {
+  const [ab, ...rest] = data.accounts;
+  const current = ab?.quota["5h"];
+  if (ab === undefined || current === undefined)
+    throw new Error("the sample has no 5 h reading");
+  // Readings up to 30 min before the current one, ending below it.
+  const kept = (ab.quota_history?.["5h"] ?? []).filter(
+    (r) => Date.parse(r.at) <= Date.parse(current.observed_at) - 30 * 60_000,
+  );
+  const first = kept[0];
+  expect(kept.at(-1)?.utilization).not.toBe(current.utilization);
+  if (first === undefined) throw new Error("no reading kept");
+  const earlier = {
+    ...data,
+    accounts: [
+      { ...ab, quota_history: { ...ab.quota_history, "5h": kept } },
+      ...rest,
+    ],
+  };
+  expect(
+    renderToStaticMarkup(
+      <Page data={earlier} now={now} route={{ view: "monitor" }} />,
+    ),
+  ).toContain(
+    `5 h window over the last 5 h: ${String(kept.length + 1)} readings, from ${formatPercent(first.utilization)} to ${formatPercent(current.utilization)}`,
+  );
+});
+
+it("says how input is counted by the provider, not by the counts", () => {
+  const zeroCache = {
+    ...data,
+    model_usage: (data.model_usage ?? []).map((m) => ({
+      ...m,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    })),
+  };
+  const claude = page({ view: "accounts" }, zeroCache);
+  expect(claude).toContain("input leaves out the cache reads and writes");
+  expect(claude).toContain("Cache read");
+  const codex = page(
+    { view: "accounts" },
+    { ...zeroCache, gateway: { ...data.gateway, provider: "codex" } },
+  );
+  expect(codex).toContain("input includes cached tokens");
+  expect(codex).not.toContain("Cache read");
+});
+
+it("gives each machine's tokens and each model's accounts", () => {
+  const usage = data.usage ?? [];
+  const machine = (name: string) => {
+    const rows = usage.filter((u) => u.client_machine === name);
+    const sum = (k: "input_tokens" | "output_tokens") =>
+      rows.reduce((n, u) => n + (u[k] ?? 0), 0);
+    return `${formatTokens(sum("input_tokens"))} · ${formatTokens(sum("output_tokens"))}`;
+  };
+  // The check reads each machine's tokens only if theirs differ.
+  expect(machine("machine-a")).not.toBe(machine("machine-b"));
+  const clients = page({ view: "clients" });
+  expect(clients).toContain(machine("machine-a"));
+  expect(clients).toContain(machine("machine-b"));
+
+  const accounts = page({ view: "accounts" });
+  const lists = ["claude-sample-large", "claude-sample-small"].map((model) => {
+    const counts = new Map<string, number>();
+    for (const m of data.model_usage ?? [])
+      if (m.model === model)
+        counts.set(m.alias, (counts.get(m.alias) ?? 0) + m.requests);
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([alias, n]) => `${alias} ${formatCount(n)}`)
+      .join(" · ");
+  });
+  expect(lists[0]).not.toBe(lists[1]);
+  for (const list of lists) expect(accounts).toContain(list);
+});
+
+it("places the last reset and the first reading on the history's time axis", () => {
+  const [ab] = data.accounts;
+  const q = ab?.quota["5h"];
+  const first = ab?.quota_history?.["5h"]?.[0];
+  if (q?.reset_at === undefined || first === undefined)
+    throw new Error("the sample has no 5 h history");
+  const span = 5 * 3_600_000;
+  const to = Date.parse(data.at);
+  const from = to - span;
+  // The card's curve before it is measured: 320 wide, 72 high.
+  const x = (t: number) => ((t - from) / (to - from)) * 320;
+  const y = (u: number) => 72 - u * 72;
+  const html = renderToStaticMarkup(
+    <Page data={data} now={now} route={{ view: "monitor" }} />,
+  );
+  expect(html).toContain(
+    `class="reset" x1="${String(x(Date.parse(q.reset_at) - span))}"`,
+  );
+  expect(html).toContain(
+    `class="used" points="${x(Date.parse(first.at)).toFixed(1)},${y(first.utilization).toFixed(1)} `,
+  );
 });

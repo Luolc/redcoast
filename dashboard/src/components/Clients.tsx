@@ -1,11 +1,17 @@
 import { Cpu, Terminal } from "lucide-react";
-import { formatCount, formatMs, formatPercent } from "../lib/format";
+import {
+  formatCount,
+  formatMs,
+  formatPercent,
+  formatTokens,
+} from "../lib/format";
 import { clientHref, routeHref } from "../lib/route";
 import {
   byMachine,
   clientRows,
   errorRate,
   errorRateState,
+  tokenTotal,
   type ClientRow,
 } from "../lib/stats";
 import type { Dashboard } from "../lib/types";
@@ -86,10 +92,10 @@ function ClientTable({ data }: { data: Dashboard }) {
   return (
     <Section
       title="Clients"
-      note="One row per client machine and program; sessions of the last 7 days, requests of the last 24 h"
+      note="One row per client machine and program; sessions created in the last 7 UTC days, today included; requests of the last 24 h"
     >
       {rows.length === 0 ? (
-        <Empty title="No sessions in the last 7 days." />
+        <Empty title="No sessions in the last 7 UTC days." />
       ) : (
         <div className="table-wrap">
           <table>
@@ -103,7 +109,7 @@ function ClientTable({ data }: { data: Dashboard }) {
                   Live sessions
                 </th>
                 <th scope="col" className="n">
-                  Sessions, 7 d
+                  Sessions, 7 UTC days
                 </th>
                 <th scope="col" className="n">
                   Requests, 24 h
@@ -149,6 +155,17 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
   );
   const usage = new Map(byMachine(data.usage ?? []).map((m) => [m.machine, m]));
   const orphan = usage.get("");
+  const tokens = tokenTotal(data.usage ?? []);
+  const machineTokens = (name: string) => {
+    const t = tokenTotal(
+      (data.usage ?? []).filter((u) => u.client_machine === name),
+    );
+    return t === null || t.input + t.output === 0 ? (
+      <span className="faint">—</span>
+    ) : (
+      `${formatTokens(t.input)} · ${formatTokens(t.output)}`
+    );
+  };
   return (
     <>
       <PageHead
@@ -176,7 +193,7 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
                 <tr>
                   <th scope="col">Machine</th>
                   {data.clients === undefined ? null : (
-                    <th scope="col">Programs, 7 d</th>
+                    <th scope="col">Programs, 7 UTC days</th>
                   )}
                   <th scope="col" className="n">
                     Live / max sessions
@@ -184,6 +201,13 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
                   <th scope="col" className="n">
                     Requests, 24 h
                   </th>
+                  {tokens === null ? null : (
+                    <th scope="col" className="n">
+                      Tokens, 24 h
+                      <br />
+                      <span className="faint">in · out</span>
+                    </th>
+                  )}
                   <th scope="col" className="n">
                     Error rate
                   </th>
@@ -246,6 +270,9 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
                           formatCount(u?.requests ?? 0)
                         )}
                       </td>
+                      {tokens === null ? null : (
+                        <td className="n">{machineTokens(m.name)}</td>
+                      )}
                       <td className="n">
                         {u === undefined || u.requests === 0 ? (
                           <span className="faint">—</span>

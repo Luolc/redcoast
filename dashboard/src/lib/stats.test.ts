@@ -6,15 +6,18 @@ import {
   pausedForGood,
   windowTier,
   byMachine,
+  byModel,
   clientRows,
   errorKinds,
   errorRate,
   errorRateState,
   failures,
   hourSeries,
+  hourTokens,
   pace,
   recentBindings,
   sessionState,
+  tokenTotal,
   total,
 } from "./stats";
 import type {
@@ -425,4 +428,82 @@ describe("clientRows", () => {
       }),
     ).toEqual([]);
   });
+});
+
+describe("tokens", () => {
+  const model = (alias: string, name: string, requests: number) => ({
+    hour: "2026-10-07T12:00:00Z",
+    alias,
+    model: name,
+    requests,
+    input_tokens: requests * 10,
+    output_tokens: requests * 2,
+    cache_read_input_tokens: requests * 100,
+    cache_creation_input_tokens: requests,
+  });
+
+  it("sums the tokens rows report, and has none from an older gateway", () => {
+    expect(
+      tokenTotal([
+        {
+          ...usage("2026-10-07T12:00:00Z", "machine-a", 3),
+          input_tokens: 30,
+          output_tokens: 6,
+          cache_read_input_tokens: 300,
+          cache_creation_input_tokens: 3,
+        },
+        {
+          ...usage("2026-10-07T11:00:00Z", "machine-a", 1),
+          input_tokens: 10,
+          output_tokens: 2,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      ]),
+    ).toEqual({ input: 40, output: 8, cacheRead: 300, cacheWrite: 3 });
+    expect(
+      tokenTotal([usage("2026-10-07T12:00:00Z", "machine-a", 3)]),
+    ).toBeNull();
+    expect(tokenTotal([])).toBeNull();
+  });
+
+  it("sums each model over accounts, most requests first, an unnamed model too", () => {
+    const models = byModel([
+      model("sample-ab", "model-b", 2),
+      model("sample-ab", "model-a", 3),
+      model("sample-ad", "model-b", 4),
+      model("sample-ad", "", 1),
+    ]);
+    expect(models.map((m) => [m.model, m.requests, m.tokens.input])).toEqual([
+      ["model-b", 6, 60],
+      ["model-a", 3, 30],
+      ["", 1, 10],
+    ]);
+  });
+});
+
+it("puts each hour's tokens in the window, null without any reported", () => {
+  const at = "2026-10-07T12:20:00Z";
+  const withTokens = (hour: string, input: number) => ({
+    ...usage(hour, "machine-a", 1),
+    input_tokens: input,
+    output_tokens: 1,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
+  const hours = hourTokens(
+    [
+      withTokens("2026-10-07T12:00:00Z", 5),
+      withTokens("2026-10-07T12:00:00Z", 7),
+      withTokens("2026-10-07T11:00:00Z", 3),
+    ],
+    at,
+  );
+  expect(hours).toHaveLength(25);
+  expect(hours.at(-1)?.input).toBe(12);
+  expect(hours.at(-2)?.input).toBe(3);
+  expect(hours[0]).toBeNull();
+  expect(
+    hourTokens([usage("2026-10-07T12:00:00Z", "machine-a", 1)], at).at(-1),
+  ).toBeNull();
 });

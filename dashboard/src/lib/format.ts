@@ -83,6 +83,22 @@ export function formatUntil(iso: string, now: Date): string {
   return ms <= 0 ? "due now" : `in ${formatSpan(ms)}`;
 }
 
+/** A token count in thousands or millions: `512`, `1.8 k`, `845 k`, `1.2 M`. */
+export function formatTokens(n: number): string {
+  const units: [number, string][] = [
+    [1e9, "B"],
+    [1e6, "M"],
+    [1e3, "k"],
+  ];
+  // A count that would round up to the next unit is written in it.
+  for (const [size, unit] of units)
+    if (n >= size * 0.9995) {
+      const v = n / size;
+      return `${v < 9.95 ? v.toFixed(1) : String(Math.round(v))}${NB}${unit}`;
+    }
+  return String(Math.round(n));
+}
+
 /** Bytes in binary units with one decimal: `512 B`, `1.5 KiB`, `2.0 GiB`. */
 export function formatBytes(n: number): string {
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];

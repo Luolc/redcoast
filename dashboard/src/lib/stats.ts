@@ -195,6 +195,11 @@ const WINDOW_MS: Record<string, number> = {
   "7d": 7 * 24 * HOUR_MS,
 };
 
+/** The length of a quota window in ms; undefined for one the page does not know. */
+export function windowSpan(window: string): number | undefined {
+  return WINDOW_MS[window];
+}
+
 export interface Pace {
   elapsed: number; // the fraction of the window that has passed
   by: number; // points of the window used beyond an even pace; negative below it
@@ -380,4 +385,72 @@ export function clientRows(
       if (a.machine !== b.machine) return a.machine.localeCompare(b.machine);
       return a.client.localeCompare(b.client);
     });
+}
+
+type ModelRow = NonNullable<Dashboard["model_usage"]>[number];
+
+export interface TokenCounts {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** The tokens of rows summed; null when no row reports tokens (an older gateway). */
+export function tokenTotal(
+  rows: (UsagePoint | ModelRow)[],
+): TokenCounts | null {
+  let reported = false;
+  const sum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const r of rows) {
+    if (r.input_tokens === undefined) continue;
+    reported = true;
+    sum.input += r.input_tokens;
+    sum.output += r.output_tokens ?? 0;
+    sum.cacheRead += r.cache_read_input_tokens ?? 0;
+    sum.cacheWrite += r.cache_creation_input_tokens ?? 0;
+  }
+  return reported ? sum : null;
+}
+
+export interface ModelTotal {
+  model: string; // empty when the responses named none
+  requests: number;
+  tokens: TokenCounts;
+}
+
+/** Each model's requests and tokens over the window, most requests first. */
+export function byModel(rows: ModelRow[]): ModelTotal[] {
+  const models = new Map<string, ModelRow[]>();
+  for (const r of rows)
+    models.set(r.model, [...(models.get(r.model) ?? []), r]);
+  return [...models.entries()]
+    .map(([model, rs]) => ({
+      model,
+      requests: rs.reduce((n, r) => n + r.requests, 0),
+      tokens: tokenTotal(rs) ?? {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      },
+    }))
+    .sort((a, b) =>
+      a.requests !== b.requests
+        ? b.requests - a.requests
+        : a.model.localeCompare(b.model),
+    );
+}
+
+/**
+ * The tokens of each hour of the 24 h window, oldest first, as hourSeries
+ * places its counts; null throughout when no row reports tokens.
+ */
+export function hourTokens(
+  rows: UsagePoint[],
+  at: string,
+): (TokenCounts | null)[] {
+  return windowHours(at).map((t) =>
+    tokenTotal(rows.filter((r) => Date.parse(r.hour) === t)),
+  );
 }

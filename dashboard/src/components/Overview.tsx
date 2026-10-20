@@ -6,6 +6,7 @@ import {
   formatCount,
   formatPercent,
   formatSpan,
+  formatTokens,
 } from "../lib/format";
 import { routeHref } from "../lib/route";
 import {
@@ -20,9 +21,11 @@ import {
   hourSeries,
   total,
   type HourCounts,
+  hourTokens,
+  tokenTotal,
 } from "../lib/stats";
 import type { Dashboard } from "../lib/types";
-import { providerName } from "../lib/words";
+import { cacheApart, providerName } from "../lib/words";
 import { AccountsTable } from "./Accounts";
 import { HourBars, HourLines } from "./charts";
 import { Empty, PageHead, Section, Share, Status } from "./ui";
@@ -53,6 +56,8 @@ function Traffic({ data }: { data: Dashboard }) {
   const all = total(hours);
   const rate = errorRate(all);
   const machines = byMachine(data.usage);
+  const tokens = tokenTotal(data.usage);
+  const perHour = hourTokens(data.usage, data.at);
   const worst = peak(hours, "errors");
   const kinds = errorKinds(data.result_sources ?? []);
   const highest = machines
@@ -79,6 +84,13 @@ function Traffic({ data }: { data: Dashboard }) {
                   <b>{formatHourSpan(h.hour)}</b>
                   <br />
                   Requests: {formatCount(h.requests)}
+                  {tokens === null ? null : (
+                    <>
+                      <br />
+                      Tokens: {formatTokens(perHour[i]?.input ?? 0)} in ·{" "}
+                      {formatTokens(perHour[i]?.output ?? 0)} out
+                    </>
+                  )}
                 </>
               );
             }}
@@ -93,6 +105,21 @@ function Traffic({ data }: { data: Dashboard }) {
               {formatCount(all.requests / 24)} / h
             </div>
           </div>
+          {tokens === null ? null : (
+            <div className="figs-sub">
+              Tokens <span className="num">{formatTokens(tokens.input)}</span>{" "}
+              in · <span className="num">{formatTokens(tokens.output)}</span>{" "}
+              out
+            </div>
+          )}
+          {tokens === null || !cacheApart(data.gateway.provider) ? null : (
+            <div className="figs-sub">
+              Cache{" "}
+              <span className="num">{formatTokens(tokens.cacheRead)}</span> read
+              · <span className="num">{formatTokens(tokens.cacheWrite)}</span>{" "}
+              written
+            </div>
+          )}
           <div className="rank" aria-label="Requests by client machine">
             {machines.map((m) => (
               <div className="rank-row" key={m.machine}>

@@ -16,11 +16,12 @@ import {
   failures,
   healthState,
   hourSeries,
+  windowSpan,
 } from "../lib/stats";
-import type { Dashboard } from "../lib/types";
+import type { Account, Dashboard } from "../lib/types";
 import { providerName, resultWording } from "../lib/words";
 import { Egress } from "./Accounts";
-import { Spark } from "./charts";
+import { QuotaCurve, Spark } from "./charts";
 import { Ago, Empty, Meter, PageHead, Section, Share, Status } from "./ui";
 
 // From this share of the tunnel limit on, the tunnels are near it.
@@ -143,6 +144,56 @@ function Now({ data, now }: { data: Dashboard; now: Date }) {
   );
 }
 
+/**
+ * One window's readings over the window's own length back from the
+ * snapshot, the current reading last; nothing from a gateway that keeps no
+ * history.
+ */
+function History({
+  account,
+  window,
+  data,
+}: {
+  account: Account;
+  window: "5h" | "7d";
+  data: Dashboard;
+}) {
+  const span = windowSpan(window);
+  if (account.quota_history === undefined || span === undefined) return null;
+  const to = Date.parse(data.at);
+  const from = to - span;
+  const q = account.quota[window];
+  const readings = [...(account.quota_history[window] ?? [])];
+  const last = readings.at(-1);
+  if (
+    q !== undefined &&
+    (last === undefined || Date.parse(q.observed_at) > Date.parse(last.at)) &&
+    Date.parse(q.observed_at) >= from
+  )
+    readings.push({ at: q.observed_at, utilization: q.utilization });
+  const name = window === "5h" ? "5 h" : "7 d";
+  const first = readings[0];
+  if (first === undefined)
+    return <div className="curve-none">No readings in the last {name}</div>;
+  const end = readings.at(-1) ?? first;
+  return (
+    <>
+      <QuotaCurve
+        label={`${name} window over the last ${name}: ${String(readings.length)} readings, from ${formatPercent(first.utilization)} to ${formatPercent(end.utilization)}`}
+        readings={readings}
+        from={from}
+        to={to}
+        soft={data.soft}
+        reset={q?.reset_at === undefined ? null : Date.parse(q.reset_at) - span}
+      />
+      <div className="curve-axis">
+        <span>{name} ago</span>
+        <span>now</span>
+      </div>
+    </>
+  );
+}
+
 function AccountCards({ data, now }: { data: Dashboard; now: Date }) {
   if (data.accounts.length === 0) return <Empty title="No accounts." />;
   const durations = (alias: string) => {
@@ -178,6 +229,7 @@ function AccountCards({ data, now }: { data: Dashboard; now: Date }) {
                 paused={a.paused_until !== undefined}
                 now={now}
               />
+              <History account={a} window={w} data={data} />
             </div>
           ))}
           <div className="line">
@@ -368,6 +420,12 @@ function Store({ data, now }: { data: Dashboard; now: Date }) {
               {formatCount(r.pruned.binding_history)} ·{" "}
               {formatCount(r.pruned.sessions)}
             </dd>
+            {r.pruned.quota_history === undefined ? null : (
+              <>
+                <dt>Pruned quota readings</dt>
+                <dd>{formatCount(r.pruned.quota_history)}</dd>
+              </>
+            )}
             <dt>Vacuumed</dt>
             <dd>{r.vacuumed ? "yes" : "no"}</dd>
           </>
@@ -424,7 +482,11 @@ export function Monitor({
       </Section>
       <Section
         title="Accounts"
-        note="Each window's use this cycle; the hollow mark is an even pace through it"
+        note={
+          data.accounts.some((a) => a.quota_history !== undefined)
+            ? "Each window's use this cycle, the hollow mark an even pace through it; under it, the readings over the window's length, with the soft limit and the last reset (dashed)"
+            : "Each window's use this cycle; the hollow mark is an even pace through it"
+        }
       >
         <AccountCards data={data} now={now} />
       </Section>
