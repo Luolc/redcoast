@@ -182,12 +182,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	row := session.Traffic{At: start.UTC(), Kind: "inference", Host: rt.upstream.Hostname(), Port: rt.port,
 		ClaudeSession: claudeID(r.Header, "X-Claude-Code-Session-Id"), ClaudeAgent: claudeID(r.Header, "X-Claude-Code-Agent-Id")}
-	up := &countingReader{ReadCloser: r.Body, length: r.ContentLength}
-	if r.Body != nil && r.Body != http.NoBody {
-		r.Body = up
-	} else {
-		up.whole.Store(true)
-	}
+	up := countBody(r)
 	down := &countingWriter{ResponseWriter: w}
 	line := requestLine(r)
 	defer func() {
@@ -606,6 +601,18 @@ func (c *countingReader) Read(p []byte) (int, error) {
 		c.whole.Store(true)
 	}
 	return n, err
+}
+
+// countBody puts a countingReader on r's body and returns it. A request without a body
+// counts as read to its end.
+func countBody(r *http.Request) *countingReader {
+	up := &countingReader{ReadCloser: r.Body, length: r.ContentLength}
+	if r.Body == nil || r.Body == http.NoBody {
+		up.whole.Store(true)
+		return up
+	}
+	r.Body = up
+	return up
 }
 
 // complete reports whether the body was read to its end and no read failed.
