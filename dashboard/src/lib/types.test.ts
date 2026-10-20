@@ -100,3 +100,55 @@ it("refuses a client count that drifted", () => {
   };
   expect(() => parseDashboard(JSON.stringify(drifted))).toThrow();
 });
+
+it("reads the tokens and the quota history", () => {
+  const parsed = parseDashboard(
+    JSON.stringify(sampleDashboard(new Date("2026-10-07T12:00:00Z"))),
+  );
+  expect(parsed.model_usage?.[0]?.model).toBe("claude-sample-large");
+  expect(parsed.usage?.[0]?.input_tokens).toBeGreaterThan(0);
+  expect(parsed.accounts[0]?.quota_history?.["5h"]?.at(-1)?.utilization).toBe(
+    0.42,
+  );
+});
+
+it("accepts a gateway that reports no tokens or quota history", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const older = {
+    ...sample,
+    gateway: {
+      ...sample.gateway,
+      retention: {
+        ...sample.gateway.retention,
+        pruned: { traffic: 0, binding_history: 0, sessions: 0 },
+      },
+    },
+    accounts: sample.accounts.map((a) => ({ ...a, quota_history: undefined })),
+    usage: sample.usage?.map((u) => ({
+      ...u,
+      input_tokens: undefined,
+      output_tokens: undefined,
+      cache_read_input_tokens: undefined,
+      cache_creation_input_tokens: undefined,
+    })),
+    model_usage: undefined,
+  };
+  const parsed = parseDashboard(JSON.stringify(older));
+  expect(parsed.model_usage).toBeUndefined();
+  expect(parsed.accounts[0]?.quota_history).toBeUndefined();
+});
+
+it("refuses model usage or a quota history that drifted", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  for (const drifted of [
+    { ...sample, model_usage: [{ hour: "2026-10-07", model: "m" }] },
+    {
+      ...sample,
+      accounts: sample.accounts.map((a) => ({
+        ...a,
+        quota_history: { "5h": [{ at: "2026-10-07" }] },
+      })),
+    },
+  ])
+    expect(() => parseDashboard(JSON.stringify(drifted))).toThrow();
+});
