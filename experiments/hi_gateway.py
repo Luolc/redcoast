@@ -42,8 +42,8 @@ KNOWN_LINE = re.compile(
   r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} (?:accounts: (?P<accounts>.*)"
   r"|egress: check failed alias=(?P<alias>[^,]+), not paused:"
   r" exit IP not read: .*"
-  r"|retention: deleted traffic=\d+ binding_history=\d+ sessions=\d+"
-  r" vacuum=(?:true|false))$"
+  r"|retention: deleted traffic=\d+ quota_history=\d+ binding_history=\d+"
+  r" sessions=\d+ vacuum=(?:true|false))$"
 )
 OK_EMPTY = (
   b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
