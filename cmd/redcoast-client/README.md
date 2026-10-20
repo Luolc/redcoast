@@ -82,6 +82,8 @@ Before asking for a session the launcher refuses (exit 3) when anything on the m
 
 Exit status: the client's own, 128 plus the signal number when it was killed, or 3 for a failure before the client started.
 
+With the session request the launcher reports which client it starts (`claude-code`, `pi` or `codex-cli`) and the client's version, for the gateway's dashboard. It reads the version by running the client with `--version` once, before the session exists: in `/`, with only `PATH` and `HOME` from your environment and every proxy variable pointing at a closed port, and for at most 3 seconds. It keeps only the first version number of the output, such as `2.1.0`; when the run fails, prints none or takes longer, the launch goes on without a version. The request also carries the launcher's PID, the working directory, left out when it is too long for the gateway's 4096-byte limit, and herdr's `HERDR_PANE_ID` and `HERDR_WORKSPACE_ID` when set; the dashboard shows only the client and its version.
+
 If the launcher itself is killed with SIGKILL, its session stays live, and keeps one of the machine's session slots, until it has been idle for 7 days or the machine is revoked.
 
 ## Pi and Codex CLI

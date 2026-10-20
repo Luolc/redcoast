@@ -11,6 +11,7 @@ export function sampleDashboard(now: Date): Dashboard {
     d.setUTCDate(d.getUTCDate() - back);
     return d.toISOString();
   };
+  const counted = traffic(now);
   return {
     at: at(0),
     soft: 0.9,
@@ -167,6 +168,8 @@ export function sampleDashboard(now: Date): Dashboard {
         alias: "sample-ab",
         created_at: at(-28 * 60),
         last_seen: at(-27 * 60),
+        client: "",
+        client_version: "",
       },
       {
         id: "P3ZT8WQN",
@@ -174,6 +177,8 @@ export function sampleDashboard(now: Date): Dashboard {
         alias: "sample-ab",
         created_at: at(-50),
         last_seen: at(-1),
+        client: "claude-code",
+        client_version: "2.1.0",
       },
       {
         id: "R5HD2LKE",
@@ -181,6 +186,8 @@ export function sampleDashboard(now: Date): Dashboard {
         alias: "sample-ad",
         created_at: at(-200),
         last_seen: at(-14),
+        client: "pi",
+        client_version: "1.2.0",
       },
       {
         id: "W8MN4TQC",
@@ -188,10 +195,29 @@ export function sampleDashboard(now: Date): Dashboard {
         alias: "sample-ad",
         created_at: at(-95),
         last_seen: at(-6),
+        client: "codex-cli",
+        client_version: "0.46.0",
       },
     ],
     idle_sessions: 1,
-    ...traffic(now),
+    ...counted,
+    clients: [
+      { client_machine: "machine-a", client: "", live: 1, sessions: 1 },
+      {
+        client_machine: "machine-a",
+        client: "claude-code",
+        live: 1,
+        sessions: 6,
+      },
+      { client_machine: "machine-a", client: "pi", live: 1, sessions: 2 },
+      {
+        client_machine: "machine-b",
+        client: "codex-cli",
+        live: 1,
+        sessions: 3,
+      },
+    ],
+    client_hourly: clientHourly(counted.usage ?? []),
     destinations: [
       {
         host: "github.com",
@@ -399,4 +425,34 @@ function traffic(
     hourly: [...hourly.values()],
     results: [...results.values()],
   };
+}
+
+// The hourly requests by client program: machine-a's as claude-code's,
+// machine-b's as codex-cli's; requests of no session are not counted.
+function clientHourly(
+  usage: NonNullable<Dashboard["usage"]>,
+): NonNullable<Dashboard["client_hourly"]> {
+  const programs: Record<string, string> = {
+    "machine-a": "claude-code",
+    "machine-b": "codex-cli",
+  };
+  const hourly = new Map<
+    string,
+    NonNullable<Dashboard["client_hourly"]>[number]
+  >();
+  for (const u of usage) {
+    const client = programs[u.client_machine];
+    if (client === undefined) continue;
+    const k = `${u.hour}\t${u.client_machine}`;
+    const into = hourly.get(k);
+    if (into === undefined)
+      hourly.set(k, {
+        hour: u.hour,
+        client_machine: u.client_machine,
+        client,
+        requests: u.requests,
+      });
+    else into.requests += u.requests;
+  }
+  return [...hourly.values()];
 }
