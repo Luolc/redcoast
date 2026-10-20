@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { poller, stopped } from "./poll";
 import { parseRoute, type Route } from "./route";
 import { parseDashboard, type Dashboard } from "./types";
 
@@ -10,6 +11,10 @@ export interface Loaded {
   reload: () => void;
 }
 
+// A load still unanswered after this many refresh intervals is given up,
+// so that the next one can run.
+const LOAD_TIMEOUT_INTERVALS = 3;
+
 /** Fetches url now and every everyMs. */
 export function useData(url: string, everyMs: number): Loaded {
   const [state, setState] = useState<Omit<Loaded, "reload">>({
@@ -18,32 +23,23 @@ export function useData(url: string, everyMs: number): Loaded {
   });
   const [tick, setTick] = useState(0);
   useEffect(() => {
-    // One load at a time: a new one cancels the last, so an older answer
-    // never lands after a newer one.
-    let current: AbortController | null = null;
-    async function load() {
-      current?.abort();
-      const controller = new AbortController();
-      current = controller;
+    // Refresh starts this effect again, which stops the load in flight, so
+    // an older answer never lands after a newer one.
+    const loads = poller(async (signal) => {
       try {
-        const response = await fetch(url, {
-          cache: "no-store",
-          signal: controller.signal,
-        });
+        const response = await fetch(url, { cache: "no-store", signal });
         if (!response.ok) throw new Error(`HTTP ${String(response.status)}`);
         const data = parseDashboard(await response.text());
-        if (!controller.signal.aborted) setState({ data, fetchError: null });
+        if (!signal.aborted) setState({ data, fetchError: null });
       } catch (e) {
-        if (!controller.signal.aborted)
+        if (!stopped(signal))
           setState((l) => ({ ...l, fetchError: String(e) }));
       }
-    }
-    void load();
-    const timer = setInterval(() => {
-      void load();
-    }, everyMs);
+    }, LOAD_TIMEOUT_INTERVALS * everyMs);
+    loads.run();
+    const timer = setInterval(loads.run, everyMs);
     return () => {
-      current?.abort();
+      loads.stop();
       clearInterval(timer);
     };
   }, [url, everyMs, tick]);

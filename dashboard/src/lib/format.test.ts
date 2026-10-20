@@ -3,6 +3,7 @@ import {
   formatAgo,
   formatBytes,
   formatCount,
+  formatMs,
   formatPercent,
   formatSpan,
   formatTime,
@@ -50,4 +51,10 @@ it("formats bytes, fractions and counts", () => {
   expect(formatPercent(0.42)).toBe("42%");
   expect(formatPercent(0.0123, 1)).toBe("1.2%");
   expect(formatCount(6405)).toBe("6,405");
+});
+
+it("writes a request's duration in ms, s or min", () => {
+  expect(formatMs(850)).toBe("850\u00a0ms");
+  expect(formatMs(15_040)).toBe("15.0\u00a0s");
+  expect(formatMs(65_000)).toBe("1\u00a0min 05\u00a0s");
 });

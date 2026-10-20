@@ -164,8 +164,10 @@ interface Latency {
   duration_p95_ms: number;
 }
 
+export type HourLatency = Latency & { hour: string };
+
 interface LatencyView {
-  hourly: (Latency & { hour: string })[];
+  hourly: HourLatency[];
   accounts: (Latency & { alias: string })[]; // "" for no account
   machines: (Latency & { client_machine: string })[]; // "" for no session
 }
