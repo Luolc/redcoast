@@ -17,10 +17,13 @@ import tokensCss from "./styles/tokens.css?raw";
 
 const now = new Date("2026-10-07T12:20:00Z");
 const data = sampleDashboard(now);
+const noop = () => undefined;
 
 // The page's text, without its markup.
 function page(route: Route, d = data): string {
-  return renderToStaticMarkup(<Page data={d} now={now} route={route} />)
+  return renderToStaticMarkup(
+    <Page data={d} now={now} route={route} reload={noop} />,
+  )
     .replace(/<[^>]*>/g, "")
     .replaceAll("&amp;", "&");
 }
@@ -107,7 +110,7 @@ it("lets every page fill the main area at any width", () => {
     ...new Set(
       [
         ...renderToStaticMarkup(
-          <Page data={data} now={now} route={{ view }} />,
+          <Page data={data} now={now} route={{ view }} reload={noop} />,
         ).matchAll(/<section class="([^"]*)"/g),
       ].map((m) => m[1]),
     ),
@@ -161,19 +164,19 @@ it("sets each icon on the baseline of the text beside it", () => {
   // Every icon beside a word in the binding history and a stale reading
   // is in such a pair.
   const html = renderToStaticMarkup(
-    <Page data={data} now={now} route={{ view: "sessions" }} />,
+    <Page data={data} now={now} route={{ view: "sessions" }} reload={noop} />,
   );
   expect(html).toMatch(/<span class="with-icon"><svg/);
   expect(
     renderToStaticMarkup(
-      <Page data={data} now={now} route={{ view: "accounts" }} />,
+      <Page data={data} now={now} route={{ view: "accounts" }} reload={noop} />,
     ),
   ).toMatch(/<span class="stale s-warn"><svg[^]*?<\/svg><span>read /);
 });
 
 it("right-aligns Clients' share and steps the egress check alike", () => {
   const html = renderToStaticMarkup(
-    <Page data={data} now={now} route={{ view: "clients" }} />,
+    <Page data={data} now={now} route={{ view: "clients" }} reload={noop} />,
   );
   expect(html.includes('<th scope="col" class="n">Share</th>')).toBe(true);
   expect(rule(appCss, ".share-cell")).toContain("text-align: right;");
@@ -182,7 +185,7 @@ it("right-aligns Clients' share and steps the egress check alike", () => {
   expect(rule(appCss, ".ip + *")).toContain("margin-top: 2px;");
   expect(
     renderToStaticMarkup(
-      <Page data={data} now={now} route={{ view: "exits" }} />,
+      <Page data={data} now={now} route={{ view: "exits" }} reload={noop} />,
     ),
   ).toContain('<div class="mono ip">');
 });
@@ -425,7 +428,7 @@ it("draws each window's quota history on Monitor's account cards", () => {
       ? [...history, current]
       : history;
   const html = renderToStaticMarkup(
-    <Page data={data} now={now} route={{ view: "monitor" }} />,
+    <Page data={data} now={now} route={{ view: "monitor" }} reload={noop} />,
   );
   expect(html).toContain(
     `5 h window over the last 5 h: ${String(readings.length)} readings, from ${formatPercent(first.utilization)} to ${formatPercent(readings.at(-1)?.utilization ?? 0)}`,
@@ -450,12 +453,12 @@ it("shows no tokens, models or quota history from a gateway that has none", () =
   expect(page({ view: "clients" }, older)).not.toContain("Tokens, 24 h");
   expect(page({ view: "accounts" }, older)).not.toContain("Models");
   const monitor = renderToStaticMarkup(
-    <Page data={older} now={now} route={{ view: "monitor" }} />,
+    <Page data={older} now={now} route={{ view: "monitor" }} reload={noop} />,
   );
   expect(monitor).not.toContain('class="curve"');
   expect(
     renderToStaticMarkup(
-      <Page data={data} now={now} route={{ view: "monitor" }} />,
+      <Page data={data} now={now} route={{ view: "monitor" }} reload={noop} />,
     ),
   ).toContain('class="curve"');
 });
@@ -481,7 +484,12 @@ it("ends a quota history at the current reading when it is newer", () => {
   };
   expect(
     renderToStaticMarkup(
-      <Page data={earlier} now={now} route={{ view: "monitor" }} />,
+      <Page
+        data={earlier}
+        now={now}
+        route={{ view: "monitor" }}
+        reload={noop}
+      />,
     ),
   ).toContain(
     `5 h window over the last 5 h: ${String(kept.length + 1)} readings, from ${formatPercent(first.utilization)} to ${formatPercent(current.utilization)}`,
@@ -550,7 +558,7 @@ it("places the last reset and the first reading on the history's time axis", () 
   const x = (t: number) => ((t - from) / (to - from)) * 320;
   const y = (u: number) => 72 - u * 72;
   const html = renderToStaticMarkup(
-    <Page data={data} now={now} route={{ view: "monitor" }} />,
+    <Page data={data} now={now} route={{ view: "monitor" }} reload={noop} />,
   );
   expect(html).toContain(
     `class="reset" x1="${String(x(Date.parse(q.reset_at) - span))}"`,
@@ -558,4 +566,38 @@ it("places the last reset and the first reading on the history's time axis", () 
   expect(html).toContain(
     `class="used" points="${x(Date.parse(first.at)).toFixed(1)},${y(first.utilization).toFixed(1)} `,
   );
+});
+
+it("offers the quota refresh where the accounts' quota is, only when the gateway can refresh", () => {
+  const button = (d: typeof data, view: "overview" | "accounts") =>
+    /<button[^>]*>(?:(?!<\/button>).)*Refresh all quota<\/button>/.exec(
+      renderToStaticMarkup(
+        <Page data={d} now={now} route={{ view }} reload={noop} />,
+      ),
+    )?.[0];
+  for (const view of ["overview", "accounts"] as const) {
+    const ready = button(data, view);
+    expect(ready).toBeDefined();
+    expect(ready).not.toContain("disabled");
+    expect(page({ view })).toContain("Refreshed 40 min ago");
+    const withState = (
+      quota_refresh: (typeof data)["gateway"]["quota_refresh"],
+    ) => ({
+      ...data,
+      gateway: { ...data.gateway, quota_refresh },
+    });
+    expect(button(withState({ running: true }), view)).toContain("disabled");
+    expect(
+      button(
+        withState({
+          running: false,
+          last_finished: "2026-10-07T12:18:00Z",
+          cooldown_until: "2026-10-07T12:23:00Z",
+        }),
+        view,
+      ),
+    ).toContain("disabled");
+    expect(button(withState(null), view)).toBeUndefined();
+    expect(button(withState(undefined), view)).toBeUndefined();
+  }
 });

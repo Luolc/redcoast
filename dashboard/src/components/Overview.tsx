@@ -26,7 +26,7 @@ import {
 } from "../lib/stats";
 import type { Dashboard } from "../lib/types";
 import { cacheApart, providerName } from "../lib/words";
-import { AccountsTable } from "./Accounts";
+import { AccountsTable, QuotaRefreshButton } from "./Accounts";
 import { HourBars, HourLines } from "./charts";
 import { Empty, PageHead, Section, Share, Status } from "./ui";
 
@@ -281,7 +281,15 @@ function Durations({
   );
 }
 
-export function Overview({ data, now }: { data: Dashboard; now: Date }) {
+export function Overview({
+  data,
+  now,
+  reload,
+}: {
+  data: Dashboard;
+  now: Date;
+  reload: () => void;
+}) {
   const g = data.gateway;
   const name = providerName(g.provider);
   const health = healthState(data);
@@ -393,6 +401,7 @@ export function Overview({ data, now }: { data: Dashboard; now: Date }) {
       <Section
         title="Account quota"
         note={`Soft limit ${formatPercent(data.soft)} (the tick on each bar), hard limit ${formatPercent(data.hard)}; the hollow mark is an even pace through the window`}
+        action={<QuotaRefreshButton data={data} now={now} reload={reload} />}
       >
         <AccountsTable data={data} now={now} />
       </Section>

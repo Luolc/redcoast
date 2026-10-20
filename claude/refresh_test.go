@@ -231,7 +231,7 @@ func TestRefreshAll(t *testing.T) {
 		}
 	}
 	admin := NewAdmin(h.accounts, h.store, nil)
-	admin.Refresh = h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{}).refresh
+	admin.RefreshAll = h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{}).refreshAll
 	server := httptest.NewServer(admin.Handler())
 	t.Cleanup(server.Close)
 
@@ -390,5 +390,210 @@ func TestQuotaRecheckStopsOnShutdown(t *testing.T) {
 	rt.recheckQuota(ctx)
 	if exits["sample-a"].requests() != 1 || exits["sample-b"].requests() != 0 || strings.Contains(logged.String(), "sample-b") {
 		t.Fatalf("round canceled during sample-a: exits received %d and %d requests, log:\n%s", exits["sample-a"].requests(), exits["sample-b"].requests(), logged.String())
+	}
+}
+
+// quotaRefreshFixture is a dashboard with a quota refresh over accounts that each have
+// their own exit, its rounds running until the test ends.
+type quotaRefreshFixture struct {
+	h       *harness
+	rt      *router
+	refresh *QuotaRefresh
+	server  *httptest.Server
+	exits   map[string]*refreshExit
+}
+
+// newQuotaRefreshFixture starts the dashboard over the aliases, each exit answering 200
+// with low readings.
+func newQuotaRefreshFixture(t *testing.T, aliases ...string) *quotaRefreshFixture {
+	t.Helper()
+	h := newHarness(t)
+	f := &quotaRefreshFixture{h: h, exits: map[string]*refreshExit{}}
+	for _, alias := range aliases {
+		exit := startRefreshExit(t, h.clock)
+		exit.answer(200, "0.1")
+		exitURL, err := url.Parse(exit.server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.addWithExit(alias, "sk-ant-oat01-synthetic-token-"+alias, exitURL)
+		f.exits[alias] = exit
+	}
+	f.rt = h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{})
+	f.refresh = NewQuotaRefresh(&Entrypoint{router: f.rt})
+	reader, err := session.OpenReadOnly(h.path, session.Config{Now: func() time.Time { return h.clock }}, DefaultLimits.MaxTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	d := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path, QuotaRefresh: f.refresh})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = d.RunQuotaRefresh(ctx)
+	}()
+	f.server = httptest.NewServer(d.Handler())
+	t.Cleanup(func() {
+		f.server.Close()
+		cancel()
+		<-done
+	})
+	return f
+}
+
+// post sends POST /quota/refresh as the page does and returns the status, the
+// Retry-After header and the body.
+func (f *quotaRefreshFixture) post(t *testing.T) (int, string, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, f.server.URL+"/quota/refresh", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", f.server.URL)
+	req.Header.Set(QuotaRefreshHeader, "refresh")
+	res, err := f.server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	var body map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	return res.StatusCode, res.Header.Get("Retry-After"), body
+}
+
+// settle waits until no dashboard round is pending or running.
+func (f *quotaRefreshFixture) settle(t *testing.T) QuotaRefreshState {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if state := f.refresh.State(); !state.Running {
+			return state
+		}
+	}
+	t.Fatal("the dashboard round did not end")
+	return QuotaRefreshState{}
+}
+
+// TestQuotaRefreshRounds checks the dashboard's refresh: a POST answers 202 at once
+// while its round still waits on an exit; a second POST during the round joins it,
+// so each account gets one request, through its own exit with its own token, and an
+// account paused for another reason gets none; after the round a POST gets 429 with
+// Retry-After until QuotaRefreshWait has passed since the round ended, and then starts
+// a new round.
+func TestQuotaRefreshRounds(t *testing.T) {
+	f := newQuotaRefreshFixture(t, "sample-a", "sample-b", "sample-c")
+	if err := f.h.store.Pause(t.Context(), "sample-c", indefinitePause, "upstream_401"); err != nil {
+		t.Fatal(err)
+	}
+	// The first request to sample-a's exit waits for free, which a failed test also
+	// calls, before the fixture closes the exit.
+	reached, release := make(chan struct{}), make(chan struct{})
+	var first, freed sync.Once
+	free := func() { freed.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	f.exits["sample-a"].mu.Lock()
+	f.exits["sample-a"].onRequest = func() {
+		first.Do(func() {
+			close(reached)
+			<-release
+		})
+	}
+	f.exits["sample-a"].mu.Unlock()
+
+	if status, _, body := f.post(t); status != http.StatusAccepted || body["started"] != true {
+		t.Fatalf("first POST: status=%d body=%v", status, body)
+	}
+	<-reached
+	if state := f.refresh.State(); !state.Running || !state.LastStarted.Equal(f.h.clock) || !state.WaitUntil.IsZero() {
+		t.Fatalf("state during the round %+v", state)
+	}
+	if status, _, body := f.post(t); status != http.StatusAccepted || body["started"] != false {
+		t.Fatalf("POST during the round: status=%d body=%v", status, body)
+	}
+	free()
+	state := f.settle(t)
+	for alias, sent := range map[string]int{"sample-a": 1, "sample-b": 1, "sample-c": 0} {
+		if f.exits[alias].requests() != sent {
+			t.Fatalf("exit of %s received %d requests, want %d", alias, f.exits[alias].requests(), sent)
+		}
+		if sent == 1 {
+			if req, _ := f.exits[alias].request(0); req.Header.Get("Authorization") != "Bearer sk-ant-oat01-synthetic-token-"+alias {
+				t.Fatalf("exit of %s received another account's token", alias)
+			}
+		}
+	}
+	if !state.LastFinished.Equal(f.h.clock) || !state.WaitUntil.Equal(f.h.clock.Add(QuotaRefreshWait)) {
+		t.Fatalf("state after the round %+v", state)
+	}
+
+	if status, retryAfter, _ := f.post(t); status != http.StatusTooManyRequests || retryAfter != "300" {
+		t.Fatalf("POST right after the round: status=%d Retry-After=%q", status, retryAfter)
+	}
+	f.h.clock = f.h.clock.Add(QuotaRefreshWait - time.Second)
+	if status, retryAfter, _ := f.post(t); status != http.StatusTooManyRequests || retryAfter != "1" {
+		t.Fatalf("POST a second before the wait ends: status=%d Retry-After=%q", status, retryAfter)
+	}
+	if f.exits["sample-a"].requests() != 1 || f.exits["sample-b"].requests() != 1 {
+		t.Fatal("a refused POST sent requests")
+	}
+	f.h.clock = f.h.clock.Add(time.Second)
+	if status, _, body := f.post(t); status != http.StatusAccepted || body["started"] != true {
+		t.Fatalf("POST after the wait: status=%d body=%v", status, body)
+	}
+	f.settle(t)
+	if f.exits["sample-a"].requests() != 2 || f.exits["sample-b"].requests() != 2 || f.exits["sample-c"].requests() != 0 {
+		t.Fatalf("second round: exits received %d, %d and %d requests", f.exits["sample-a"].requests(), f.exits["sample-b"].requests(), f.exits["sample-c"].requests())
+	}
+}
+
+// TestRefreshRoundsTakeTurns checks that a dashboard round, a refresh of all accounts
+// over the management interface and a quota recheck, started together, never send two
+// requests at the same time, and that each of them still refreshes every account.
+func TestRefreshRoundsTakeTurns(t *testing.T) {
+	f := newQuotaRefreshFixture(t, "sample-a", "sample-b")
+	shared := &overlap{}
+	for alias, exit := range f.exits {
+		// The exits send no readings, so the stored one stays due for the recheck,
+		// whichever round goes first: over soft, its reset passed.
+		exit.answer(200, "")
+		exit.mu.Lock()
+		exit.shared = shared
+		exit.mu.Unlock()
+		if err := f.h.store.RecordQuota(t.Context(), alias, []session.Reading{{Window: session.Window5h, Utilization: 0.97, ResetAt: f.h.clock.Add(-time.Minute), Source: "response"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admin := NewAdmin(f.h.accounts, f.h.store, nil)
+	admin.RefreshAll = f.rt.refreshAll
+	adminServer := httptest.NewServer(admin.Handler())
+	t.Cleanup(adminServer.Close)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		res, err := adminServer.Client().Post(adminServer.URL+"/refresh", "", nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != 200 {
+			t.Errorf("POST /refresh: status=%d", res.StatusCode)
+		}
+	})
+	wg.Go(func() {
+		if status, _, _ := f.post(t); status != http.StatusAccepted {
+			t.Errorf("POST /quota/refresh: status=%d", status)
+		}
+	})
+	wg.Go(func() { f.rt.recheckQuota(t.Context()) })
+	wg.Wait()
+	f.settle(t)
+	if shared.most != 1 {
+		t.Fatalf("exits served up to %d refreshes at the same time, want 1", shared.most)
+	}
+	if f.exits["sample-a"].requests() != 3 || f.exits["sample-b"].requests() != 3 {
+		t.Fatalf("exits received %d and %d requests, want 3 each", f.exits["sample-a"].requests(), f.exits["sample-b"].requests())
 	}
 }

@@ -52,6 +52,16 @@ interface Gateway {
   } | null; // null when no backups are configured
   open_tunnels: number;
   tunnel_limit: number;
+  // null at a gateway that cannot refresh quota (Codex); absent from an older one.
+  quota_refresh?: QuotaRefreshState | null | undefined;
+}
+
+// The dashboard's refresh of every account's quota.
+export interface QuotaRefreshState {
+  running: boolean; // a round is waiting or running
+  last_started?: string | undefined;
+  last_finished?: string | undefined;
+  cooldown_until?: string | undefined; // set while a new round is refused
 }
 
 export interface Quota {
@@ -311,6 +321,16 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
     ),
     open_tunnels: isNumber,
     tunnel_limit: isNumber,
+    quota_refresh: optional(
+      nullable(
+        object<QuotaRefreshState>({
+          running: isBoolean,
+          last_started: optional(isString),
+          last_finished: optional(isString),
+          cooldown_until: optional(isString),
+        }),
+      ),
+    ),
   }),
   db_bytes: isNumber,
   accounts: arrayOf(

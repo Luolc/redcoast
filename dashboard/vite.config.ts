@@ -5,8 +5,8 @@ import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { sampleDashboard } from "./fixtures/sample.ts";
 
-// `pnpm dev` only: made-up data at ./dashboard.json, so the build never
-// carries it.
+// `pnpm dev` only: made-up data at ./dashboard.json, and a quota refresh
+// that only answers, so the build never carries them.
 function sample(): Plugin {
   return {
     name: "sample-data",
@@ -15,6 +15,11 @@ function sample(): Plugin {
       server.middlewares.use("/dashboard.json", (_req, res) => {
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify(sampleDashboard(new Date())));
+      });
+      server.middlewares.use("/quota/refresh", (req, res) => {
+        res.statusCode = req.method === "POST" ? 202 : 405;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ started: req.method === "POST" }));
       });
     },
   };

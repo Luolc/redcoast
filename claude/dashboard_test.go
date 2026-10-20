@@ -412,3 +412,109 @@ func decoded(t *testing.T, recorder *httptest.ResponseRecorder) string {
 	}
 	return string(body)
 }
+
+// TestQuotaRefreshEndpoint checks the request checks of POST /quota/refresh: another
+// method gets 405; a POST without Origin, with another origin's, with two, or without
+// the header or with another value gets 403; none of them starts a round or sends a
+// request. A process that cannot refresh answers 501 to a POST that passes the checks
+// and shows quota_refresh as null; one that can shows its state.
+func TestQuotaRefreshEndpoint(t *testing.T) {
+	f := newQuotaRefreshFixture(t, "sample-a")
+	send := func(t *testing.T, server *httptest.Server, method string, header http.Header) int {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), method, server.URL+"/quota/refresh", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header = header
+		res, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		return res.StatusCode
+	}
+	page := func(server *httptest.Server) http.Header {
+		return http.Header{"Origin": {server.URL}, QuotaRefreshHeader: {"refresh"}}
+	}
+	without := func(header http.Header, name string) http.Header {
+		header.Del(name)
+		return header
+	}
+	with := func(header http.Header, name string, values ...string) http.Header {
+		header[http.CanonicalHeaderKey(name)] = values
+		return header
+	}
+	for _, arm := range []struct {
+		name   string
+		method string
+		header http.Header
+		want   int
+	}{
+		{"get", http.MethodGet, page(f.server), http.StatusMethodNotAllowed},
+		{"put", http.MethodPut, page(f.server), http.StatusMethodNotAllowed},
+		{"no_origin", http.MethodPost, without(page(f.server), "Origin"), http.StatusForbidden},
+		{"other_origin", http.MethodPost, with(page(f.server), "Origin", "http://attacker.example.test"), http.StatusForbidden},
+		{"other_port", http.MethodPost, with(page(f.server), "Origin", "http://127.0.0.1:1"), http.StatusForbidden},
+		{"null_origin", http.MethodPost, with(page(f.server), "Origin", "null"), http.StatusForbidden},
+		{"two_origins", http.MethodPost, with(page(f.server), "Origin", f.server.URL, f.server.URL), http.StatusForbidden},
+		{"no_header", http.MethodPost, without(page(f.server), QuotaRefreshHeader), http.StatusForbidden},
+		{"other_value", http.MethodPost, with(page(f.server), QuotaRefreshHeader, "reload"), http.StatusForbidden},
+		{"two_values", http.MethodPost, with(page(f.server), QuotaRefreshHeader, "refresh", "refresh"), http.StatusForbidden},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			if status := send(t, f.server, arm.method, arm.header); status != arm.want {
+				t.Fatalf("status=%d, want %d", status, arm.want)
+			}
+			if state := f.refresh.State(); state.Running || !state.LastStarted.IsZero() || f.exits["sample-a"].requests() != 0 {
+				t.Fatalf("a refused request started a round: %+v, %d requests", state, f.exits["sample-a"].requests())
+			}
+		})
+	}
+
+	readState := func(t *testing.T, server *httptest.Server) json.RawMessage {
+		t.Helper()
+		res, err := server.Client().Get(server.URL + "/dashboard.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = res.Body.Close() }()
+		var view struct {
+			Gateway struct {
+				QuotaRefresh json.RawMessage `json:"quota_refresh"`
+			}
+		}
+		if err := json.NewDecoder(res.Body).Decode(&view); err != nil || res.StatusCode != http.StatusOK {
+			t.Fatalf("dashboard.json: status=%d err=%v", res.StatusCode, err)
+		}
+		return view.Gateway.QuotaRefresh
+	}
+	if got := string(readState(t, f.server)); got != `{"running":false}` {
+		t.Fatalf("quota_refresh before any round = %s", got)
+	}
+	if status, _, _ := f.post(t); status != http.StatusAccepted {
+		t.Fatalf("POST from the page: status=%d", status)
+	}
+	f.settle(t)
+	want := `{"running":false,"last_started":"2026-10-06T12:00:00Z","last_finished":"2026-10-06T12:00:00Z","cooldown_until":"2026-10-06T12:05:00Z"}`
+	if got := string(readState(t, f.server)); got != want {
+		t.Fatalf("quota_refresh after a round = %s, want %s", got, want)
+	}
+
+	reader, err := session.OpenReadOnly(f.h.path, session.Config{Now: func() time.Time { return f.h.clock }}, DefaultLimits.MaxTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	codex := httptest.NewServer(NewDashboard(NewEgress(f.h.accounts, f.h.store, testUpstream), DashboardConfig{Provider: "codex", Reader: reader, Store: f.h.store, DBPath: f.h.path}).Handler())
+	t.Cleanup(codex.Close)
+	if status := send(t, codex, http.MethodPost, page(codex)); status != http.StatusNotImplemented {
+		t.Fatalf("POST at a process that cannot refresh: status=%d", status)
+	}
+	if got := string(readState(t, codex)); got != "null" {
+		t.Fatalf("quota_refresh at a process that cannot refresh = %s", got)
+	}
+	if NewQuotaRefresh(&Entrypoint{router: &router{provider: Provider{}}}) != nil {
+		t.Fatal("NewQuotaRefresh returned a refresh for a provider without a Probe")
+	}
+}

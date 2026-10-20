@@ -23,14 +23,16 @@ export function Page({
   data,
   now,
   route,
+  reload,
 }: {
   data: Dashboard;
   now: Date;
   route: Route;
+  reload: () => void;
 }) {
   switch (route.view) {
     case "overview":
-      return <Overview data={data} now={now} />;
+      return <Overview data={data} now={now} reload={reload} />;
     case "clients":
       return <Clients data={data} now={now} />;
     case "client": {
@@ -44,7 +46,7 @@ export function Page({
     case "sessions":
       return <Sessions data={data} now={now} machine={route.arg} />;
     case "accounts":
-      return <Accounts data={data} now={now} />;
+      return <Accounts data={data} now={now} reload={reload} />;
     case "exits":
       return <Exits data={data} now={now} />;
     case "monitor":
@@ -121,7 +123,7 @@ export function App() {
               <p className="muted">Loading…</p>
             ) : null
           ) : (
-            <Page data={data} now={now} route={route} />
+            <Page data={data} now={now} route={route} reload={reload} />
           )}
         </main>
       </div>
