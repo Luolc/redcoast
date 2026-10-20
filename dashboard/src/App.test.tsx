@@ -12,6 +12,8 @@ import {
 } from "./lib/format";
 import { durationSeries, hourSeries } from "./lib/stats";
 import type { Route } from "./lib/route";
+import appCss from "./styles/app.css?raw";
+import tokensCss from "./styles/tokens.css?raw";
 
 const now = new Date("2026-10-07T12:20:00Z");
 const data = sampleDashboard(now);
@@ -72,15 +74,48 @@ it("renders each page of the sample", () => {
   }
 });
 
-it("widens only Overview's Account quota past the page's width", () => {
-  const wide = (route: Route) =>
-    [
-      ...renderToStaticMarkup(
-        <Page data={data} now={now} route={route} />,
-      ).matchAll(/<section class="section wide"[^>]*><div[^>]*><h2>([^<]*)/g),
-    ].map((m) => m[1]);
-  expect(wide({ view: "overview" })).toEqual(["Account quota"]);
-  expect(wide({ view: "accounts" })).toEqual([]);
+// The declarations of the rule whose selector is exactly sel.
+function rule(css: string, sel: string): string {
+  const at = css.indexOf(`\n${sel} {`);
+  expect(at, sel).toBeGreaterThanOrEqual(0);
+  return css.slice(at, css.indexOf("}", at));
+}
+
+it("lets every page fill the main area of a wide screen", () => {
+  const rem = (name: string) =>
+    Number(new RegExp(`${name}: ([\\d.]+)rem;`).exec(tokensCss)?.[1]);
+  const base = Number(/--t-font-size-base: (\d+)px;/.exec(tokensCss)?.[1]);
+  // A 2560 px screen is filled up to the page's width.
+  expect(
+    (rem("--t-width-sidebar") + rem("--t-width-main")) * base,
+  ).toBeGreaterThan(2560);
+  expect(rule(appCss, ".content")).toContain("max-width: var(--t-width-main);");
+  // Nothing in the page is held narrower than the page, and no section is
+  // set apart to be wider than the rest.
+  expect(appCss).not.toMatch(/\.content\s*>/);
+  const views = [
+    "overview",
+    "clients",
+    "sessions",
+    "accounts",
+    "exits",
+    "monitor",
+  ] as const;
+  for (const view of views) {
+    const html = renderToStaticMarkup(
+      <Page data={data} now={now} route={{ view }} />,
+    );
+    const classes = [...html.matchAll(/<section class="([^"]*)"/g)].map(
+      (m) => m[1],
+    );
+    expect(classes.length, view).toBeGreaterThan(0);
+    expect(new Set(classes), view).toEqual(new Set(["section"]));
+  }
+});
+
+it("lines up each quota row on its first line", () => {
+  expect(rule(appCss, ".quota-table td")).toContain("vertical-align: top;");
+  expect(rule(appCss, ".quota-table th")).toContain("vertical-align: bottom;");
 });
 
 it("filters sessions to one machine", () => {

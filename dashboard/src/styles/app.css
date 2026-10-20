@@ -257,15 +257,12 @@ th.n {
   color: var(--t-text);
 }
 
+/* A page fills the main area. Past --t-width-main a row is too long to
+   read across, so the page stops there and sits in the middle. */
 .content {
   padding: var(--t-space-6) var(--t-space-6) var(--t-space-12);
-}
-/* --t-width-main includes the side padding of .content. */
-.content > * {
-  max-width: calc(var(--t-width-main) - 2 * var(--t-space-6));
-}
-.content > .wide {
-  max-width: none;
+  max-width: var(--t-width-main);
+  margin-inline: auto;
 }
 
 /* Page heading: the serif is used here and in empty states only. */
@@ -625,16 +622,57 @@ tbody tr.link {
 .mono {
   font-family: var(--t-font-mono);
 }
+/* The quota table. Every cell starts at the top with a first line as tall
+   as the status pill, so the names, pills, bars, percentages, addresses
+   and counts of a row sit on one line and the small text under each
+   starts on one line too. Headers sit on their bottom line. */
+.quota-table {
+  --quota-line: 1.75rem;
+}
+.quota-table th {
+  vertical-align: bottom;
+}
+.quota-table td {
+  vertical-align: top;
+  padding-top: var(--t-space-3);
+  padding-bottom: var(--t-space-3);
+}
+.quota-table .client-name,
+.quota-table td > .mono,
+.quota-table td.n,
+.quota-table .meter .pct,
+.quota-table td > .muted.small:first-child {
+  line-height: var(--quota-line);
+}
+.quota-table td > .status {
+  display: flex;
+  width: fit-content;
+  height: var(--quota-line);
+  box-sizing: border-box;
+}
+.quota-table td > :nth-child(2) {
+  margin-top: 2px;
+}
 /* The quota windows take the room; the account's email and plan wrap. */
 .quota-table th.win {
   width: 25%;
 }
 .quota-table .meter {
   min-width: 12rem;
+  column-gap: var(--t-space-3);
+}
+.quota-table .meter .when {
+  margin-top: 2px;
 }
 .quota-table .plan {
   min-width: 10rem;
   overflow-wrap: anywhere;
+}
+/* The check's word and its age on one baseline beside the icon. */
+.quota-table .check {
+  display: flex;
+  align-items: center;
+  column-gap: var(--t-space-1);
 }
 .client-name {
   display: flex;
