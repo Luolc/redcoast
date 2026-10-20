@@ -1,6 +1,6 @@
 # Written by statute from statute.toml; do not edit by hand.
 
-statute = "0.1.29"
+statute = "0.1.30"
 
 [constitution]
 git = "https://github.com/Luolc/agent-constitution"
