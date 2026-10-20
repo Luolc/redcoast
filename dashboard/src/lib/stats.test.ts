@@ -6,6 +6,7 @@ import {
   pausedForGood,
   windowTier,
   byMachine,
+  clientRows,
   errorKinds,
   errorRate,
   errorRateState,
@@ -16,7 +17,13 @@ import {
   sessionState,
   total,
 } from "./stats";
-import type { Account, Quota, SourceCount, UsagePoint } from "./types";
+import type {
+  Account,
+  LiveSession,
+  Quota,
+  SourceCount,
+  UsagePoint,
+} from "./types";
 
 function usage(
   hour: string,
@@ -313,4 +320,109 @@ it("puts each hour's durations in the window, null where an hour has none", () =
     p95: 4000,
   });
   expect(series.filter((h) => h.p95 !== null)).toHaveLength(1);
+});
+
+describe("clientRows", () => {
+  const at = "2026-10-07T12:20:00Z";
+  const session = (
+    client_machine: string,
+    client: string,
+    client_version: string,
+  ): LiveSession => ({
+    id: `${client_machine}-${client_version}`,
+    client_machine,
+    alias: "sample-ab",
+    created_at: at,
+    last_seen: at,
+    client,
+    client_version,
+  });
+
+  it("joins session counts and hourly requests per machine and program, most requests first", () => {
+    const rows = clientRows({
+      at,
+      clients: [
+        {
+          client_machine: "machine-a",
+          client: "claude-code",
+          live: 1,
+          sessions: 4,
+        },
+        { client_machine: "machine-a", client: "", live: 0, sessions: 1 },
+      ],
+      client_hourly: [
+        {
+          hour: "2026-10-07T12:00:00Z",
+          client_machine: "machine-a",
+          client: "claude-code",
+          requests: 3,
+        },
+        {
+          hour: "2026-10-06T12:00:00Z",
+          client_machine: "machine-a",
+          client: "claude-code",
+          requests: 2,
+        },
+        // Before the window: not counted.
+        {
+          hour: "2026-10-06T11:00:00Z",
+          client_machine: "machine-a",
+          client: "claude-code",
+          requests: 50,
+        },
+        // Requests of a program with no session count still make a row.
+        {
+          hour: "2026-10-07T11:00:00Z",
+          client_machine: "machine-b",
+          client: "pi",
+          requests: 9,
+        },
+      ],
+      sessions: [],
+    });
+    expect(rows.map((r) => [r.machine, r.client, r.live, r.sessions])).toEqual([
+      ["machine-b", "pi", 0, 0],
+      ["machine-a", "claude-code", 1, 4],
+      ["machine-a", "", 0, 1],
+    ]);
+    const code = rows[1]?.requests ?? [];
+    expect(code).toHaveLength(25);
+    expect([code[0], code[24]]).toEqual([2, 3]);
+    expect(code.reduce((a, b) => a + b, 0)).toBe(5);
+    expect(rows[2]?.requests.every((n) => n === 0)).toBe(true);
+  });
+
+  it("lists the versions of a program's live sessions once each, newest first", () => {
+    const [row] = clientRows({
+      at,
+      clients: [
+        {
+          client_machine: "machine-a",
+          client: "claude-code",
+          live: 4,
+          sessions: 4,
+        },
+      ],
+      client_hourly: [],
+      sessions: [
+        session("machine-a", "claude-code", "2.9.0"),
+        session("machine-a", "claude-code", "2.10.1"),
+        session("machine-a", "claude-code", "2.9.0"),
+        session("machine-a", "claude-code", ""),
+        session("machine-b", "claude-code", "3.0.0"),
+      ],
+    });
+    expect(row?.versions).toEqual(["2.10.1", "2.9.0"]);
+  });
+
+  it("has no rows from a gateway that does not count clients", () => {
+    expect(
+      clientRows({
+        at,
+        clients: undefined,
+        client_hourly: undefined,
+        sessions: [],
+      }),
+    ).toEqual([]);
+  });
 });

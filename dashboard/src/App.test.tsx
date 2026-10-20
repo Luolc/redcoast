@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { sampleDashboard } from "../fixtures/sample.ts";
 import { Page } from "./App";
 import { Sidebar } from "./components/Shell";
-import { HourLines } from "./components/charts";
+import { HourBars, HourLines } from "./components/charts";
 import { formatCount, formatMs } from "./lib/format";
 import { durationSeries, hourSeries } from "./lib/stats";
 import type { Route } from "./lib/route";
@@ -150,4 +150,87 @@ it("breaks a duration line at an hour without a value", () => {
   );
   expect(html.match(/<polyline/g)).toHaveLength(1);
   expect(html.match(/class="dot-1"/g)).toHaveLength(1);
+});
+
+it("counts each client machine and program on Clients and on its own page", () => {
+  const code = (data.client_hourly ?? [])
+    .filter(
+      (h) => h.client_machine === "machine-a" && h.client === "claude-code",
+    )
+    .reduce((n, h) => n + h.requests, 0);
+  const all = (data.client_hourly ?? []).reduce((n, h) => n + h.requests, 0);
+  // The check reads one program's requests only if they are not all of them.
+  expect(code).toBeGreaterThan(0);
+  expect(code).not.toBe(all);
+  const clients = page({ view: "clients" });
+  // Machine · program, version, live sessions, sessions in 7 d, requests.
+  expect(clients).toContain(
+    `machine-a · claude-code2.1.016${formatCount(code)}`,
+  );
+  expect(clients).toContain(`All clients412${formatCount(all)}`);
+  expect(clients).toContain("unknown, claude-code, pi");
+
+  const one = page({ view: "client", arg: "machine-a/claude-code" });
+  expect(one).toContain("version 2.1.0");
+  expect(one).toContain(`${formatCount(code)}requests`);
+  expect(one).toContain("P3ZT8WQN");
+  expect(one).not.toContain("R5HD2LKE");
+  expect(page({ view: "client", arg: "machine-a/" })).toContain("K7Q2M4XA");
+  expect(page({ view: "client", arg: "machine-z/pi" })).toContain(
+    "No such client on Claude.",
+  );
+});
+
+it("shows no programs from a gateway that does not report them", () => {
+  const older = {
+    ...data,
+    clients: undefined,
+    client_hourly: undefined,
+    sessions: data.sessions.map((s) => ({
+      ...s,
+      client: undefined,
+      client_version: undefined,
+    })),
+  };
+  const clients = page({ view: "clients" }, older);
+  expect(clients).not.toContain("machine · program");
+  expect(clients).not.toContain("Programs, 7 d");
+  expect(clients).toContain("machine-a");
+  const sessions = page({ view: "sessions" }, older);
+  expect(sessions).not.toContain("Version");
+  expect(sessions).not.toContain("unknown program");
+  expect(page({ view: "sessions" })).toContain("machine-a · pi");
+});
+
+it("keeps Clients current in the sidebar on a client's page", () => {
+  const html = renderToStaticMarkup(
+    <Sidebar data={data} route={{ view: "client", arg: "machine-a/pi" }} />,
+  );
+  expect(html).toMatch(/href="#\/clients" aria-current="page"/);
+});
+
+it("says in words when the tunnels near their limit", () => {
+  const near = {
+    ...data,
+    gateway: { ...data.gateway, open_tunnels: 200, tunnel_limit: 250 },
+  };
+  expect(page({ view: "monitor" }, near)).toContain("Near the tunnel limit");
+  expect(page({ view: "monitor" })).not.toContain("Near the tunnel limit");
+});
+
+it("labels a count axis in whole numbers when every hour is zero", () => {
+  const html = renderToStaticMarkup(
+    <HourBars
+      label="test"
+      hours={[0, 1, 2].map((h) =>
+        new Date(Date.UTC(2026, 9, 7, h)).toISOString(),
+      )}
+      values={[0, 0, 0]}
+      tip={() => null}
+    />,
+  );
+  const axis = [...html.matchAll(/text-anchor="end"[^>]*>([^<]*)</g)].map(
+    (m) => m[1],
+  );
+  expect(axis).toEqual(["0", "1", "2"]);
 });

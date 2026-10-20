@@ -38,6 +38,12 @@ export function formatClock(iso: string): string {
   return iso.slice(11, 16);
 }
 
+/** The hour starting at iso, in UTC, `09:00–10:00 UTC`. */
+export function formatHourSpan(iso: string): string {
+  const end = new Date(Date.parse(iso) + 3_600_000).toISOString();
+  return `${formatClock(iso)}–${formatClock(end)} UTC`;
+}
+
 // A non-breaking space keeps a number on the line of its unit.
 const NB = "\u00a0";
 

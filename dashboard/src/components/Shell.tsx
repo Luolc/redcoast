@@ -187,7 +187,8 @@ export function Sidebar({
   data: Dashboard | null;
   route: Route;
 }) {
-  const v = route.view;
+  // A client's page is one of Clients.
+  const v = route.view === "client" ? "clients" : route.view;
   return (
     <aside className="sidebar" aria-label="Navigation">
       <div className="brand">redcoast</div>

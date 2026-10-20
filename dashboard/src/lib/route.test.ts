@@ -1,5 +1,11 @@
 import { expect, it } from "vitest";
-import { parseRoute, providerHref, routeHref } from "./route";
+import {
+  clientHref,
+  parseClient,
+  parseRoute,
+  providerHref,
+  routeHref,
+} from "./route";
 
 it("reads a view and its argument from the fragment, and back", () => {
   expect(parseRoute("")).toEqual({ view: "overview" });
@@ -31,4 +37,14 @@ it("links nothing but an absolute http or https URL", () => {
   expect(providerHref("javascript:alert(1)", "#/")).toBeNull();
   expect(providerHref(":7807", "#/")).toBeNull();
   expect(providerHref("ftp://gw.example.test/", "#/")).toBeNull();
+});
+
+it("names a client by machine and program, the program possibly unknown", () => {
+  for (const client of ["claude-code", ""]) {
+    const route = parseRoute(clientHref("machine-a", client));
+    expect(route.view).toBe("client");
+    expect(parseClient(route.arg)).toEqual({ machine: "machine-a", client });
+  }
+  expect(parseClient("machine-a")).toBeNull();
+  expect(parseClient(undefined)).toBeNull();
 });
