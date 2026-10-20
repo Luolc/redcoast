@@ -89,7 +89,7 @@ func (rt *router) refresh(ctx context.Context, alias string) (Refreshed, error) 
 	case reason != "" && reason != session.QuotaPauseReason:
 		return Refreshed{}, pausedError{reason}
 	}
-	req, err := http.NewRequestWithContext(context.WithValue(ctx, accountKey{}, a), http.MethodPost, rt.upstream.JoinPath(probe.Path).String(), strings.NewReader(probe.Body))
+	req, err := http.NewRequestWithContext(withAccount(ctx, a, rt.now()), http.MethodPost, rt.upstream.JoinPath(probe.Path).String(), strings.NewReader(probe.Body))
 	if err != nil {
 		return Refreshed{}, err
 	}

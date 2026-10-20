@@ -228,8 +228,9 @@ func TestImport(t *testing.T) {
 }
 
 // TestUnauthorizedRenewal checks what an upstream 401 does at the Codex process: the
-// account is paused (upstream_401) and one renewal queued. Three 401s that arrive
-// together queue one renewal, which ends the pause; the control arm, a 401 after that
+// account is paused (upstream_401) and one renewal queued. Three requests refused
+// together queue one renewal, which ends the pause, even though the third 401 arrives
+// only after that renewal settled; the control arm, a 401 to a request sent after that
 // pause ended, queues a second. A refused renewal pauses the account for a new import,
 // which the health endpoint names; a renewal that fails otherwise keeps the 401 pause.
 func TestUnauthorizedRenewal(t *testing.T) {
@@ -250,12 +251,18 @@ func TestUnauthorizedRenewal(t *testing.T) {
 			endpoint := &tokenEndpoint{answer: test.answer}
 			var held sync.WaitGroup
 			held.Add(3)
-			release := make(chan struct{})
+			release, late := make(chan struct{}), make(chan struct{})
+			var arrive sync.Once
+			t.Cleanup(func() { arrive.Do(func() { close(late) }) })
 			var unauthorized atomic.Int32
 			endpoint.install(g.exit, func() int {
-				if unauthorized.Add(1) <= 3 {
+				n := unauthorized.Add(1)
+				if n <= 3 {
 					held.Done()
 					<-release
+				}
+				if n == 3 {
+					<-late
 				}
 				return http.StatusUnauthorized
 			})
@@ -269,8 +276,10 @@ func TestUnauthorizedRenewal(t *testing.T) {
 			}
 			held.Wait()
 			close(release)
-			clients.Wait()
 			eventually(t, "the renewal", func() bool { return len(endpoint.seen()) >= 1 && g.pauseReason() == test.reason })
+			arrive.Do(func() { close(late) })
+			clients.Wait()
+			eventually(t, "the renewal after the late 401", func() bool { return g.pauseReason() == test.reason })
 			time.Sleep(100 * time.Millisecond)
 			if seen := endpoint.seen(); len(seen) != 1 || seen[0]["refresh_token"] != "synthetic-refresh-token" || seen[0]["refresh_reason"] != "unauthorized_recovery" {
 				t.Fatalf("token endpoint got %v, want one refresh of the stored token", seen)

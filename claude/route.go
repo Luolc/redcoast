@@ -47,6 +47,14 @@ func withState(ctx context.Context) (context.Context, *requestState) {
 // for Rewrite and the account transport.
 type accountKey struct{}
 
+// boundAtKey is the context key of the time the request was bound to its account.
+type boundAtKey struct{}
+
+// withAccount binds ctx to account a at now, before the request reads a's credential.
+func withAccount(ctx context.Context, a *account, now time.Time) context.Context {
+	return context.WithValue(context.WithValue(ctx, accountKey{}, a), boundAtKey{}, now)
+}
+
 // accountFrom returns the account the router bound the request to, or nil.
 func accountFrom(ctx context.Context) *account {
 	a, _ := ctx.Value(accountKey{}).(*account)
@@ -261,7 +269,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(down, "gateway busy", http.StatusServiceUnavailable)
 		return
 	}
-	serveWithLimits(rt.proxy, rt.limits, state, up, down, r.WithContext(context.WithValue(ctx, accountKey{}, a)))
+	serveWithLimits(rt.proxy, rt.limits, state, up, down, r.WithContext(withAccount(ctx, a, rt.now())))
 }
 
 // screenResult is the result of a request the provider's screen answered with status.
@@ -346,9 +354,10 @@ func (rt *router) recordUpstream(res *http.Response, source string) []session.Re
 	}
 	switch res.StatusCode {
 	case http.StatusUnauthorized:
-		// Taken before Refused looks at the credential, so a renewal that settles after
-		// this is known to have covered the credential this response refused.
-		refusedAt := rt.now()
+		// The request read the credential after it was bound, so a renewal that settled
+		// after that is known to have covered the credential this response refused, even
+		// when the response arrived after the renewal settled.
+		refusedAt, _ := ctx.Value(boundAtKey{}).(time.Time)
 		if !rt.provider.Refused(res) {
 			break
 		}
