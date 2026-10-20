@@ -218,7 +218,7 @@ function Durations({
             { name: "p95", values: hours.map((h) => h.p95) },
             { name: "p50", values: hours.map((h) => h.p50), dashed: true },
           ]}
-          formatAxis={(v) => `${(v / 1000).toFixed(0)} s`}
+          formatAxis={formatMs}
           tip={(i) => {
             const h = hours[i];
             if (h === undefined) return null;

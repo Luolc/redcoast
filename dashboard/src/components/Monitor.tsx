@@ -23,6 +23,9 @@ import { Egress } from "./Accounts";
 import { Spark } from "./charts";
 import { Ago, Empty, Meter, PageHead, Section, Share, Status } from "./ui";
 
+// From this share of the tunnel limit on, the tunnels are near it.
+const TUNNELS_NEAR = 0.8;
+
 /** The current hour against the last 24 h, and what the gateway holds open now. */
 function Now({ data, now }: { data: Dashboard; now: Date }) {
   const g = data.gateway;
@@ -114,7 +117,16 @@ function Now({ data, now }: { data: Dashboard; now: Date }) {
           </span>{" "}
           in flight
         </div>
-        <div className={`meter s-${tunnels >= 0.8 ? "warn" : "ok"}`}>
+        <div className="figs-sub">
+          <span className="num">
+            {g.open_tunnels} / {g.tunnel_limit}
+          </span>{" "}
+          tunnels open
+        </div>
+        <div
+          className={`meter s-${tunnels >= TUNNELS_NEAR ? "warn" : "ok"}`}
+          aria-label="Open tunnels against their limit"
+        >
           <div className="track">
             <div
               className="fill"
@@ -123,12 +135,9 @@ function Now({ data, now }: { data: Dashboard; now: Date }) {
           </div>
           <span className="pct">{formatPercent(tunnels)}</span>
         </div>
-        <div className="figs-sub">
-          <span className="num">
-            {g.open_tunnels} / {g.tunnel_limit}
-          </span>{" "}
-          tunnels open
-        </div>
+        {tunnels >= TUNNELS_NEAR ? (
+          <Status state={{ tone: "warn", word: "Near the tunnel limit" }} />
+        ) : null}
       </div>
     </div>
   );

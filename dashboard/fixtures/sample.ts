@@ -277,7 +277,8 @@ function traffic(
     const daytime =
       0.35 + 0.65 * Math.max(0, Math.sin(((i - 2) / 24) * 2 * Math.PI));
     for (const s of sources) {
-      const requests = Math.round(s.base * daytime);
+      // The current hour has only begun.
+      const requests = Math.round(s.base * daytime * (i === 24 ? 0.4 : 1));
       if (requests === 0) continue;
       const failing =
         s.machine === ""

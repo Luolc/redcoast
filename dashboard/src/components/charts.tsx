@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { runs } from "../lib/chart";
 import { formatClock } from "../lib/format";
 
 /** The smallest of 1, 2, 3, 4, 5, 6, 8 or 10 times a power of ten that is at least v. */
@@ -167,11 +168,7 @@ export function Spark({
   const max = (top > 0 ? top : 1) * 1.1;
   const x = (i: number) => (i * W) / (n - 1);
   const y = (v: number) => H - (v / max) * H;
-  const runs: string[][] = [[]];
-  values.forEach((v, i) => {
-    if (v === null) runs.push([]);
-    else runs[runs.length - 1]?.push(`${x(i).toFixed(1)},${y(v).toFixed(1)}`);
-  });
+  const lines = runs(values, (v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
   const last = values[n - 1];
   return (
     <svg
@@ -196,7 +193,7 @@ export function Spark({
           </rect>
         );
       })}
-      {runs
+      {lines
         .filter((r) => r.length > 1)
         .map((r) => (
           <polyline key={r[0]} className="l" points={r.join(" ")} />
@@ -278,15 +275,14 @@ export function HourLines({
           ) : null,
         )}
         {lines.map((l) => {
-          const runs: [number, number][][] = [[]];
-          l.values.forEach((v, i) => {
-            if (v === null) runs.push([]);
-            else runs[runs.length - 1]?.push([x(i), y(v)]);
-          });
+          const stretches = runs(l.values, (v, i): [number, number] => [
+            x(i),
+            y(v),
+          ]);
           const last = l.values.findLast((v) => v !== null);
           return (
             <g key={l.name}>
-              {runs.map((r) => {
+              {stretches.map((r) => {
                 const [first] = r;
                 if (first === undefined) return null;
                 const key = first.join(",");

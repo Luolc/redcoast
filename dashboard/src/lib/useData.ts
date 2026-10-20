@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { poller } from "./poll";
+import { poller, stopped } from "./poll";
 import { parseRoute, type Route } from "./route";
 import { parseDashboard, type Dashboard } from "./types";
 
@@ -10,6 +10,10 @@ export interface Loaded {
   // Fetches again now, outside the schedule.
   reload: () => void;
 }
+
+// A load still unanswered after this many refresh intervals is given up,
+// so that the next one can run.
+const LOAD_TIMEOUT_INTERVALS = 3;
 
 /** Fetches url now and every everyMs. */
 export function useData(url: string, everyMs: number): Loaded {
@@ -28,9 +32,10 @@ export function useData(url: string, everyMs: number): Loaded {
         const data = parseDashboard(await response.text());
         if (!signal.aborted) setState({ data, fetchError: null });
       } catch (e) {
-        if (!signal.aborted) setState((l) => ({ ...l, fetchError: String(e) }));
+        if (!stopped(signal))
+          setState((l) => ({ ...l, fetchError: String(e) }));
       }
-    });
+    }, LOAD_TIMEOUT_INTERVALS * everyMs);
     loads.run();
     const timer = setInterval(loads.run, everyMs);
     return () => {
