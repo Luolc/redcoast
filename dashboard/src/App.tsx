@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Accounts } from "./components/Accounts";
+import { Client } from "./components/Client";
 import { Clients } from "./components/Clients";
 import { Exits } from "./components/Exits";
 import { Monitor } from "./components/Monitor";
@@ -8,7 +9,7 @@ import { Sessions } from "./components/Sessions";
 import { Sidebar, Topbar } from "./components/Shell";
 import { Status } from "./components/ui";
 import { formatAgo } from "./lib/format";
-import { routeHref, VIEW_NAMES, type Route } from "./lib/route";
+import { parseClient, routeHref, VIEW_NAMES, type Route } from "./lib/route";
 import type { Dashboard } from "./lib/types";
 import { useData, useNow, useRoute, useTheme } from "./lib/useData";
 import { providerName } from "./lib/words";
@@ -32,6 +33,14 @@ export function Page({
       return <Overview data={data} now={now} />;
     case "clients":
       return <Clients data={data} now={now} />;
+    case "client": {
+      const c = parseClient(route.arg);
+      return c === null ? (
+        <Clients data={data} now={now} />
+      ) : (
+        <Client data={data} now={now} machine={c.machine} client={c.client} />
+      );
+    }
     case "sessions":
       return <Sessions data={data} now={now} machine={route.arg} />;
     case "accounts":
@@ -55,6 +64,14 @@ function crumbs(data: Dashboard | null, route: Route): ReactNode[] {
   if (route.view === "sessions" && route.arg !== undefined) {
     trail.push(<a href={routeHref({ view: "sessions" })}>Sessions</a>);
     trail.push(route.arg);
+  } else if (route.view === "client") {
+    const c = parseClient(route.arg);
+    trail.push(<a href={routeHref({ view: "clients" })}>Clients</a>);
+    trail.push(
+      c === null
+        ? VIEW_NAMES.client
+        : `${c.machine} · ${c.client === "" ? "unknown program" : c.client}`,
+    );
   } else trail.push(VIEW_NAMES[route.view]);
   return trail;
 }

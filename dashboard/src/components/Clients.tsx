@@ -1,13 +1,149 @@
-import { Cpu } from "lucide-react";
+import { Cpu, Terminal } from "lucide-react";
 import { formatCount, formatMs, formatPercent } from "../lib/format";
-import { routeHref } from "../lib/route";
-import { byMachine, errorRate, errorRateState } from "../lib/stats";
+import { clientHref, routeHref } from "../lib/route";
+import {
+  byMachine,
+  clientRows,
+  errorRate,
+  errorRateState,
+  type ClientRow,
+} from "../lib/stats";
 import type { Dashboard } from "../lib/types";
 import { providerName } from "../lib/words";
-import { Ago, Empty, PageHead, Section, Status, Time } from "./ui";
+import { RowSpark } from "./charts";
+import { Ago, Empty, PageHead, Section, Share, Status, Time } from "./ui";
+
+/** A client machine and its program, `machine-a · claude-code`. */
+export function ClientName({
+  machine,
+  client,
+  link = false,
+}: {
+  machine: string;
+  client: string;
+  link?: boolean;
+}) {
+  const Icon = client === "codex-cli" ? Cpu : Terminal;
+  const name = (
+    <>
+      {machine} <span className="sep">·</span>{" "}
+      {client === "" ? (
+        <span className="faint">unknown program</span>
+      ) : (
+        <span className="mono">{client}</span>
+      )}
+    </>
+  );
+  return (
+    <div className="client-name">
+      <Icon className="icon sm" aria-hidden="true" />
+      {link ? <a href={clientHref(machine, client)}>{name}</a> : name}
+    </div>
+  );
+}
+
+const sum = (values: number[]) => values.reduce((a, b) => a + b, 0);
+
+/** One row per client machine and program; null when the gateway does not count them. */
+function ClientTable({ data }: { data: Dashboard }) {
+  if (data.clients === undefined || data.client_hourly === undefined)
+    return null;
+  const rows = clientRows(data);
+  const all = sum(rows.map((r) => sum(r.requests)));
+  const row = (r: ClientRow) => {
+    const requests = sum(r.requests);
+    return (
+      <tr key={`${r.machine}\t${r.client}`}>
+        <td>
+          <ClientName machine={r.machine} client={r.client} link />
+        </td>
+        <td className="muted mono small">
+          {r.versions.length === 0 ? (
+            <span className="faint">—</span>
+          ) : (
+            r.versions.join(", ")
+          )}
+        </td>
+        <td className="n">{r.live}</td>
+        <td className="n">{r.sessions}</td>
+        <td className="n">{formatCount(requests)}</td>
+        <td className="share-cell">
+          <Share part={requests} whole={all} />
+          <span className="num small muted">
+            {formatPercent(all === 0 ? 0 : requests / all, 1)}
+          </span>
+        </td>
+        <td>
+          <RowSpark
+            label="Requests per hour, last 24 h"
+            values={r.requests}
+            format={formatCount}
+          />
+        </td>
+      </tr>
+    );
+  };
+  return (
+    <Section
+      title="Clients"
+      note="One row per client machine and program; sessions of the last 7 days, requests of the last 24 h"
+    >
+      {rows.length === 0 ? (
+        <Empty title="No sessions in the last 7 days." />
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">
+                  Client <span className="faint">machine · program</span>
+                </th>
+                <th scope="col">Version</th>
+                <th scope="col" className="n">
+                  Live sessions
+                </th>
+                <th scope="col" className="n">
+                  Sessions, 7 d
+                </th>
+                <th scope="col" className="n">
+                  Requests, 24 h
+                </th>
+                <th scope="col">Share</th>
+                <th scope="col">24 h</th>
+              </tr>
+            </thead>
+            <tbody>{rows.map(row)}</tbody>
+            <tfoot>
+              <tr>
+                <td>All clients</td>
+                <td />
+                <td className="n">{sum(rows.map((r) => r.live))}</td>
+                <td className="n">{sum(rows.map((r) => r.sessions))}</td>
+                <td className="n">{formatCount(all)}</td>
+                <td />
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+      <p className="small muted foot">
+        The version is that of the program's live sessions. Requests of no
+        session count on Overview but on no client, so the rows add up to less
+        than its total.
+      </p>
+    </Section>
+  );
+}
 
 /** The client machines registered with this gateway, with their last 24 h of requests. */
 export function Clients({ data, now }: { data: Dashboard; now: Date }) {
+  const programs = new Map<string, string[]>();
+  for (const c of data.clients ?? [])
+    programs.set(c.client_machine, [
+      ...(programs.get(c.client_machine) ?? []),
+      c.client,
+    ]);
   const latency = new Map(
     (data.latency?.machines ?? []).map((l) => [l.client_machine, l]),
   );
@@ -17,8 +153,9 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
     <>
       <PageHead
         title="Clients"
-        sub={`${providerName(data.gateway.provider)} · the client machines registered with this gateway · last 24 h`}
+        sub={`${providerName(data.gateway.provider)} · the client machines registered with this gateway and the programs that run on them`}
       />
+      <ClientTable data={data} />
       <Section
         title="Machines"
         note={
@@ -38,6 +175,9 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
               <thead>
                 <tr>
                   <th scope="col">Machine</th>
+                  {data.clients === undefined ? null : (
+                    <th scope="col">Programs, 7 d</th>
+                  )}
                   <th scope="col" className="n">
                     Live / max sessions
                   </th>
@@ -77,6 +217,25 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
                           </a>
                         </div>
                       </td>
+                      {data.clients === undefined ? null : (
+                        <td className="small">
+                          {(programs.get(m.name) ?? []).length === 0 ? (
+                            <span className="faint">—</span>
+                          ) : (
+                            (programs.get(m.name) ?? []).map((c, i) => (
+                              <span key={c}>
+                                {i === 0 ? null : ", "}
+                                <a
+                                  className={c === "" ? undefined : "mono"}
+                                  href={clientHref(m.name, c)}
+                                >
+                                  {c === "" ? "unknown" : c}
+                                </a>
+                              </span>
+                            ))
+                          )}
+                        </td>
+                      )}
                       <td className="n">
                         {m.live_sessions} / {m.max_sessions}
                       </td>

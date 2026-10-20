@@ -58,7 +58,9 @@ export function HourBars({
   const h = H - T - B;
   const n = hours.length;
   const step = n === 0 ? w : w / n;
-  const max = niceMax(Math.max(0, ...values) * 1.05);
+  // Counts: an odd top would put the middle grid line at a half.
+  const top = niceMax(Math.max(0, ...values) * 1.05);
+  const max = top % 2 === 0 ? top : top * 2;
   const y = (v: number) => T + h - (v / max) * h;
   const bw = Math.max(step - 2, 1);
   return (
@@ -343,5 +345,47 @@ export function HourLines({
         </div>
       )}
     </div>
+  );
+}
+
+/** A small trend for a table row, 84 × 22, read out in full in its label. */
+export function RowSpark({
+  label,
+  values,
+  format,
+}: {
+  label: string;
+  values: number[];
+  format: (v: number) => string;
+}) {
+  const W = 84;
+  const H = 22;
+  const n = values.length;
+  if (n < 2) return null;
+  const max = Math.max(1, ...values);
+  const points = values.map((v, i): [number, number] => [
+    2 + (i * (W - 4)) / (n - 1),
+    H - 3 - (v / max) * (H - 6),
+  ]);
+  const last = points[n - 1];
+  return (
+    <svg
+      className="spark"
+      width={W}
+      height={H}
+      viewBox={`0 0 ${String(W)} ${String(H)}`}
+      role="img"
+      aria-label={`${label}: ${values.map(format).join(", ")}`}
+    >
+      <polyline
+        className="l"
+        points={points
+          .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`)
+          .join(" ")}
+      />
+      {last === undefined ? null : (
+        <circle className="d" cx={last[0]} cy={last[1]} r={2.5} />
+      )}
+    </svg>
   );
 }

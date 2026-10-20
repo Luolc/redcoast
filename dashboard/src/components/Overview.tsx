@@ -1,6 +1,7 @@
 import { Fragment } from "react";
 import {
   formatClock,
+  formatHourSpan,
   formatMs,
   formatCount,
   formatPercent,
@@ -28,11 +29,6 @@ import { Empty, PageHead, Section, Share, Status } from "./ui";
 
 function machineLabel(machine: string): string {
   return machine === "" ? "No session" : machine;
-}
-
-function hourTitle(h: { hour: string }): string {
-  const end = new Date(Date.parse(h.hour) + 3_600_000).toISOString();
-  return `${formatClock(h.hour)}–${formatClock(end)} UTC`;
 }
 
 function peak(
@@ -80,7 +76,7 @@ function Traffic({ data }: { data: Dashboard }) {
               const h = hours[i];
               return h === undefined ? null : (
                 <>
-                  <b>{hourTitle(h)}</b>
+                  <b>{formatHourSpan(h.hour)}</b>
                   <br />
                   Requests: {formatCount(h.requests)}
                 </>
@@ -128,7 +124,7 @@ function Traffic({ data }: { data: Dashboard }) {
               const h = hours[i];
               return h === undefined ? null : (
                 <>
-                  <b>{hourTitle(h)}</b>
+                  <b>{formatHourSpan(h.hour)}</b>
                   <br />
                   Errors: {formatCount(h.errors)}
                   <br />
@@ -224,7 +220,7 @@ function Durations({
             if (h === undefined) return null;
             return (
               <>
-                <b>{hourTitle(h)}</b>
+                <b>{formatHourSpan(h.hour)}</b>
                 <br />
                 {h.p95 === null || h.p50 === null
                   ? "No answered request"
