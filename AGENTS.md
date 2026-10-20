@@ -316,6 +316,7 @@ A lower-ranking provision or a principal may depart from a higher-ranking provis
 - R65 When checking or debugging needs a tool the machine lacks, install nothing and change no system or global configuration; use a tool already there, or report the gap to whoever delegated the work.
 - L13 Release redcoast only by pushing to `Luolc/redcoast` the tag `v<version>`, where `<version>` is the version constant in `cmd/redcoast/version.go` at the tagged commit; the release pull request bumps that constant first.
 - L14 In a release pull request, raise only the last component of the version in `cmd/redcoast/version.go` by one (0.1.0 to 0.1.1), unless the maintainer asks for a different version.
+- L18 Under Art. IX §1(2), this project moves from Art. V §1, where R32 puts every release, to Art. V §2, for the agent responsible for the work that needs it, one class of release only: pushing the tag `v<version>` as L13 says, where the version is the one L14 gives without the maintainer asking for another, on a commit of `main` that R58 lets be released and whose changes, the version bump included, all reached `main` through reviewed pull requests; a release outside these conditions, and anything else, such as a change that stops a running service (R33), starting or stopping a service, funds or usage quotas, or another change to a machine, still goes through a principal.
 
 ### Relayed Approvals
 
