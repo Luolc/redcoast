@@ -46,13 +46,14 @@ func gzipped(t *testing.T, data string) string {
 
 // TestUsageMeter reads Claude bodies through a meter one byte per read and in one read:
 // the reader gets the body unchanged, and the meter the model and counts of an
-// uncompressed or gzip stream or JSON body. A line too long to keep is skipped and the
-// lines after it are read; a model of another shape is dropped and the counts kept; a
+// uncompressed or gzip stream or JSON body. A line too long to keep is skipped; a model of another shape is dropped and the counts kept; a
 // document with a negative count gives none of its counts. A JSON body over the limit,
 // or a body that reports no counts, gives nothing; a response that is not a 200, or
 // whose type or encoding the meter does not read, gets no meter.
 func TestUsageMeter(t *testing.T) {
-	longLine := "data: " + strings.Repeat("x", usageLineLimit) + "\n\n"
+	// A line one byte over the limit that would replace the output count were it read.
+	longLine := `data: {"type":"message_delta","usage":{"output_tokens":7},"pad":"`
+	longLine += strings.Repeat("x", usageLineLimit+1-len(longLine)-2) + `"}` + "\n\n"
 	overLimit := `{"type":"message","model":"claude-sample-1","content":[{"type":"text","text":"` + strings.Repeat("x", usageBodyLimit) + `"}],"usage":{"input_tokens":1,"output_tokens":1}}`
 	withModel := func(model string) session.Usage { u := sampleUsage; u.Model = model; return u }
 	withOutput := func(output int64) session.Usage { u := sampleUsage; u.OutputTokens = output; return u }
@@ -66,7 +67,7 @@ func TestUsageMeter(t *testing.T) {
 		{"stream_without_type", "", "", claudeStream, &sampleUsage},
 		{"json", "application/json", "", claudeJSON, &sampleUsage},
 		{"json_gzip", "application/json", "gzip", gzipped(t, claudeJSON), &sampleUsage},
-		{"long_line_skipped", "text/event-stream", "", longLine + claudeStream, &sampleUsage},
+		{"long_line_skipped", "text/event-stream", "", claudeStream + longLine, &sampleUsage},
 		{"bad_model", "application/json", "", strings.Replace(claudeJSON, "claude-sample-1", "<b>synthetic</b>", 1), new(withModel(""))},
 		{"long_model", "application/json", "", strings.Replace(claudeJSON, "claude-sample-1", strings.Repeat("m", 129), 1), new(withModel(""))},
 		{"negative_count", "text/event-stream", "", strings.Replace(claudeStream, `"output_tokens":42`, `"output_tokens":-42`, 1), new(withOutput(1))},
