@@ -35,6 +35,7 @@ import (
 // status, or no answer at all for noAnswer.
 type echoService struct {
 	proxy    *httptest.Server
+	addr     string // the echo service itself, which a direct account reaches without the proxy
 	roots    *x509.CertPool
 	mu       sync.Mutex
 	ip       string
@@ -80,6 +81,7 @@ func newEchoService(t *testing.T, ip string) *echoService {
 	echo.TLS = &tls.Config{Certificates: []tls.Certificate{certificate}}
 	echo.StartTLS()
 	t.Cleanup(echo.Close)
+	s.addr = echo.Listener.Addr().String()
 	s.proxy = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, _, ok := basicUser(r.Header.Get("Proxy-Authorization"))
 		if r.Method != http.MethodConnect || !ok || !strings.HasPrefix(user, "synthetic-user-") {
@@ -608,6 +610,103 @@ func TestReloadMigrationSkipsSetAside(t *testing.T) {
 			}
 			if r.Moved != wantMoved || r.Unplaced != wantUnplaced || h.bound(h.sessionID) != want {
 				t.Fatalf("reload %+v, session on %q; want moved %d, unplaced %d, on %q", r, h.bound(h.sessionID), wantMoved, wantUnplaced, want)
+			}
+		})
+	}
+}
+
+// TestDirectEgressCheck checks the egress check of a direct account: it reads the IP
+// echo and dials the upstream from the gateway, without the proxy and in the family of
+// expected_egress_ip only, and sends nothing on the upstream connection. A connection is
+// the exit's 200; a failed dial is no answer, marking health degraded and setting
+// nothing aside; an IP that differs pauses the account and skips the dial.
+func TestDirectEgressCheck(t *testing.T) {
+	for _, test := range []struct {
+		name, expected, read string
+		reachable            bool
+		upstream             string // the check's upstream outcome
+		health               health
+		paused               map[string]string
+	}{
+		{"reaches_ipv4", "192.0.2.7", "192.0.2.7", true, "ok", health{Status: "ok"}, map[string]string{}},
+		{"reaches_ipv6", "2001:db8::7", "2001:db8::7", true, "ok", health{Status: "ok"}, map[string]string{}},
+		{"dial_fails", "192.0.2.7", "192.0.2.7", false, "unanswered", health{"degraded", []string{"sample-d: egress check got no answer to CONNECT api.anthropic.com"}}, map[string]string{}},
+		{"ip_differs", "192.0.2.7", "198.51.100.7", true, "", health{"degraded", []string{"sample-d: paused (egress_ip_mismatch)"}}, map[string]string{"sample-d": EgressMismatchReason}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			echo := newEchoService(t, test.read)
+			upstream, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			received := make(chan int, 1)
+			go func() {
+				conn, err := upstream.Accept()
+				if err != nil {
+					return
+				}
+				n, _ := io.Copy(io.Discard, conn)
+				received <- int(n)
+			}()
+			reachable := upstream.Addr().String()
+			if !test.reachable {
+				closeQuietly(upstream)
+			} else {
+				t.Cleanup(func() { closeQuietly(upstream) })
+			}
+			h := newHarness(t)
+			h.add("sample-d", "sk-ant-oat01-synthetic-d-token")
+			a, err := newAccount("sample-d", accountInput{Credential: claudeCredential{token: "sk-ant-oat01-synthetic-d-token"}, Direct: true, ExpectedIP: netip.MustParseAddr(test.expected)}, DefaultAccountConcurrency)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mu sync.Mutex
+			var dialed []string
+			a.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+				mu.Lock()
+				dialed = append(dialed, network+" "+address)
+				mu.Unlock()
+				target := map[string]string{"ip.oxylabs.io:443": echo.addr, "api.anthropic.com:443": reachable}[address]
+				if target == "" {
+					return nil, errors.New("unexpected target")
+				}
+				return (&net.Dialer{}).DialContext(ctx, "tcp", target)
+			}
+			h.accounts.set.Load().byAlias["sample-d"] = a
+			e := NewEgress(h.accounts, h.store, testUpstream)
+			e.rootCAs = echo.roots
+			if err := e.Sweep(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			network := map[bool]string{true: "tcp4", false: "tcp6"}[netip.MustParseAddr(test.expected).Is4()]
+			want := []string{network + " ip.oxylabs.io:443", network + " api.anthropic.com:443"}
+			if test.upstream == "" {
+				want = want[:1]
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(dialed, want) {
+				t.Fatalf("dialed %v, want %v", dialed, want)
+			}
+			if targets, _ := echo.seen(); len(targets) != 0 {
+				t.Fatalf("the proxy saw %v", targets)
+			}
+			if got := e.lastCheck(a).Upstream; got != test.upstream {
+				t.Fatalf("upstream outcome %q, want %q", got, test.upstream)
+			}
+			if test.upstream == "ok" {
+				if n := <-received; n != 0 {
+					t.Fatalf("the check sent %d bytes to the upstream", n)
+				}
+			}
+			if got := h.accounts.SetAside(); len(got) != 0 {
+				t.Fatalf("set aside %v", got)
+			}
+			if got := h.paused(); !maps.Equal(got, test.paused) {
+				t.Fatalf("paused %v, want %v", got, test.paused)
+			}
+			if answer := readHealth(t, e); answer.Status != test.health.Status || !slices.Equal(answer.Reasons, test.health.Reasons) {
+				t.Fatalf("health %+v, want %+v", answer, test.health)
 			}
 		})
 	}

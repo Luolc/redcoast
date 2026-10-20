@@ -11,7 +11,7 @@ import (
 // TestFullShimWithTheBuild runs the full shim in front of a real build
 // of redcoast-client, configured with an unreachable gateway: from a deleted working
 // directory redcoast-client stops at os.Getwd, from an existing one it gets as far as
-// asking the gateway. Neither starts claude.
+// asking the gateway. Neither starts claude for more than its version.
 func TestFullShimWithTheBuild(t *testing.T) {
 	root := t.TempDir()
 	bin, home, cwd := filepath.Join(root, "bin"), filepath.Join(root, "home"), filepath.Join(root, "work")
@@ -21,7 +21,7 @@ func TestFullShimWithTheBuild(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(bin, "claude"), string(shim))
 	marker := filepath.Join(root, "claude-started")
-	writeFile(t, filepath.Join(root, "real", "claude"), "#!/bin/sh\ntouch "+marker+"\n")
+	writeFile(t, filepath.Join(root, "real", "claude"), "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\ntouch "+marker+"\n")
 	for _, path := range []string{filepath.Join(bin, "claude"), filepath.Join(root, "real", "claude")} {
 		if err := os.Chmod(path, 0o755); err != nil {
 			t.Fatal(err)

@@ -129,26 +129,38 @@ func accountTarget(target string) bool {
 	return hostName.MatchString(strings.ToLower(strings.TrimSuffix(host, ".")))
 }
 
-// dialDirect resolves a listed target's host and dials its public addresses in turn
-// until one connects. It dials the address it checked, so a name that resolves to the
-// gateway machine, a private network, the tailnet or link-local is never reached,
-// whatever the list says.
-func (f *forwardProxy) dialDirect(ctx context.Context, target string) (net.Conn, error) {
+// publicDialer connects to a client's target from the gateway's own address: on the
+// direct route, and on the account route of a direct account, where network limits the
+// addresses to the account's family.
+type publicDialer struct {
+	dial    func(ctx context.Context, network, address string) (net.Conn, error)
+	resolve func(ctx context.Context, network, host string) ([]netip.Addr, error)
+	network string // "tcp4" or "tcp6" keeps only that family's addresses; empty keeps both
+}
+
+// dialPublic resolves target's host and dials its public addresses of d's family in
+// turn until one connects. It dials the address it checked, so a name that resolves to
+// the gateway machine, a private network, the tailnet or link-local is never reached,
+// whatever the list or the client asks for.
+func (d publicDialer) dialPublic(ctx context.Context, target string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
 		return nil, err
 	}
-	addrs, err := f.resolve(ctx, "ip", host)
+	addrs, err := d.resolve(ctx, "ip", host)
 	if err != nil {
 		return nil, err
 	}
 	errs := []error{fmt.Errorf("direct %s: no public address connected", target)}
 	for _, addr := range addrs {
 		if !publicAddress(addr) {
-			log.Printf("forward: direct %s resolved to %s, not a public address; not dialed", target, addr)
+			log.Printf("direct %s resolved to %s, not a public address; not dialed", target, addr)
 			continue
 		}
-		conn, err := f.dial(ctx, "tcp", net.JoinHostPort(addr.Unmap().String(), port))
+		if d.network == "tcp4" && !addr.Unmap().Is4() || d.network == "tcp6" && addr.Unmap().Is4() {
+			continue
+		}
+		conn, err := d.dial(ctx, "tcp", net.JoinHostPort(addr.Unmap().String(), port))
 		if err == nil {
 			return conn, nil
 		}

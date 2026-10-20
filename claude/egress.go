@@ -110,10 +110,20 @@ func (e *Egress) Check(ctx context.Context, a *account) error {
 
 // reach asks a's exit, with the proxy credentials and nothing else, to CONNECT to the
 // upstream and closes the connection once the exit answered. It returns the exit's
-// status, or 0 when the exit could not be dialed or sent no response head in time.
+// status, or 0 when the exit could not be dialed or sent no response head in time. A
+// direct account has no exit to ask: the upstream is dialed and the connection closed
+// before anything is sent, a connection counting as 200 and a failed dial as no answer.
 func (e *Egress) reach(ctx context.Context, a *account) int {
 	ctx, cancel := context.WithTimeout(ctx, egressTimeout)
 	defer cancel()
+	if a.direct != "" {
+		conn, err := a.dialDirect(ctx, e.upstream)
+		if err != nil {
+			return 0
+		}
+		closeQuietly(conn)
+		return http.StatusOK
+	}
 	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", a.exit.Host)
 	if err != nil {
 		return 0
@@ -145,17 +155,23 @@ func (e *Egress) settle(a *account, status int) (string, int) {
 	return "refused", status
 }
 
-// read requests the echo service through a's proxy on a connection of its own and
-// returns the IP the service saw.
+// read requests the echo service through a's proxy, or from the gateway for a direct
+// account, on a connection of its own and returns the IP the service saw.
 func (e *Egress) read(ctx context.Context, a *account) (netip.Addr, error) {
-	proxy := *a.exit
-	proxy.User = url.UserPassword(a.proxyUsername, a.proxyPassword)
 	transport := &http.Transport{
-		Proxy:               http.ProxyURL(&proxy),
 		DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 		TLSClientConfig:     &tls.Config{RootCAs: e.rootCAs, MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout: 10 * time.Second,
 		DisableKeepAlives:   true,
+	}
+	if a.direct != "" {
+		transport.DialContext = func(ctx context.Context, _, address string) (net.Conn, error) {
+			return a.dialDirect(ctx, address)
+		}
+	} else {
+		proxy := *a.exit
+		proxy.User = url.UserPassword(a.proxyUsername, a.proxyPassword)
+		transport.Proxy = http.ProxyURL(&proxy)
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/Luolc/redcoast/credential"
 )
@@ -32,10 +33,12 @@ var accountAlias = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 type Resolver = credential.Resolver
 
 // accountInput is one account with its credentials resolved: the account's own
-// credential and the account's exit proxy with its credentials.
+// credential and the account's exit proxy with its credentials, or, when Direct is
+// set, no proxy at all.
 type accountInput struct {
 	Credential    Credential
 	Email         string // shown on the dashboard only
+	Direct        bool   // the gateway's own address is the exit
 	ProxyURL      string
 	ProxyUsername string
 	ProxyPassword string
@@ -43,17 +46,24 @@ type accountInput struct {
 }
 
 // account is one inventory account with its own outbound side: the real credential,
-// the exit proxy, a connection pool that only this account uses and a concurrency limit.
+// the exit, a connection pool that only this account uses and a concurrency limit. The
+// exit is a proxy, or, for a direct account, the gateway's own address.
 type account struct {
 	alias         string
 	email         string
 	credential    Credential
 	proxyUsername string
 	proxyPassword string
-	exit          *url.URL        // http://host:port of the account's proxy, without credentials
+	exit          *url.URL        // http://host:port of the account's proxy, without credentials; nil when direct
 	expectedIP    netip.Addr      // the inventory's expected_egress_ip
-	transport     *http.Transport // every connection goes through exit
+	transport     *http.Transport // every connection goes through exit, or, when direct, through dialDirect
 	slots         chan struct{}   // a buffered channel used as a semaphore
+
+	// direct is the network of every dial of a direct account, "tcp4" or "tcp6" by the
+	// family of expectedIP, so that the gateway's other address is never its origin;
+	// empty for an account with a proxy. dial makes those dials; tests replace it.
+	direct string
+	dial   func(ctx context.Context, network, address string) (net.Conn, error)
 
 	// setAside is why the egress check set this configuration aside from selection
 	// ("exit cannot reach <host>: <status>"), or nil. Only the check sets and clears it.
@@ -116,17 +126,21 @@ func LoadAccounts(ctx context.Context, dir string, provider Provider, resolve Re
 // loadAccount builds one served account's credential, resolves its proxy references
 // with resolve and builds the account. Every failure is in the returned error.
 func loadAccount(ctx context.Context, entry inventoryAccount, resolve Resolver, concurrency int) (*account, error) {
-	in := accountInput{Email: entry.email, ProxyURL: entry.exit, ExpectedIP: entry.expectedIP}
+	in := accountInput{Email: entry.email, Direct: entry.direct, ProxyURL: entry.exit, ExpectedIP: entry.expectedIP}
 	var errs []error
 	source, err := entry.credential(ctx, resolve)
 	if err != nil {
 		errs = append(errs, err)
 	}
 	in.Credential = source
-	for _, ref := range []struct {
+	refs := []struct {
 		field, reference string
 		value            *string
-	}{{"proxy.username_ref", entry.usernameRef, &in.ProxyUsername}, {"proxy.password_ref", entry.passwordRef, &in.ProxyPassword}} {
+	}{{"proxy.username_ref", entry.usernameRef, &in.ProxyUsername}, {"proxy.password_ref", entry.passwordRef, &in.ProxyPassword}}
+	if entry.direct {
+		refs = nil
+	}
+	for _, ref := range refs {
 		if ctx.Err() != nil {
 			return nil, errors.Join(append(errs, ctx.Err())...)
 		}
@@ -152,6 +166,22 @@ func loadAccount(ctx context.Context, entry inventoryAccount, resolve Resolver, 
 func newAccount(alias string, in accountInput, concurrency int) (*account, error) {
 	if !accountAlias.MatchString(alias) {
 		return nil, errors.New("alias: not an account alias")
+	}
+	if in.Direct {
+		if in.ProxyURL != "" || in.ProxyUsername != "" || in.ProxyPassword != "" {
+			return nil, errors.New("proxy: not allowed for a direct account")
+		}
+		a := &account{alias: alias, email: in.Email, credential: in.Credential, expectedIP: in.ExpectedIP, direct: "tcp6"}
+		if in.ExpectedIP.Unmap().Is4() {
+			a.direct = "tcp4"
+		}
+		a.dial = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+		a.transport = newTransport(concurrency)
+		a.transport.DialContext = func(ctx context.Context, _, address string) (net.Conn, error) {
+			return a.dialDirect(ctx, address)
+		}
+		a.slots = make(chan struct{}, concurrency)
+		return a, nil
 	}
 	// The values end up in the proxy URL and its header, where a line break would
 	// inject a header.
@@ -221,6 +251,21 @@ func (s *AccountSet) CloseIdleConnections() {
 	}
 }
 
+// exitName is the account's proxy URL without credentials, or "direct".
+func (a *account) exitName() string {
+	if a.direct != "" {
+		return "direct"
+	}
+	return a.exit.String()
+}
+
+// dialDirect dials address from the gateway in the direct account's address family.
+// It serves only the hosts the process itself names (the upstream, the token URL, the
+// echo service); a client's target goes through the forward proxy's publicDialer.
+func (a *account) dialDirect(ctx context.Context, address string) (net.Conn, error) {
+	return a.dial(ctx, a.direct, address)
+}
+
 // exitAuthorization is the Proxy-Authorization value the account's exit expects.
 func (a *account) exitAuthorization() string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(a.proxyUsername+":"+a.proxyPassword))
@@ -279,6 +324,9 @@ func knownValueReplacerFor(accounts []*account) *strings.Replacer {
 	}
 	// The proxy accounts come after the tokens so that a form both share is fully hidden.
 	for _, a := range accounts {
+		if a.direct != "" {
+			continue
+		}
 		addValue(a.proxyUsername, knownCredential)
 		addValue(a.proxyPassword, knownCredential)
 		add(base64.StdEncoding.EncodeToString([]byte(a.proxyUsername+":"+a.proxyPassword)), knownCredential)
