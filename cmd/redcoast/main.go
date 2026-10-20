@@ -34,6 +34,11 @@ import (
 // account's for one that is due; the Codex CLI renews within five minutes of expiry.
 const renewalSweep = time.Minute
 
+// quotaRecheck is how often the gateway refreshes the accounts whose quota reading at or
+// over the soft threshold outlived its reset; a reading stays stale for at most this
+// long after the reset.
+const quotaRecheck = 5 * time.Minute
+
 // accountsLoadTimeout bounds reading the inventory and resolving its references at
 // startup, the SDK's client setup included.
 const accountsLoadTimeout = 60 * time.Second
@@ -126,6 +131,7 @@ func main() {
 	servers := []func(context.Context) error{
 		func(ctx context.Context) error { return egress.Run(ctx, cfg.egressInterval) },
 		func(ctx context.Context) error { return entrypoint.RunRenewals(ctx, renewalSweep) },
+		func(ctx context.Context) error { return entrypoint.RunQuotaRechecks(ctx, quotaRecheck) },
 		func(ctx context.Context) error {
 			return claude.Serve(ctx, l.health, cfg.readOnly(egress.HealthHandler()))
 		},

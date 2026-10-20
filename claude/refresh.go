@@ -111,3 +111,70 @@ func (rt *router) refresh(ctx context.Context, alias string) (Refreshed, error) 
 	}
 	return out, nil
 }
+
+// RunQuotaRechecks refreshes, every interval until ctx is canceled, each account whose
+// stored readings went stale behind a threshold (see router.recheckQuota). A provider
+// without a Probe runs nothing. The first round runs one interval after the start, so a
+// process that takes over in a handoff only starts once the old one has stopped
+// serving, and the two do not poll at the same time.
+func (e *Entrypoint) RunQuotaRechecks(ctx context.Context, interval time.Duration) error {
+	if e.router.provider.Probe == nil {
+		<-ctx.Done()
+		return nil
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			e.router.recheckQuota(ctx)
+		}
+	}
+}
+
+// recheckQuota refreshes, one after another, each account of the current set that has
+// a stored reading at or over the soft threshold, or rejected, whose reset has passed.
+// Selection prefers other accounts to such an account, or never chooses it, so no
+// response would read its quota again. A quota pause needs no rule of its own: it ends
+// at the earliest reset its 429 reported, and the 429's readings are rejected or over
+// hard. An account paused for another reason is skipped without a log line, since
+// refresh sends it nothing; a failed refresh is logged and tried again next round.
+func (rt *router) recheckQuota(ctx context.Context) {
+	soft, _, err := rt.store.Thresholds(ctx)
+	if err != nil {
+		log.Printf("quota recheck: %v", err)
+		return
+	}
+	for _, alias := range rt.accounts.Candidates() {
+		readings, err := rt.store.LatestQuota(ctx, alias)
+		if err != nil {
+			log.Printf("quota recheck alias=%s: %v", alias, err)
+			continue
+		}
+		if !staleBehindThreshold(readings, soft, rt.now()) {
+			continue
+		}
+		refreshed, err := rt.refresh(ctx, alias)
+		var paused pausedError
+		switch {
+		case errors.As(err, &paused):
+		case err != nil:
+			log.Printf("quota recheck alias=%s: %v", alias, err)
+		default:
+			log.Printf("quota recheck alias=%s upstream_status=%d pause_ended=%t", alias, refreshed.UpstreamStatus, refreshed.PauseEnded)
+		}
+	}
+}
+
+// staleBehindThreshold reports whether a window of readings is at or over soft, or
+// rejected, and has a reset that is not after now.
+func staleBehindThreshold(readings map[string]session.Quota, soft float64, now time.Time) bool {
+	for _, q := range readings {
+		if (q.Utilization >= soft || q.Status == "rejected") && !q.ResetAt.IsZero() && !q.ResetAt.After(now) {
+			return true
+		}
+	}
+	return false
+}
