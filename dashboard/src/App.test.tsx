@@ -74,10 +74,12 @@ it("renders each page of the sample", () => {
   }
 });
 
-// The declarations of the rule whose selector is exactly sel.
+// The declarations of the rule whose whole selector is exactly sel: it
+// starts after the end of a rule or comment.
 function rule(css: string, sel: string): string {
-  const at = css.indexOf(`\n${sel} {`);
-  if (at < 0) throw new Error(`no rule ${sel}`);
+  const escaped = sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const at = new RegExp(`(?<=[}/]\\n(?:\\n)?)${escaped} \\{`).exec(css)?.index;
+  if (at === undefined) throw new Error(`no rule ${sel}`);
   return css.slice(at, css.indexOf("}", at));
 }
 
@@ -115,10 +117,14 @@ it("lets every page fill the main area at any width", () => {
   );
 });
 
-it("keeps a list's label, bar and count together at any width", () => {
-  expect(tokensCss).toContain("--t-width-list: 40rem;");
-  for (const sel of [".rank", ".kv"])
-    expect(rule(appCss, sel)).toContain("max-width: var(--t-width-list);");
+it("lays a ranked list out in columns that fill its panel", () => {
+  // Each item stays 32rem or so, its label, bar and count together; the
+  // columns fill the width; a key-value list's values reach its right edge.
+  expect(tokensCss).toContain("--t-width-list: 32rem;");
+  expect(rule(appCss, ".rank")).toContain(
+    "minmax(min(var(--t-width-list), 100%), 1fr)",
+  );
+  expect(rule(appCss, ".kv")).not.toContain("max-width");
 });
 
 it("lines up each quota row on its first line", () => {
@@ -130,16 +136,26 @@ it("sets each icon on the baseline of the text beside it", () => {
   // The pair keeps the text's baseline; the icon is centred on the letters
   // and adds no height to the line.
   const pair =
-    /\n\.status,\n\.pace,\n\.stale,\n\.with-icon \{[^}]*\}/.exec(appCss)?.[0] ??
-    "";
+    /\n\.status,\n\.pace,\n\.stale,\n\.with-icon,\n\.btn,\n\.tools \.item \{[^}]*\}/.exec(
+      appCss,
+    )?.[0] ?? "";
   expect(pair).toContain("align-items: baseline;");
   const icon = rule(
     appCss,
-    ":is(.status, .pace, .stale, .with-icon, .client-name) > .icon",
+    ":is(.status, .pace, .stale, .with-icon, .btn, .tools .item, .client-name)\n  > .icon",
   );
   expect(icon).toContain("top: calc(var(--icon-size) / 2 - 0.35em);");
   expect(icon).toContain("margin-top: calc(-1 * var(--icon-size));");
-  expect(rule(appCss, ".client-name")).toContain("align-items: baseline;");
+  // Rows that mix text sizes keep one baseline.
+  for (const sel of [
+    ".client-name",
+    ".red-chart .title",
+    ".red-chart .title .key",
+    ".card-head",
+    ".card .line",
+    ".seg a",
+  ])
+    expect(rule(appCss, sel)).toContain("align-items: baseline;");
   // Every icon beside a word in the binding history and a stale reading
   // is in such a pair.
   const html = renderToStaticMarkup(
@@ -151,6 +167,21 @@ it("sets each icon on the baseline of the text beside it", () => {
       <Page data={data} now={now} route={{ view: "accounts" }} />,
     ),
   ).toMatch(/<span class="stale s-warn"><svg[^]*?<\/svg><span>read /);
+});
+
+it("right-aligns Clients' share and steps the egress check alike", () => {
+  const html = renderToStaticMarkup(
+    <Page data={data} now={now} route={{ view: "clients" }} />,
+  );
+  expect(html).toContain('<th scope="col" class="n">Share</th>');
+  expect(rule(appCss, ".share-cell")).toContain("text-align: right;");
+  // The IP's line has one height in the quota table, on Exits and Monitor.
+  expect(rule(appCss, ".ip")).toContain("line-height: var(--t-height-pill);");
+  expect(
+    renderToStaticMarkup(
+      <Page data={data} now={now} route={{ view: "exits" }} />,
+    ),
+  ).toContain('<div class="mono ip">');
 });
 
 it("puts a table row's cells on one baseline", () => {

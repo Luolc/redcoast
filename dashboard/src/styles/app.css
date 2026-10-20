@@ -54,12 +54,15 @@ th.n {
 .status,
 .pace,
 .stale,
-.with-icon {
+.with-icon,
+.btn,
+.tools .item {
   display: inline-flex;
   align-items: baseline;
   gap: var(--t-space-1);
 }
-:is(.status, .pace, .stale, .with-icon, .client-name) > .icon {
+:is(.status, .pace, .stale, .with-icon, .btn, .tools .item, .client-name)
+  > .icon {
   position: relative;
   top: calc(var(--icon-size) / 2 - 0.35em);
   margin-top: calc(-1 * var(--icon-size));
@@ -231,11 +234,6 @@ th.n {
   color: var(--t-text-muted);
   font-size: var(--t-text-sm);
 }
-.tools .item {
-  display: flex;
-  align-items: center;
-  gap: var(--t-space-1);
-}
 .seg {
   display: inline-flex;
   border: 1px solid var(--t-border-strong);
@@ -254,6 +252,12 @@ th.n {
   align-items: center;
   color: var(--t-text-muted);
 }
+/* A filter's label and count on one baseline, the line as tall as the
+   control so the pair stays centred in it. */
+.seg a {
+  align-items: baseline;
+  line-height: calc(var(--t-target) - 2px);
+}
 .seg > * + * {
   border-left: 1px solid var(--t-border-subtle);
 }
@@ -263,10 +267,7 @@ th.n {
   color: var(--t-accent);
 }
 .btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--t-space-1);
-  min-height: var(--t-target);
+  line-height: calc(var(--t-target) - 2px);
   padding: 0 var(--t-space-2);
   border: 1px solid var(--t-border-strong);
   border-radius: var(--t-radius-sm);
@@ -429,7 +430,7 @@ th.n {
 }
 .red-chart .title {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--t-space-2);
   font-weight: var(--t-weight-medium);
   margin-bottom: var(--t-space-2);
@@ -437,6 +438,7 @@ th.n {
 .red-chart .title .key {
   margin-left: auto;
   display: flex;
+  align-items: baseline;
   gap: var(--t-space-3);
   color: var(--t-text-muted);
   font-weight: var(--t-weight-regular);
@@ -551,9 +553,7 @@ th.n {
   color: var(--t-text-muted);
   font-size: var(--t-text-sm);
 }
-/* Held narrow enough that a label and its value read as one row. */
 .kv {
-  max-width: var(--t-width-list);
   display: grid;
   grid-template-columns: 1fr auto;
   column-gap: var(--t-space-3);
@@ -643,12 +643,17 @@ tbody tr.link {
 .mono {
   font-family: var(--t-font-mono);
 }
+/* An egress IP's line is as tall as a status pill wherever it is shown,
+   so the check under it is the same step below. */
+.ip {
+  line-height: var(--t-height-pill);
+}
 /* The quota table. Every cell starts at the top with a first line as tall
    as the status pill, so the names, pills, bars, percentages, addresses
    and counts of a row sit on one line and the small text under each
    starts on one line too. Headers sit on their bottom line. */
 .quota-table {
-  --quota-line: 1.75rem;
+  --quota-line: var(--t-height-pill);
 }
 .quota-table th {
   vertical-align: bottom;
@@ -659,7 +664,6 @@ tbody tr.link {
   padding-bottom: var(--t-space-3);
 }
 .quota-table .client-name,
-.quota-table td > .mono,
 .quota-table td.n,
 .quota-table .meter .pct,
 .quota-table td:has(> .muted.small:first-child) {
@@ -889,13 +893,16 @@ tbody tr.link {
   text-underline-offset: 2px;
 }
 
-/* Ranked lists with a share bar (Overview, Monitor), held narrow enough
-   that a row's label, bar and count read as one. */
+/* Ranked lists with a share bar (Overview, Monitor), in as many columns
+   as fit, each narrow enough that a row's label, bar and count read as
+   one. */
 .rank {
-  max-width: var(--t-width-list);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(var(--t-width-list), 100%), 1fr)
+  );
+  gap: 2px var(--t-space-6);
   font-size: var(--t-text-sm);
 }
 .rank-row {
@@ -951,6 +958,12 @@ tbody tr.link {
 }
 .share-cell {
   white-space: nowrap;
+  text-align: right;
+}
+/* Room for "100.0%", so the bars of a column line up too. */
+.share-cell .num {
+  display: inline-block;
+  min-width: 3.4em;
 }
 .share-cell .share {
   display: inline-block;
@@ -1124,7 +1137,7 @@ tbody tr.link {
 }
 .card-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--t-space-2);
 }
 .card-head .pill {
@@ -1134,7 +1147,7 @@ tbody tr.link {
 .card .line {
   font-size: var(--t-text-sm);
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--t-space-1);
   flex-wrap: wrap;
 }
