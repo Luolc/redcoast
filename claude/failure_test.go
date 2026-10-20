@@ -246,6 +246,13 @@ func TestUpstreamFailureIsNamed(t *testing.T) {
 			h.addWithExit("sample-a", token, &url.URL{Scheme: "http", Host: silentExit(t)})
 			return failureSetup{upstream: "https://api.example.test"}
 		}},
+		// The exit echoes the tunnel, so the upstream's side of the handshake is the
+		// gateway's own ClientHello.
+		{name: "tls_through_exit", failure: "tls", setup: func(t *testing.T, h *harness) failureSetup {
+			exit := startFakeExit(t, http.StatusOK)
+			h.addWithExit("sample-a", token, &url.URL{Scheme: "http", Host: exit.listener.Addr().String()})
+			return failureSetup{upstream: "https://api.example.test"}
+		}},
 		{name: "upstream_unreachable", failure: "dial", setup: func(t *testing.T, h *harness) failureSetup {
 			h.add("sample-a", token)
 			return failureSetup{upstream: "http://" + closedAddress(t)}
