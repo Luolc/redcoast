@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func TestDashboardEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"machines", "sessions", "hourly", "results", "destinations", "history"} {
+	for _, table := range []string{"machines", "sessions", "hourly", "results", "usage", "result_sources", "destinations", "history"} {
 		if !strings.Contains(string(body), `"`+table+`":[]`) {
 			t.Fatalf("empty table %s is not an empty array: %s", table, body)
 		}
@@ -192,5 +193,102 @@ func TestPeak(t *testing.T) {
 		if got := peak(intervals, window[0], window[1]); got != want {
 			t.Errorf("peak in %v = %d, want %d", window, got, want)
 		}
+	}
+}
+
+func TestDashboardUsageBySource(t *testing.T) {
+	ctx := context.Background()
+	c := newClock()
+	store, path := open(t, c)
+	now := c.Now()
+	one, err := store.Issue(ctx, "devbox-1", LocalSource, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := store.Issue(ctx, "devbox-2", LocalSource, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := func(at time.Time, session, alias, kind, result string, status int) {
+		t.Helper()
+		row := Traffic{At: at, SessionID: session, Alias: alias, Kind: kind, Host: "api.example.com", Port: 443, BytesUp: 10, BytesDown: 100, Result: result, Status: status}
+		if err := store.RecordTraffic(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hour := now.Add(-30 * time.Minute) // in the hour starting at 11:00
+	// The error boundaries, all on devbox-1 and sample-a: four rows that are no error,
+	// then five that are.
+	record(hour, one.ID, "sample-a", "inference", "ok", 200)
+	record(hour, one.ID, "sample-a", "inference", "ok", 399)
+	record(hour, one.ID, "sample-a", "connect", "idle_timeout", 200)
+	record(hour, one.ID, "sample-a", "connect", "max_duration", 200)
+	record(hour, one.ID, "sample-a", "inference", "ok", 400)
+	record(hour, one.ID, "sample-a", "inference", "idle_timeout", 200)
+	record(hour, one.ID, "sample-a", "inference", "limited", 0)
+	record(hour, one.ID, "sample-a", "connect", "limited", 0)
+	record(hour, one.ID, "sample-a", "connect", "egress_failed", 0)
+	// The same account on the other machine, and another account on the first one.
+	record(hour, two.ID, "sample-a", "inference", "ok", 200)
+	record(hour, one.ID, "sample-b", "inference", "upstream_failed", 0)
+	// A request of no session and no account, on the window's first millisecond, and
+	// one a millisecond before the window.
+	since := now.Add(-24 * time.Hour)
+	record(since, "", "", "inference", "auth_failed", 0)
+	record(since.Add(-time.Millisecond), one.ID, "sample-a", "inference", "ok", 500)
+
+	snap, err := openReader(t, path, c).Snapshot(ctx, accounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at11 := time.Date(2026, 10, 6, 11, 0, 0, 0, time.UTC)
+	want := []UsagePoint{
+		{Hour: since, Kind: "inference", Requests: 1, BytesUp: 10, BytesDown: 100, Errors: 1},
+		{Hour: at11, Alias: "sample-a", Machine: "devbox-1", Kind: "connect", Requests: 4, BytesUp: 40, BytesDown: 400, Errors: 2, Limited: 1},
+		{Hour: at11, Alias: "sample-a", Machine: "devbox-1", Kind: "inference", Requests: 5, BytesUp: 50, BytesDown: 500, Errors: 3, Limited: 1},
+		{Hour: at11, Alias: "sample-a", Machine: "devbox-2", Kind: "inference", Requests: 1, BytesUp: 10, BytesDown: 100},
+		{Hour: at11, Alias: "sample-b", Machine: "devbox-1", Kind: "inference", Requests: 1, BytesUp: 10, BytesDown: 100, Errors: 1},
+	}
+	if len(snap.Usage) != len(want) {
+		t.Fatalf("usage = %+v", snap.Usage)
+	}
+	for i := range want {
+		if got := snap.Usage[i]; got != want[i] || !got.Hour.Equal(want[i].Hour) {
+			t.Errorf("usage[%d] = %+v, want %+v", i, got, want[i])
+		}
+	}
+	type key struct{ alias, machine, kind, result string }
+	type count struct {
+		status, n int
+		error     bool
+	}
+	got := map[key][]count{}
+	for _, r := range snap.SourceCounts {
+		k := key{r.Alias, r.Machine, r.Kind, r.Result}
+		got[k] = append(got[k], count{r.Status, r.Count, r.Error})
+	}
+	wantCounts := map[key][]count{
+		{"", "", "inference", "auth_failed"}:                     {{0, 1, true}},
+		{"sample-a", "devbox-1", "inference", "ok"}:              {{200, 1, false}, {399, 1, false}, {400, 1, true}},
+		{"sample-a", "devbox-1", "inference", "idle_timeout"}:    {{200, 1, true}},
+		{"sample-a", "devbox-1", "inference", "limited"}:         {{0, 1, true}},
+		{"sample-a", "devbox-1", "connect", "idle_timeout"}:      {{200, 1, false}},
+		{"sample-a", "devbox-1", "connect", "max_duration"}:      {{200, 1, false}},
+		{"sample-a", "devbox-1", "connect", "limited"}:           {{0, 1, true}},
+		{"sample-a", "devbox-1", "connect", "egress_failed"}:     {{0, 1, true}},
+		{"sample-a", "devbox-2", "inference", "ok"}:              {{200, 1, false}},
+		{"sample-b", "devbox-1", "inference", "upstream_failed"}: {{0, 1, true}},
+	}
+	if len(got) != len(wantCounts) {
+		t.Fatalf("result sources = %+v", snap.SourceCounts)
+	}
+	for k, w := range wantCounts {
+		if !slices.Equal(got[k], w) {
+			t.Errorf("result sources %+v = %+v, want %+v", k, got[k], w)
+		}
+	}
+	// The existing tables keep their grouping: hourly by account and kind only.
+	if len(snap.Hourly) != 4 || len(snap.Results) == 0 {
+		t.Fatalf("hourly = %+v, results = %+v", snap.Hourly, snap.Results)
 	}
 }
