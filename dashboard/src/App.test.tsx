@@ -81,15 +81,15 @@ function rule(css: string, sel: string): string {
   return css.slice(at, css.indexOf("}", at));
 }
 
-it("lets every page fill the main area of a wide screen", () => {
-  const rem = (name: string) =>
-    Number(new RegExp(`${name}: ([\\d.]+)rem;`).exec(tokensCss)?.[1]);
-  const base = Number(/--t-font-size-base: (\d+)px;/.exec(tokensCss)?.[1]);
-  // A 2560 px screen is filled up to the page's width.
-  expect(
-    (rem("--t-width-sidebar") + rem("--t-width-main")) * base,
-  ).toBeGreaterThan(2560);
-  expect(rule(appCss, ".content")).toContain("max-width: var(--t-width-main);");
+it("lets every page fill the main area at any width", () => {
+  // No width cap on the page or what holds it.
+  for (const sel of [".shell", ".main", ".content"])
+    expect(rule(appCss, sel)).not.toContain("max-width");
+  // The topbar's contents and the page share their left and right edges.
+  expect(rule(appCss, ".content")).toContain(
+    "padding: var(--t-space-6) var(--t-space-6) var(--t-space-12);",
+  );
+  expect(rule(appCss, ".topbar")).toContain("padding: 0 var(--t-space-6);");
   // Nothing in the page is held narrower than the page, and no section is
   // set apart to be wider than the rest.
   expect(appCss).not.toMatch(/\.content\s*>/);
@@ -115,20 +115,46 @@ it("lets every page fill the main area of a wide screen", () => {
   );
 });
 
-it("keeps a list's rows and the topbar to readable widths", () => {
-  // A label and its bar or value stay within 40rem of each other.
+it("keeps a list's label, bar and count together at any width", () => {
   expect(tokensCss).toContain("--t-width-list: 40rem;");
   for (const sel of [".rank", ".kv"])
     expect(rule(appCss, sel)).toContain("max-width: var(--t-width-list);");
-  // The topbar's contents are held to the page's width, as .content is.
-  expect(rule(appCss, ".topbar")).toContain(
-    "calc((100% - var(--t-width-main)) / 2 + var(--t-space-6))",
-  );
 });
 
 it("lines up each quota row on its first line", () => {
   expect(rule(appCss, ".quota-table td")).toContain("vertical-align: top;");
   expect(rule(appCss, ".quota-table th")).toContain("vertical-align: bottom;");
+});
+
+it("sets each icon on the baseline of the text beside it", () => {
+  // The pair keeps the text's baseline; the icon is centred on the letters
+  // and adds no height to the line.
+  const pair = /\n\.status,\n\.pace,\n\.stale,\n\.with-icon \{[^}]*\}/.exec(
+    appCss,
+  )?.[0];
+  expect(pair).toContain("align-items: baseline;");
+  const icon = rule(
+    appCss,
+    ":is(.status, .pace, .stale, .with-icon, .client-name) > .icon",
+  );
+  expect(icon).toContain("top: calc(var(--icon-size) / 2 - 0.35em);");
+  expect(icon).toContain("margin-top: calc(-1 * var(--icon-size));");
+  expect(rule(appCss, ".client-name")).toContain("align-items: baseline;");
+  // Every icon beside a word in the binding history and a stale reading
+  // is in such a pair.
+  const html = renderToStaticMarkup(
+    <Page data={data} now={now} route={{ view: "sessions" }} />,
+  );
+  expect(html).toMatch(/<span class="with-icon"><svg/);
+  expect(
+    renderToStaticMarkup(
+      <Page data={data} now={now} route={{ view: "accounts" }} />,
+    ),
+  ).toMatch(/<span class="stale s-warn"><svg[^]*?<\/svg><span>read /);
+});
+
+it("puts a table row's cells on one baseline", () => {
+  expect(rule(appCss, "td")).toContain("vertical-align: baseline;");
 });
 
 it("filters sessions to one machine", () => {

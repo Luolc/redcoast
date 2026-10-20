@@ -33,8 +33,9 @@ th.n {
 }
 
 .icon {
-  width: var(--t-icon-md);
-  height: var(--t-icon-md);
+  --icon-size: var(--t-icon-md);
+  width: var(--icon-size);
+  height: var(--icon-size);
   fill: none;
   stroke: currentColor;
   stroke-width: var(--t-icon-stroke);
@@ -43,8 +44,25 @@ th.n {
   flex: none;
 }
 .icon.sm {
-  width: var(--t-icon-sm);
-  height: var(--t-icon-sm);
+  --icon-size: var(--t-icon-sm);
+}
+/* An icon beside text. The text keeps its baseline, so the pair sits on
+   the line of the text around it. The icon's bottom sits on that baseline
+   and is moved down to centre it on the letters, whose middle is 0.35em
+   above the baseline in the UI font; it takes no height of its own, so a
+   line with an icon is as tall as one without. */
+.status,
+.pace,
+.stale,
+.with-icon {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--t-space-1);
+}
+:is(.status, .pace, .stale, .with-icon, .client-name) > .icon {
+  position: relative;
+  top: calc(var(--icon-size) / 2 - 0.35em);
+  margin-top: calc(-1 * var(--icon-size));
 }
 
 /* Shell: fixed sidebar, breadcrumb bar, content. */
@@ -176,18 +194,12 @@ th.n {
   flex: 1;
   min-width: 0;
 }
-/* Its contents keep the page's edges, the page being centred past
-   --t-width-main (.content); a padding percentage is of the bar's width. */
 .topbar {
   height: var(--t-height-bar);
   display: flex;
   align-items: center;
   gap: var(--t-space-4);
-  padding: 0
-    max(
-      var(--t-space-6),
-      calc((100% - var(--t-width-main)) / 2 + var(--t-space-6))
-    );
+  padding: 0 var(--t-space-6);
   border-bottom: 1px solid var(--t-border-subtle);
 }
 .crumbs {
@@ -263,18 +275,15 @@ th.n {
   color: var(--t-text);
 }
 
-/* A page fills the main area. Past --t-width-main a row is too long to
-   read across, so the page stops there and sits in the middle. */
+/* A page fills the main area at any width, every part edge to edge. */
 .content {
   padding: var(--t-space-6) var(--t-space-6) var(--t-space-12);
-  max-width: var(--t-width-main);
-  margin-inline: auto;
 }
 
 /* Page heading: the serif is used here and in empty states only. */
 .page-head {
   display: flex;
-  align-items: flex-end;
+  align-items: baseline;
   gap: var(--t-space-4);
   margin-bottom: var(--t-space-4);
 }
@@ -287,14 +296,10 @@ th.n {
 }
 .page-head .sub {
   color: var(--t-text-muted);
-  padding-bottom: var(--t-space-1);
 }
 
 /* Status: a dot or an icon, always with a word. */
 .status {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--t-space-1);
   white-space: nowrap;
 }
 .status .dot {
@@ -595,10 +600,18 @@ th {
   white-space: nowrap;
   background: var(--t-bg-panel);
 }
+/* A row's cells share a baseline, so small or mono text sits on the line
+   of the text beside it; the padding centres a line of body text in the
+   row's height. A sparkline has no baseline and is centred instead. */
 td {
-  padding: 0 var(--t-space-3);
+  padding: calc((var(--t-height-row) - var(--t-line-height-ui) * 1rem) / 2)
+    var(--t-space-3);
   height: var(--t-height-row);
   white-space: nowrap;
+  vertical-align: baseline;
+}
+td:has(> .spark) {
+  vertical-align: middle;
 }
 td.wrap {
   white-space: normal;
@@ -649,7 +662,7 @@ tbody tr.link {
 .quota-table td > .mono,
 .quota-table td.n,
 .quota-table .meter .pct,
-.quota-table td > .muted.small:first-child {
+.quota-table td:has(> .muted.small:first-child) {
   line-height: var(--quota-line);
 }
 .quota-table td > .status {
@@ -676,15 +689,9 @@ tbody tr.link {
   min-width: 10rem;
   overflow-wrap: anywhere;
 }
-/* The check's word and its age on one baseline beside the icon. */
-.quota-table .check {
-  display: flex;
-  align-items: center;
-  column-gap: var(--t-space-1);
-}
 .client-name {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--t-space-2);
   font-weight: var(--t-weight-medium);
 }
@@ -753,8 +760,6 @@ tbody tr.link {
 .pace {
   color: var(--t-text-muted);
   white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
   gap: 2px;
 }
 .pace.over {
@@ -773,13 +778,13 @@ tbody tr.link {
   color: var(--t-text-muted);
   display: flex;
   flex-wrap: wrap;
+  align-items: baseline;
   column-gap: var(--t-space-2);
 }
 .meter .when .pace {
   margin-left: auto;
 }
 .meter .stale {
-  display: block;
   flex-basis: 100%;
 }
 
@@ -904,6 +909,11 @@ tbody tr.link {
 }
 .rank-row.static {
   grid-template-columns: auto 1fr var(--t-width-share) 3.5rem;
+}
+/* The icon goes with the title, the first of the label's two lines. */
+.rank-row.static > .icon {
+  align-self: start;
+  margin-top: calc(2px + (1.25em - var(--icon-size)) / 2);
 }
 .rank-row .who {
   min-width: 0;

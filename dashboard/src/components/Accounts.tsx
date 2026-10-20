@@ -14,7 +14,7 @@ export function Egress({ account: a, now }: { account: Account; now: Date }) {
   return (
     <>
       <div className="mono">{a.expected_egress_ip}</div>
-      <div className="small check">
+      <div className="small">
         <Status state={{ tone: w.tone, word: w.text }} />{" "}
         {a.egress_check === undefined ? null : (
           <span className="muted">
