@@ -24,8 +24,8 @@ const TokenPrefix = "sk-ant-gws-"
 // in unpadded base64url.
 var tokenPattern = regexp.MustCompile(`^sk-ant-gws-[A-Za-z0-9_-]{43}$`)
 
-// maxLaunchMeta bounds the launch metadata saved with a session.
-const maxLaunchMeta = 4096
+// MaxLaunchMeta bounds the launch metadata saved with a session.
+const MaxLaunchMeta = 4096
 
 // Errors callers branch on.
 var (
@@ -93,7 +93,7 @@ func (s *Store) Issue(ctx context.Context, clientMachine, sourceAddr string, lau
 func (s *Store) insertSession(ctx context.Context, tx *sql.Tx, clientMachine, sourceAddr string, launchMeta json.RawMessage) (Issued, error) {
 	var meta sql.NullString
 	if launchMeta != nil {
-		if len(launchMeta) > maxLaunchMeta || !json.Valid(launchMeta) || launchMeta[0] != '{' {
+		if len(launchMeta) > MaxLaunchMeta || !json.Valid(launchMeta) || launchMeta[0] != '{' {
 			return Issued{}, ErrLaunchMeta
 		}
 		meta = sql.NullString{String: string(launchMeta), Valid: true}

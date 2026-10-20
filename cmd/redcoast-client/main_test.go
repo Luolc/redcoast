@@ -264,7 +264,9 @@ func TestChildEnvironment(t *testing.T) {
 // careless /proc parser misreads; writes its environment and the PIDs to the files
 // named by FAKE_OUT; then exits 0, sleeps, ignores SIGTERM and sleeps, or leaves an
 // orphan in a session of its own (its parent, a subshell, exits at once) and sleeps.
+// Asked for its version, it prints one and does nothing else.
 const fakeClaude = `#!/bin/sh
+[ "$1" = --version ] && { echo "9.9.9 (Fake)"; exit 0; }
 sleep 60 &
 echo $! > "$FAKE_OUT.grandchild"
 setsid sleep 60 &
@@ -566,7 +568,7 @@ func parentOf(t *testing.T, pid int) int {
 // TestArgumentsPassThrough checks that claude receives the launcher's arguments unchanged.
 func TestArgumentsPassThrough(t *testing.T) {
 	_, l, _, out := launch(t, true, "exit0", "--settings", `{"model":"x"}`, "Hi there")
-	writeFile(t, filepath.Join(l.cwd, "claude"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_OUT.args\"\n")
+	writeFile(t, filepath.Join(l.cwd, "claude"), "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nprintf '%s\\n' \"$@\" > \"$FAKE_OUT.args\"\n")
 	if status := l.run(context.Background()); status != 0 {
 		t.Fatalf("exit status %d; stderr %s", status, stderrOf(t, l))
 	}
@@ -604,7 +606,7 @@ func TestRefusedByGateway(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, l, _, out := launch(t, true, "exit0")
-			writeFile(t, filepath.Join(l.cwd, "claude"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_OUT.args\"\n")
+			writeFile(t, filepath.Join(l.cwd, "claude"), "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nprintf '%s\\n' \"$@\" > \"$FAKE_OUT.args\"\n")
 			test.setup(store)
 			status := l.run(context.Background())
 			if test.want == "" {
@@ -706,7 +708,7 @@ func TestNetworkMode(t *testing.T) {
 			run := *l
 			run.stderr = stderr
 			run.environ = append(append([]string{}, base...), test.env...)
-			writeFile(t, filepath.Join(l.cwd, "claude"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_OUT.args\"\n")
+			writeFile(t, filepath.Join(l.cwd, "claude"), "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nprintf '%s\\n' \"$@\" > \"$FAKE_OUT.args\"\n")
 			status := run.run(context.Background())
 			if strings.Contains(stderrOf(t, &run), credential) {
 				t.Fatal("stderr contains the credential")

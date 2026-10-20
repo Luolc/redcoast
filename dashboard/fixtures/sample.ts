@@ -115,6 +115,8 @@ export function sampleDashboard(now: Date): Dashboard {
         alias: "sample-ab",
         created_at: at(-28 * 60),
         last_seen: at(-27 * 60),
+        client: "",
+        client_version: "",
       },
       {
         id: "P3ZT8WQN",
@@ -122,6 +124,8 @@ export function sampleDashboard(now: Date): Dashboard {
         alias: "sample-ab",
         created_at: at(-50),
         last_seen: at(-1),
+        client: "claude-code",
+        client_version: "2.1.0",
       },
     ],
     idle_sessions: 1,
@@ -147,6 +151,23 @@ export function sampleDashboard(now: Date): Dashboard {
       { kind: "connect", result: "ok", status: 200, count: 37 },
       { kind: "inference", result: "ok", status: 200, count: 405 },
       { kind: "inference", result: "limited", status: 0, count: 7 },
+    ],
+    clients: [
+      { client_machine: "machine-a", client: "", live: 1, sessions: 1 },
+      {
+        client_machine: "machine-a",
+        client: "claude-code",
+        live: 1,
+        sessions: 6,
+      },
+    ],
+    client_hourly: [
+      {
+        hour: day(0),
+        client_machine: "machine-a",
+        client: "claude-code",
+        requests: 449,
+      },
     ],
     destinations: [
       {

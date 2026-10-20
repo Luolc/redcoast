@@ -85,6 +85,28 @@ interface LiveSession {
   alias: string; // empty when unbound
   created_at: string;
   last_seen: string;
+  // claude-code, pi or codex-cli, and its version; empty when the launcher did
+  // not report a valid one, absent from a gateway older than this page.
+  client?: string | undefined;
+  client_version?: string | undefined;
+}
+
+// Sessions of one client machine and client program; client is empty when
+// unknown.
+interface ClientCount {
+  client_machine: string;
+  client: string;
+  live: number; // not ended
+  sessions: number; // created in the 7-day window, live or not
+}
+
+// One hour's requests of the sessions of one client machine and client
+// program; requests of no session are not counted.
+interface ClientHour {
+  hour: string;
+  client_machine: string;
+  client: string;
+  requests: number;
 }
 
 export interface HourTraffic {
@@ -145,6 +167,9 @@ export interface Dashboard {
   idle_sessions: number;
   hourly: HourTraffic[];
   results: ResultCount[];
+  // Absent from a gateway older than this page.
+  clients?: ClientCount[] | undefined;
+  client_hourly?: ClientHour[] | undefined;
   destinations: Destination[];
   days: Day[];
   history: HistoryEntry[];
@@ -231,6 +256,8 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
       alias: isString,
       created_at: isString,
       last_seen: isString,
+      client: optional(isString),
+      client_version: optional(isString),
     }),
   ),
   idle_sessions: isNumber,
@@ -251,6 +278,26 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
       status: isNumber,
       count: isNumber,
     }),
+  ),
+  clients: optional(
+    arrayOf(
+      object<ClientCount>({
+        client_machine: isString,
+        client: isString,
+        live: isNumber,
+        sessions: isNumber,
+      }),
+    ),
+  ),
+  client_hourly: optional(
+    arrayOf(
+      object<ClientHour>({
+        hour: isString,
+        client_machine: isString,
+        client: isString,
+        requests: isNumber,
+      }),
+    ),
   ),
   destinations: arrayOf(
     object<Destination>({

@@ -14,7 +14,7 @@ import (
 
 // fakeRecorder is the stand-in for pi and codex: it writes its environment and its
 // arguments, one per line, to the files named by FAKE_OUT and exits 0.
-const fakeRecorder = "#!/bin/sh\nenv > \"$FAKE_OUT.env\"\nprintf '%s\\n' \"$@\" > \"$FAKE_OUT.args\"\n"
+const fakeRecorder = "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nenv > \"$FAKE_OUT.env\"\nprintf '%s\\n' \"$@\" > \"$FAKE_OUT.args\"\n"
 
 // inheritedForCodex are variables a parent shell may hold that must not reach pi or
 // codex as they are.

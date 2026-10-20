@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -80,6 +81,8 @@ type launcher struct {
 // client is what the launcher does differently for each program it starts.
 type client struct {
 	name string
+	// program names the client in the launch metadata.
+	program string
 	// sessionPrefix starts the names of the variables that locate the session interface
 	// of the gateway process serving this client.
 	sessionPrefix string
@@ -93,9 +96,9 @@ type client struct {
 
 // clients are the programs the launcher starts, by the name on its command line.
 var clients = map[string]*client{
-	"claude": {name: "claude", sessionPrefix: "REDCOAST_CLIENT_", preflight: preflight, prepare: prepareClaude},
-	"pi":     {name: "pi", sessionPrefix: "REDCOAST_CLIENT_CODEX_", preflight: piPreflight, prepare: preparePi},
-	"codex":  {name: "codex", sessionPrefix: "REDCOAST_CLIENT_CODEX_", preflight: codexPreflight, prepare: prepareCodex},
+	"claude": {name: "claude", program: "claude-code", sessionPrefix: "REDCOAST_CLIENT_", preflight: preflight, prepare: prepareClaude},
+	"pi":     {name: "pi", program: "pi", sessionPrefix: "REDCOAST_CLIENT_CODEX_", preflight: piPreflight, prepare: preparePi},
+	"codex":  {name: "codex", program: "codex-cli", sessionPrefix: "REDCOAST_CLIENT_CODEX_", preflight: codexPreflight, prepare: prepareCodex},
 }
 
 // usage is printed when the command line does not start with a client's name.
@@ -160,7 +163,7 @@ func (l *launcher) run(ctx context.Context) int {
 		return exitLauncherFailure
 	}
 	client := &session.Client{Socket: l.socket, Address: l.address, Credential: l.credential}
-	grant, err := client.Issue(ctx, l.machine, l.launchMeta())
+	grant, err := client.Issue(ctx, l.machine, l.launchMeta(ctx))
 	var refused *session.Refusal
 	switch {
 	case errors.As(err, &refused):
@@ -255,10 +258,15 @@ func sameFile(a, b string) bool {
 }
 
 // launchMeta is what the gateway stores about this launch, for matching traffic to a
-// transcript later. It contains no credential.
-func (l *launcher) launchMeta() json.RawMessage {
+// transcript later and for counting sessions by client program. It contains no
+// credential. A working directory too long for the gateway's limit is left out, so
+// that the session is still issued.
+func (l *launcher) launchMeta(ctx context.Context) json.RawMessage {
 	env := environment(l.environ)
-	meta := map[string]any{"launcher_pid": os.Getpid(), "cwd": l.cwd}
+	meta := map[string]any{"launcher_pid": os.Getpid(), "cwd": l.cwd, "client": l.client.program}
+	if version := clientVersion(ctx, l.executable, l.environ); version != "" {
+		meta["client_version"] = version
+	}
 	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID"} {
 		if value, ok := env[key]; ok {
 			meta[strings.ToLower(key)] = value
@@ -266,7 +274,86 @@ func (l *launcher) launchMeta() json.RawMessage {
 	}
 	// Encoding a map of strings and an int cannot fail.
 	data, _ := json.Marshal(meta)
+	if len(data) > session.MaxLaunchMeta {
+		delete(meta, "cwd")
+		data, _ = json.Marshal(meta)
+	}
 	return data
+}
+
+// versionTimeout bounds the client's --version run. Tests shorten it.
+var versionTimeout = 3 * time.Second
+
+// maxVersionOutput is how much of the --version output is read.
+const maxVersionOutput = 4096
+
+// versionPattern finds a version number in the --version output, which each client
+// words differently ("2.1.0 (Claude Code)", "codex-cli 0.46.0").
+var versionPattern = regexp.MustCompile(session.VersionNumber)
+
+// clientVersion runs the client's executable with --version and returns the first
+// version number in its standard output, or "" when it fails, prints none or takes
+// longer than versionTimeout: knowing the version is not worth delaying or refusing
+// the launch. The run has no session, so it gets only PATH and HOME and a proxy that
+// refuses every connection, and it runs in / rather than in a project whose settings
+// it might read. It gets its own
+// process group, which is killed on the timeout and when a descendant still holds the
+// output.
+func clientVersion(ctx context.Context, executable string, environ []string) string {
+	ctx, cancel := context.WithTimeout(ctx, versionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "--version")
+	cmd.Env = versionEnvironment(environ)
+	cmd.Dir = "/"
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 100 * time.Millisecond
+	var out limitedBuffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The client exited and a descendant in its group holds the output, so the group
+		// still exists and its ID is not reused.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		err = nil
+	}
+	if err != nil {
+		return ""
+	}
+	return versionPattern.FindString(out.String())
+}
+
+// refusingProxy is an address where no proxy listens.
+const refusingProxy = "http://127.0.0.1:1"
+
+// versionEnvironment is the environment of the --version run: PATH and HOME from the
+// parent, and every proxy variable set to refusingProxy.
+func versionEnvironment(parent []string) []string {
+	var env []string
+	for _, entry := range parent {
+		if key, _, _ := strings.Cut(entry, "="); key == "PATH" || key == "HOME" {
+			env = append(env, entry)
+		}
+	}
+	for _, key := range clearedProxyVariables {
+		if !strings.EqualFold(key, "NO_PROXY") {
+			env = append(env, key+"="+refusingProxy)
+		}
+	}
+	return env
+}
+
+// limitedBuffer keeps the first maxVersionOutput bytes written to it and discards the
+// rest.
+type limitedBuffer struct {
+	strings.Builder
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if room := maxVersionOutput - b.Len(); room > 0 {
+		b.Builder.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
 }
 
 // start runs the client with the session's environment until it exits and returns its

@@ -40,7 +40,7 @@ func TestDashboardEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"machines", "sessions", "hourly", "results", "destinations", "history"} {
+	for _, table := range []string{"machines", "sessions", "hourly", "results", "clients", "client_hourly", "destinations", "history"} {
 		if !strings.Contains(string(body), `"`+table+`":[]`) {
 			t.Fatalf("empty table %s is not an empty array: %s", table, body)
 		}
