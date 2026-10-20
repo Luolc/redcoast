@@ -17,7 +17,10 @@ export function sampleDashboard(now: Date): Dashboard {
     hard: 0.95,
     health: {
       status: "degraded",
-      reasons: ["sample-ac: paused (upstream_429)"],
+      reasons: [
+        "sample-ac: paused (upstream_429)",
+        "sample-ad: egress IP not read",
+      ],
     },
     gateway: {
       provider: "claude",
@@ -100,14 +103,61 @@ export function sampleDashboard(now: Date): Dashboard {
         in_flight: 0,
         concurrency: 32,
       },
+      {
+        alias: "sample-ad",
+        email: "ad@example.test",
+        expected_egress_ip: "192.0.2.3",
+        egress_check: { at: at(-4), outcome: "unread" },
+        bound_sessions: 2,
+        active_sessions: 2,
+        quota: {
+          "5h": {
+            utilization: 0.31,
+            status: "allowed",
+            reset_at: at(200),
+            observed_at: at(-6),
+            source: "response",
+          },
+          "7d": {
+            utilization: 0.18,
+            status: "allowed",
+            reset_at: at(6 * 24 * 60),
+            observed_at: at(-6),
+            source: "response",
+          },
+        },
+        plan: {
+          name: "max-5x",
+          effective_from: "1970-01-01T00:00:00Z",
+          effective_to: null,
+        },
+        next_plan: null,
+        in_flight: 1,
+        concurrency: 8,
+      },
     ],
     machines: [
       {
         name: "machine-a",
-        created_at: at(-30 * 60),
+        created_at: at(-30 * 24 * 60),
         max_sessions: 12,
-        live_sessions: 9,
+        live_sessions: 3,
         last_seen: at(-1),
+      },
+      {
+        name: "machine-b",
+        created_at: at(-9 * 24 * 60),
+        max_sessions: 4,
+        live_sessions: 1,
+        last_seen: at(-6),
+      },
+      {
+        name: "machine-c",
+        created_at: at(-40 * 24 * 60),
+        revoked_at: at(-3 * 24 * 60),
+        max_sessions: 4,
+        live_sessions: 0,
+        last_seen: at(-3 * 24 * 60 - 10),
       },
     ],
     sessions: [
@@ -125,104 +175,23 @@ export function sampleDashboard(now: Date): Dashboard {
         created_at: at(-50),
         last_seen: at(-1),
       },
+      {
+        id: "R5HD2LKE",
+        client_machine: "machine-a",
+        alias: "sample-ad",
+        created_at: at(-200),
+        last_seen: at(-14),
+      },
+      {
+        id: "W8MN4TQC",
+        client_machine: "machine-b",
+        alias: "sample-ad",
+        created_at: at(-95),
+        last_seen: at(-6),
+      },
     ],
     idle_sessions: 1,
-    hourly: [
-      {
-        hour: day(0),
-        alias: "sample-ab",
-        kind: "inference",
-        requests: 412,
-        bytes_up: 9_830_400,
-        bytes_down: 2_202_009,
-      },
-      {
-        hour: day(0),
-        alias: "sample-ab",
-        kind: "connect",
-        requests: 37,
-        bytes_up: 81_920,
-        bytes_down: 3_145_728,
-      },
-    ],
-    results: [
-      { kind: "connect", result: "ok", status: 200, count: 37 },
-      { kind: "inference", result: "ok", status: 200, count: 405 },
-      { kind: "inference", result: "limited", status: 0, count: 7 },
-    ],
-    usage: [
-      {
-        hour: day(0),
-        alias: "sample-ab",
-        client_machine: "machine-a",
-        kind: "connect",
-        requests: 37,
-        bytes_up: 81_920,
-        bytes_down: 3_145_728,
-        errors: 0,
-        limited: 0,
-      },
-      {
-        hour: day(0),
-        alias: "sample-ab",
-        client_machine: "machine-a",
-        kind: "inference",
-        requests: 300,
-        bytes_up: 7_340_032,
-        bytes_down: 1_572_864,
-        errors: 7,
-        limited: 7,
-      },
-      {
-        hour: day(0),
-        alias: "sample-ab",
-        client_machine: "local",
-        kind: "inference",
-        requests: 112,
-        bytes_up: 2_490_368,
-        bytes_down: 629_145,
-        errors: 0,
-        limited: 0,
-      },
-    ],
-    result_sources: [
-      {
-        alias: "sample-ab",
-        client_machine: "machine-a",
-        kind: "connect",
-        result: "ok",
-        status: 200,
-        count: 37,
-        error: false,
-      },
-      {
-        alias: "sample-ab",
-        client_machine: "machine-a",
-        kind: "inference",
-        result: "ok",
-        status: 200,
-        count: 293,
-        error: false,
-      },
-      {
-        alias: "sample-ab",
-        client_machine: "machine-a",
-        kind: "inference",
-        result: "limited",
-        status: 0,
-        count: 7,
-        error: true,
-      },
-      {
-        alias: "sample-ab",
-        client_machine: "local",
-        kind: "inference",
-        result: "ok",
-        status: 200,
-        count: 112,
-        error: false,
-      },
-    ],
+    ...traffic(now),
     destinations: [
       {
         host: "github.com",
@@ -258,11 +227,144 @@ export function sampleDashboard(now: Date): Dashboard {
     history: [
       { session: "P3ZT8WQN", alias: "sample-ab", from: at(-50), reason: "new" },
       {
+        session: "W8MN4TQC",
+        alias: "sample-ad",
+        from: at(-90),
+        reason: "quota_hard",
+      },
+      {
+        session: "W8MN4TQC",
+        alias: "sample-ac",
+        from: at(-95),
+        to: at(-90),
+        reason: "new",
+      },
+      {
+        session: "R5HD2LKE",
+        alias: "sample-ad",
+        from: at(-200),
+        reason: "new",
+      },
+      {
         session: "K7Q2M4XA",
         alias: "sample-ab",
         from: at(-28 * 60),
         reason: "unavailable",
       },
     ],
+  };
+}
+
+// Requests per hour of the 24 h window, each source with its own made-up
+// shape over the day; results are split from the same counts, so every
+// table of the sample adds up to the others.
+function traffic(
+  now: Date,
+): Pick<Dashboard, "usage" | "result_sources" | "hourly" | "results"> {
+  const last = Math.floor(now.getTime() / 3_600_000) * 3_600_000;
+  const sources = [
+    { alias: "sample-ab", machine: "machine-a", kind: "inference", base: 220 },
+    { alias: "sample-ab", machine: "machine-a", kind: "connect", base: 30 },
+    { alias: "sample-ad", machine: "machine-b", kind: "inference", base: 90 },
+    { alias: "", machine: "", kind: "inference", base: 2 },
+  ];
+  const usage: NonNullable<Dashboard["usage"]> = [];
+  for (let i = 0; i <= 24; i++) {
+    const hour = new Date(last - (24 - i) * 3_600_000).toISOString();
+    const daytime =
+      0.35 + 0.65 * Math.max(0, Math.sin(((i - 2) / 24) * 2 * Math.PI));
+    for (const s of sources) {
+      const requests = Math.round(s.base * daytime);
+      if (requests === 0) continue;
+      const failing =
+        s.machine === ""
+          ? requests
+          : s.kind === "connect"
+            ? 0
+            : i % 7 === 3
+              ? 9
+              : i % 3;
+      usage.push({
+        hour,
+        alias: s.alias,
+        client_machine: s.machine,
+        kind: s.kind,
+        requests,
+        bytes_up: requests * 24_576,
+        bytes_down: requests * 6_144,
+        errors: failing,
+        limited:
+          s.kind === "inference" && s.machine !== ""
+            ? Math.floor(failing / 3)
+            : 0,
+      });
+    }
+  }
+  const counts = new Map<string, number>();
+  const count = (key: string, n: number) => {
+    if (n > 0) counts.set(key, (counts.get(key) ?? 0) + n);
+  };
+  for (const u of usage) {
+    const k = `${u.alias}\t${u.client_machine}\t${u.kind}`;
+    const upstream = u.errors - u.limited;
+    if (u.client_machine === "") {
+      count(`${k}\tauth_failed\t0`, u.errors);
+      continue;
+    }
+    count(`${k}\tok\t200`, u.requests - u.errors);
+    count(`${k}\tlimited\t0`, u.limited);
+    count(`${k}\tok\t529`, Math.ceil(upstream / 2));
+    count(`${k}\tincomplete\t0`, Math.floor(upstream / 2));
+  }
+  const resultSources = [...counts].map(([key, n]) => {
+    const [alias = "", machine = "", kind = "", result = "", status = "0"] =
+      key.split("\t");
+    return {
+      alias,
+      client_machine: machine,
+      kind,
+      result,
+      status: Number(status),
+      count: n,
+      error: !(result === "ok" && Number(status) < 400),
+    };
+  });
+  const results = new Map<string, Dashboard["results"][number]>();
+  for (const r of resultSources) {
+    const k = `${r.kind}\t${r.result}\t${String(r.status)}`;
+    const into = results.get(k);
+    if (into === undefined)
+      results.set(k, {
+        kind: r.kind,
+        result: r.result,
+        status: r.status,
+        count: r.count,
+      });
+    else into.count += r.count;
+  }
+  const hourly = new Map<string, Dashboard["hourly"][number]>();
+  for (const u of usage) {
+    const k = `${u.hour}\t${u.alias}\t${u.kind}`;
+    const into = hourly.get(k);
+    if (into === undefined)
+      hourly.set(k, {
+        hour: u.hour,
+        alias: u.alias,
+        kind: u.kind,
+        requests: u.requests,
+        bytes_up: u.bytes_up,
+        bytes_down: u.bytes_down,
+      });
+    else {
+      into.requests += u.requests;
+      into.bytes_up += u.bytes_up;
+      into.bytes_down += u.bytes_down;
+    }
+  }
+  return {
+    usage,
+    result_sources: resultSources,
+    hourly: [...hourly.values()],
+    results: [...results.values()],
   };
 }

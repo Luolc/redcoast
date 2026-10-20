@@ -1,9 +1,12 @@
 import { expect, it } from "vitest";
 import {
+  formatAgo,
   formatBytes,
-  formatDuration,
+  formatCount,
   formatPercent,
+  formatSpan,
   formatTime,
+  formatUntil,
   LA,
 } from "./format";
 
@@ -20,17 +23,31 @@ it("shows Los Angeles time with its daylight-saving name, and UTC as is", () => 
   );
 });
 
-it("formats durations in their two largest units", () => {
-  expect(formatDuration(45_000)).toBe("45s");
-  expect(formatDuration(185_000)).toBe("3m 05s");
-  expect(formatDuration((2 * 60 + 10) * 60_000)).toBe("2h 10m");
-  expect(formatDuration((3 * 24 + 4) * 3_600_000)).toBe("3d 4h");
-  expect(formatDuration(-1)).toBe("0s");
+// The spaces between a number and its unit are non-breaking.
+it("writes a span in its two largest units, a number never apart from its unit", () => {
+  expect(formatSpan(45_000)).toBe("45\u00a0s");
+  expect(formatSpan(185_000)).toBe("3\u00a0min");
+  expect(formatSpan(2 * 3_600_000)).toBe("2\u00a0h");
+  expect(formatSpan((2 * 60 + 10) * 60_000)).toBe("2\u00a0h 10\u00a0min");
+  expect(formatSpan(3 * 86_400_000)).toBe("3\u00a0d");
+  expect(formatSpan((3 * 24 + 4) * 3_600_000)).toBe("3\u00a0d 4\u00a0h");
+  expect(formatSpan(-1)).toBe("0\u00a0s");
 });
 
-it("formats bytes and fractions", () => {
-  expect(formatBytes(512)).toBe("512 B");
-  expect(formatBytes(1536)).toBe("1.5 KiB");
-  expect(formatBytes(2 * 1024 ** 3)).toBe("2.0 GiB");
-  expect(formatPercent(0.425)).toBe("43%");
+it("writes ages and countdowns, and a passed countdown as due", () => {
+  const now = new Date("2026-10-07T12:00:00Z");
+  expect(formatAgo("2026-10-07T11:53:00Z", now)).toBe("7\u00a0min ago");
+  expect(formatUntil("2026-10-07T14:36:00Z", now)).toBe(
+    "in 2\u00a0h 36\u00a0min",
+  );
+  expect(formatUntil("2026-10-07T12:00:00Z", now)).toBe("due now");
+});
+
+it("formats bytes, fractions and counts", () => {
+  expect(formatBytes(512)).toBe("512\u00a0B");
+  expect(formatBytes(1536)).toBe("1.5\u00a0KiB");
+  expect(formatBytes(2 * 1024 ** 3)).toBe("2.0\u00a0GiB");
+  expect(formatPercent(0.42)).toBe("42%");
+  expect(formatPercent(0.0123, 1)).toBe("1.2%");
+  expect(formatCount(6405)).toBe("6,405");
 });

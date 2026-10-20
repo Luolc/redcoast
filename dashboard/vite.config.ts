@@ -1,5 +1,6 @@
-import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { sampleDashboard } from "./fixtures/sample.ts";
@@ -17,6 +18,25 @@ function sample(): Plugin {
       });
     },
   };
+}
+
+// The fonts and icons bundled into the page, whose licenses ask that their
+// notice go with every copy: the page carries them in a comment at its top.
+const bundled = [
+  "@fontsource-variable/geist",
+  "@fontsource-variable/geist-mono",
+  "@fontsource-variable/eb-garamond",
+  "lucide-react",
+];
+
+function licenses(): string {
+  const require = createRequire(import.meta.url);
+  return bundled
+    .map((name) => {
+      const text = readFileSync(require.resolve(`${name}/LICENSE`), "utf8");
+      return `${name}:\n\n${text.replaceAll("-->", "- ->").trim()}\n\n`;
+    })
+    .join("");
 }
 
 // The build is one index.html with the script and the styles inline, so a
@@ -54,7 +74,10 @@ function singleFile(): Plugin {
         }
         Reflect.deleteProperty(bundle, name);
       }
-      page.source = html;
+      page.source = html.replace(
+        "<!doctype html>",
+        () => `<!doctype html>\n<!--\n${licenses()}-->`,
+      );
     },
   };
 }
@@ -62,7 +85,9 @@ function singleFile(): Plugin {
 export default defineConfig({
   // Relative asset paths: the gateway serves the page next to dashboard.json.
   base: "./",
-  plugins: [react(), tailwindcss(), sample(), singleFile()],
+  plugins: [react(), sample(), singleFile()],
+  // Inline every asset, the fonts included, so the page is one file.
+  build: { assetsInlineLimit: () => true },
   // The commit the page is built from, which build.sh passes in; empty in
   // `pnpm dev` and the tests.
   define: {

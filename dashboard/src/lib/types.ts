@@ -88,7 +88,7 @@ interface Machine {
   last_seen?: string | undefined;
 }
 
-interface LiveSession {
+export interface LiveSession {
   id: string; // the first 8 characters
   client_machine: string;
   alias: string; // empty when unbound
@@ -96,7 +96,7 @@ interface LiveSession {
   last_seen: string;
 }
 
-export interface HourTraffic {
+interface HourTraffic {
   hour: string;
   alias: string;
   kind: string;
@@ -115,7 +115,7 @@ interface ResultCount {
 // Errors are rows with a result other than ok, or with a status of 400 or more;
 // a CONNECT tunnel the limits closed (idle_timeout, max_duration) is no error.
 // Limited rows are among the errors.
-interface UsagePoint {
+export interface UsagePoint {
   hour: string;
   alias: string; // empty for requests carried on no account
   client_machine: string; // empty for requests of no session
@@ -127,7 +127,7 @@ interface UsagePoint {
   limited: number;
 }
 
-interface SourceCount extends ResultCount {
+export interface SourceCount extends ResultCount {
   alias: string;
   client_machine: string;
   error: boolean; // whether this result and status count as an error
@@ -154,7 +154,7 @@ interface Day {
   leaked: number;
 }
 
-interface HistoryEntry {
+export interface HistoryEntry {
   session: string;
   alias: string;
   from: string;
