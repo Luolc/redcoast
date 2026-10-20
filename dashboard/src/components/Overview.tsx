@@ -1,5 +1,7 @@
+import { Fragment } from "react";
 import {
   formatClock,
+  formatMs,
   formatCount,
   formatPercent,
   formatSpan,
@@ -13,6 +15,7 @@ import {
   errorRate,
   errorRateState,
   healthState,
+  durationSeries,
   hourSeries,
   total,
   type HourCounts,
@@ -20,14 +23,14 @@ import {
 import type { Dashboard } from "../lib/types";
 import { providerName } from "../lib/words";
 import { AccountsTable } from "./Accounts";
-import { HourBars } from "./charts";
+import { HourBars, HourLines } from "./charts";
 import { Empty, PageHead, Section, Share, Status } from "./ui";
 
 function machineLabel(machine: string): string {
   return machine === "" ? "No session" : machine;
 }
 
-function hourTitle(h: HourCounts): string {
+function hourTitle(h: { hour: string }): string {
   const end = new Date(Date.parse(h.hour) + 3_600_000).toISOString();
   return `${formatClock(h.hour)}–${formatClock(end)} UTC`;
 }
@@ -171,6 +174,85 @@ function Traffic({ data }: { data: Dashboard }) {
             </div>
           )}
         </div>
+      </div>
+      {data.latency === undefined ? null : (
+        <Durations data={data} latency={data.latency} />
+      )}
+    </div>
+  );
+}
+
+/** Request durations per hour, and each client machine's over the window. */
+function Durations({
+  data,
+  latency,
+}: {
+  data: Dashboard;
+  latency: NonNullable<Dashboard["latency"]>;
+}) {
+  const hours = durationSeries(latency.hourly, data.at);
+  const machines = [...latency.machines].sort(
+    (a, b) => b.duration_p95_ms - a.duration_p95_ms,
+  );
+  return (
+    <div className="red-row">
+      <div className="red-chart">
+        <div className="title">
+          Duration
+          <span className="key">
+            <span>UTC</span>
+            <span>
+              <span className="sw sw-1" />
+              p95
+            </span>
+            <span>
+              <span className="sw sw-1 dash" />
+              p50
+            </span>
+          </span>
+        </div>
+        <HourLines
+          label="Request duration per hour, p95 and p50, over the last 24 h"
+          hours={hours.map((h) => h.hour)}
+          lines={[
+            { name: "p95", values: hours.map((h) => h.p95) },
+            { name: "p50", values: hours.map((h) => h.p50), dashed: true },
+          ]}
+          formatAxis={(v) => `${(v / 1000).toFixed(0)} s`}
+          tip={(i) => {
+            const h = hours[i];
+            if (h === undefined) return null;
+            return (
+              <>
+                <b>{hourTitle(h)}</b>
+                <br />
+                {h.p95 === null || h.p50 === null
+                  ? "No answered request"
+                  : `p95 ${formatMs(h.p95)} · p50 ${formatMs(h.p50)}`}
+              </>
+            );
+          }}
+        />
+      </div>
+      <div className="red-figs">
+        <div className="figs-sub">
+          Whole request until its response finished streaming; answered
+          inference requests only. Percentiles of different groups do not add
+          up, so there is no single figure for the day.
+        </div>
+        {machines.length === 0 ? null : (
+          <dl className="kv" aria-label="Duration by client machine">
+            {machines.map((m) => (
+              <Fragment key={m.client_machine}>
+                <dt>{machineLabel(m.client_machine)}</dt>
+                <dd>
+                  p95 {formatMs(m.duration_p95_ms)} · p50{" "}
+                  {formatMs(m.duration_p50_ms)}
+                </dd>
+              </Fragment>
+            ))}
+          </dl>
+        )}
       </div>
     </div>
   );

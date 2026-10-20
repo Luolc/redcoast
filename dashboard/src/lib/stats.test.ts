@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   accountState,
+  durationSeries,
   idleSessions,
   pausedForGood,
   windowTier,
@@ -285,4 +286,31 @@ it("counts the bindings of the last 24 h and the rebinds among them", () => {
       now,
     ),
   ).toEqual({ all: 2, rebound: 1 });
+});
+
+it("puts each hour's durations in the window, null where an hour has none", () => {
+  const series = durationSeries(
+    [
+      {
+        hour: "2026-10-07T12:00:00Z",
+        requests: 5,
+        duration_p50_ms: 800,
+        duration_p95_ms: 4000,
+      },
+      {
+        hour: "2026-10-06T11:00:00Z",
+        requests: 1,
+        duration_p50_ms: 1,
+        duration_p95_ms: 1,
+      },
+    ],
+    "2026-10-07T12:20:00Z",
+  );
+  expect(series).toHaveLength(25);
+  expect(series[24]).toEqual({
+    hour: "2026-10-07T12:00:00.000Z",
+    p50: 800,
+    p95: 4000,
+  });
+  expect(series.filter((h) => h.p95 !== null)).toHaveLength(1);
 });

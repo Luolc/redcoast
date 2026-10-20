@@ -1,5 +1,5 @@
 import { Cpu } from "lucide-react";
-import { formatCount, formatPercent } from "../lib/format";
+import { formatCount, formatMs, formatPercent } from "../lib/format";
 import { routeHref } from "../lib/route";
 import { byMachine, errorRate, errorRateState } from "../lib/stats";
 import type { Dashboard } from "../lib/types";
@@ -8,6 +8,9 @@ import { Ago, Empty, PageHead, Section, Status, Time } from "./ui";
 
 /** The client machines registered with this gateway, with their last 24 h of requests. */
 export function Clients({ data, now }: { data: Dashboard; now: Date }) {
+  const latency = new Map(
+    (data.latency?.machines ?? []).map((l) => [l.client_machine, l]),
+  );
   const usage = new Map(byMachine(data.usage ?? []).map((m) => [m.machine, m]));
   const orphan = usage.get("");
   return (
@@ -45,6 +48,9 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
                     Error rate
                   </th>
                   <th scope="col" className="n">
+                    p95 · p50, 24 h
+                  </th>
+                  <th scope="col" className="n">
                     Last seen
                   </th>
                   <th scope="col" className="n">
@@ -58,6 +64,7 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
                   const u = usage.get(m.name);
                   const rate = u === undefined ? 0 : errorRate(u);
                   const rs = errorRateState(rate);
+                  const d = latency.get(m.name);
                   return (
                     <tr key={m.name}>
                       <td>
@@ -92,6 +99,13 @@ export function Clients({ data, now }: { data: Dashboard; now: Date }) {
                               word: formatPercent(rate, 1),
                             }}
                           />
+                        )}
+                      </td>
+                      <td className="n">
+                        {d === undefined ? (
+                          <span className="faint">—</span>
+                        ) : (
+                          `${formatMs(d.duration_p95_ms)} · ${formatMs(d.duration_p50_ms)}`
                         )}
                       </td>
                       <td className="n muted">

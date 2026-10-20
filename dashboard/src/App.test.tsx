@@ -28,7 +28,15 @@ it("renders each page of the sample", () => {
         "Pace",
       ],
     ],
-    [{ view: "clients" }, ["machine-a", "Revoked", "came with no session"]],
+    [
+      { view: "clients" },
+      [
+        "44.8\u00a0s · 9.3\u00a0s",
+        "machine-a",
+        "Revoked",
+        "came with no session",
+      ],
+    ],
     [
       { view: "sessions" },
       ["P3ZT8WQN", "Account over its hard limit", "Quiet"],
@@ -40,6 +48,8 @@ it("renders each page of the sample", () => {
       { view: "monitor" },
       [
         "Requests this hour",
+        "p95 this hour",
+        "p95 41.9\u00a0s",
         "tunnels open",
         "5 h window",
         "Upstream server error",

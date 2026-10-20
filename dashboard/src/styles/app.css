@@ -1173,7 +1173,13 @@ tbody tr.link {
 .client-name a:hover {
   color: var(--t-accent);
 }
-.stats.five {
-  grid-template-columns: 1.25fr repeat(4, 1fr);
+/* The first tile wider, then as many equal tiles as the data gives. */
+.stats.now {
+  grid-template-columns: 1.25fr;
+  grid-auto-columns: 1fr;
+  grid-auto-flow: column;
   margin-bottom: 0;
+}
+.chart .dot-1 {
+  fill: var(--t-chart-1);
 }

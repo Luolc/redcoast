@@ -4,11 +4,13 @@ import {
   formatBytes,
   formatClock,
   formatCount,
+  formatMs,
   formatPercent,
   formatSpan,
 } from "../lib/format";
 import {
   accountState,
+  durationSeries,
   errorRate,
   errorRateState,
   failures,
@@ -33,8 +35,13 @@ function Now({ data, now }: { data: Dashboard; now: Date }) {
   const last = hours[hours.length - 1];
   const labels = hours.map((h) => h.hour);
   const lastRate = last === undefined ? 0 : errorRate(last);
+  const durations =
+    data.latency === undefined
+      ? null
+      : durationSeries(data.latency.hourly, data.at);
+  const lastP95 = durations?.[durations.length - 1]?.p95;
   return (
-    <div className="stats five">
+    <div className="stats now">
       <div>
         <div className="k">Health</div>
         <div className="v">
@@ -68,6 +75,22 @@ function Now({ data, now }: { data: Dashboard; now: Date }) {
               format={(v) => formatPercent(v, 1)}
             />
           </div>
+          {durations === null ? null : (
+            <div>
+              <div className="k">p95 this hour</div>
+              <div className="big">
+                {lastP95 === null || lastP95 === undefined
+                  ? "—"
+                  : formatMs(lastP95)}
+              </div>
+              <Spark
+                label="p95 duration per hour"
+                hours={labels}
+                values={durations.map((h) => h.p95)}
+                format={formatMs}
+              />
+            </div>
+          )}
           <div>
             <div className="k">Limited this hour</div>
             <div className="big">{formatCount(last.limited)}</div>
@@ -113,6 +136,17 @@ function Now({ data, now }: { data: Dashboard; now: Date }) {
 
 function AccountCards({ data, now }: { data: Dashboard; now: Date }) {
   if (data.accounts.length === 0) return <Empty title="No accounts." />;
+  const durations = (alias: string) => {
+    const l = data.latency?.accounts.find((r) => r.alias === alias);
+    return l === undefined ? null : (
+      <div className="line muted">
+        Last 24 h: p95{" "}
+        <span className="num">{formatMs(l.duration_p95_ms)}</span> · p50{" "}
+        <span className="num">{formatMs(l.duration_p50_ms)}</span> over{" "}
+        <span className="num">{formatCount(l.requests)}</span> answered
+      </div>
+    );
+  };
   return (
     <div className="cards">
       {data.accounts.map((a) => (
@@ -147,6 +181,7 @@ function AccountCards({ data, now }: { data: Dashboard; now: Date }) {
             </span>{" "}
             · sessions <span className="num">{a.bound_sessions}</span>
           </div>
+          {durations(a.alias)}
         </div>
       ))}
     </div>

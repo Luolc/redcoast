@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { poller } from "./poll";
 import { parseRoute, type Route } from "./route";
 import { parseDashboard, type Dashboard } from "./types";
 
@@ -18,35 +19,22 @@ export function useData(url: string, everyMs: number): Loaded {
   });
   const [tick, setTick] = useState(0);
   useEffect(() => {
-    // One load at a time: a scheduled load waits out one still in flight,
-    // however slow, and Refresh starts this effect again, which cancels it,
-    // so an older answer never lands after a newer one.
-    let current: AbortController | null = null;
-    async function load() {
-      if (current !== null) return;
-      const controller = new AbortController();
-      current = controller;
+    // Refresh starts this effect again, which stops the load in flight, so
+    // an older answer never lands after a newer one.
+    const loads = poller(async (signal) => {
       try {
-        const response = await fetch(url, {
-          cache: "no-store",
-          signal: controller.signal,
-        });
+        const response = await fetch(url, { cache: "no-store", signal });
         if (!response.ok) throw new Error(`HTTP ${String(response.status)}`);
         const data = parseDashboard(await response.text());
-        if (!controller.signal.aborted) setState({ data, fetchError: null });
+        if (!signal.aborted) setState({ data, fetchError: null });
       } catch (e) {
-        if (!controller.signal.aborted)
-          setState((l) => ({ ...l, fetchError: String(e) }));
-      } finally {
-        if (current === controller) current = null;
+        if (!signal.aborted) setState((l) => ({ ...l, fetchError: String(e) }));
       }
-    }
-    void load();
-    const timer = setInterval(() => {
-      void load();
-    }, everyMs);
+    });
+    loads.run();
+    const timer = setInterval(loads.run, everyMs);
     return () => {
-      current?.abort();
+      loads.stop();
       clearInterval(timer);
     };
   }, [url, everyMs, tick]);
