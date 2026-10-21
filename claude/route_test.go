@@ -1068,8 +1068,10 @@ func sendMalformed(t *testing.T, h *harness, server *httptest.Server) {
 // connection: an upstream that resets the connection once it has read the first bytes
 // of the body pauses the account after a run when those bytes are the whole body, and
 // pauses nothing when the body is 8 MB, of which the transport stops reading when its
-// write fails. The body is marked gzip, so the identity rewrite does not read it ahead
-// and it streams.
+// write fails. Those two bodies are marked gzip, so the identity rewrite does not read
+// them ahead and they stream. A third arm sends 4 MB of plain JSON, which the rewrite
+// reads whole before the request leaves; the reset then mostly fails the transport's
+// write on a connection it already closed, and the account is paused.
 func TestUnreadBodyResetsPauseNothing(t *testing.T) {
 	const head = `{"a":"bc"}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1085,10 +1087,15 @@ func TestUnreadBodyResetsPauseNothing(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	for _, arm := range []struct {
-		name   string
-		body   string
-		pauses bool
-	}{{"whole_body", head, true}, {"body_left_unread", head + strings.Repeat(" ", 8<<20), false}} {
+		name     string
+		body     string
+		encoding string
+		pauses   bool
+	}{
+		{"whole_body", head, "gzip", true},
+		{"body_left_unread", head + strings.Repeat(" ", 8<<20), "gzip", false},
+		{"rewritten_body", head + strings.Repeat(" ", 4<<20), "identity", true},
+	} {
 		t.Run(arm.name, func(t *testing.T) {
 			h := newHarness(t, "sample-a")
 			server := h.gateway(upstream.URL)
@@ -1101,7 +1108,7 @@ func TestUnreadBodyResetsPauseNothing(t *testing.T) {
 				if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 					t.Fatal(err)
 				}
-				request := fmt.Sprintf("POST /v1/messages HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", addr, h.token, len(arm.body), arm.body)
+				request := fmt.Sprintf("POST /v1/messages HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Encoding: %s\r\nContent-Length: %d\r\n\r\n%s", addr, h.token, arm.encoding, len(arm.body), arm.body)
 				// The gateway answers before it has read the whole body, so the body is
 				// written while the response is read; its write may then fail.
 				go func() { _, _ = io.WriteString(conn, request) }()
@@ -1120,6 +1127,25 @@ func TestUnreadBodyResetsPauseNothing(t *testing.T) {
 				t.Fatalf("paused=%v, want a pause: %v", paused, arm.pauses)
 			}
 		})
+	}
+}
+
+// TestAccountFaultByFailure checks, for every name failureOf gives, whether a failure
+// counts toward the account's run: the five failures before a connection always, a
+// reset or a response header timeout only with the client's body read whole, any
+// other never.
+func TestAccountFaultByFailure(t *testing.T) {
+	for failure, counts := range map[string]string{
+		"egress_dial": "always", "egress_connect_407": "always", "egress_unanswered": "always", "dial": "always", "tls": "always",
+		"reset": "body", "response_header_timeout": "body",
+		"upgrade": "never", "guard": "never", "limit": "never", "shutdown": "never", "client_canceled": "never", "client_body": "never", "other": "never", "": "never",
+	} {
+		for _, bodyRead := range []bool{true, false} {
+			want := counts == "always" || counts == "body" && bodyRead
+			if got := accountFault(&requestState{failure: failure}, bodyRead); got != want {
+				t.Errorf("failure %q, body read %v: counts %v, want %v", failure, bodyRead, got, want)
+			}
+		}
 	}
 }
 

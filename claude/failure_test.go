@@ -452,3 +452,18 @@ func TestShutdownFailureIsNamed(t *testing.T) {
 	}
 	expectFailureLog(t, logged, h, h.accounts.lookup("sample-a"), target, "shutdown")
 }
+
+// TestClosedConnectionIsReset names the error a request body's write gets after the
+// transport closed the connection on the peer's reset, as it wraps it, a reset once the
+// request had a connection. Control arm: before a connection it is other.
+func TestClosedConnectionIsReset(t *testing.T) {
+	err := &net.OpError{Op: "readfrom", Net: "tcp", Err: &net.OpError{Op: "write", Net: "tcp", Err: net.ErrClosed}}
+	var phases upstreamPhases
+	if got := failureOf(t.Context(), err, &phases, false); got != "other" {
+		t.Fatalf("before a connection: %q, want other", got)
+	}
+	phases.connected.Store(true)
+	if got := failureOf(t.Context(), err, &phases, false); got != "reset" {
+		t.Fatalf("after a connection: %q, want reset", got)
+	}
+}
