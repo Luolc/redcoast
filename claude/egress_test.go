@@ -377,14 +377,14 @@ func TestReloadWithEgressCheck(t *testing.T) {
 // may name a session or carry anything else, stays on the management interface.
 func TestHealthPauseReasons(t *testing.T) {
 	echo := newEchoService(t, "192.0.2.1")
-	h, e := newEgressHarness(t, echo, map[string]string{"sample-a": "192.0.2.1", "sample-b": "192.0.2.1"})
-	for alias, reason := range map[string]string{"sample-a": "upstream_401", "sample-b": "synthetic-session-123 synthetic-sensitive-value"} {
+	h, e := newEgressHarness(t, echo, map[string]string{"sample-a": "192.0.2.1", "sample-b": "192.0.2.1", "sample-c": "192.0.2.1"})
+	for alias, reason := range map[string]string{"sample-a": "upstream_401", "sample-b": "synthetic-session-123 synthetic-sensitive-value", "sample-c": upstreamFailedReason} {
 		if err := h.store.Pause(t.Context(), alias, indefinitePause, reason); err != nil {
 			t.Fatal(err)
 		}
 	}
 	answer := readHealth(t, e)
-	if want := []string{"sample-a: paused (upstream_401)", "sample-b: paused (manual)"}; answer.Status != "degraded" || !slices.Equal(answer.Reasons, want) {
+	if want := []string{"sample-a: paused (upstream_401)", "sample-b: paused (manual)", "sample-c: paused (upstream_failed)"}; answer.Status != "degraded" || !slices.Equal(answer.Reasons, want) {
 		t.Fatalf("health %+v, want degraded %v", answer, want)
 	}
 }

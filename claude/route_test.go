@@ -1,10 +1,13 @@
 package claude
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -818,5 +821,362 @@ func TestRefusedRowsAreLimitedPerSource(t *testing.T) {
 	}
 	if rows := h.trafficRows(refusalRowsPerSource + 3); len(rows) != refusalRowsPerSource+3 || rows[len(rows)-1].result != "auth_failed" {
 		t.Fatalf("next window: rows=%+v", rows)
+	}
+}
+
+// flakyExit stands in for an account's exit whose mode a test switches. In "down" no
+// connection to it can be made, and in "wait" getting one waits until the gateway
+// gives up the request. Once connected, "ok" answers 200 with a body naming the exit,
+// "close" drops the connection without an answer, "silent" sends no answer until the
+// gateway gives up waiting for its head, and "upgrade" answers 101.
+type flakyExit struct {
+	server  *httptest.Server
+	mode    atomic.Value // string
+	waiting chan struct{}
+}
+
+// startFlakyExit starts a flaky exit in mode "ok".
+func startFlakyExit(t *testing.T) *flakyExit {
+	t.Helper()
+	e := &flakyExit{waiting: make(chan struct{}, 1)}
+	e.mode.Store("ok")
+	e.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			return
+		}
+		switch e.mode.Load().(string) {
+		case "close":
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		case "silent":
+			<-r.Context().Done()
+		case "upgrade":
+			w.Header().Set("Connection", "Upgrade")
+			w.Header().Set("Upgrade", "websocket")
+			w.WriteHeader(http.StatusSwitchingProtocols)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"exit":"A"}`)
+		}
+	}))
+	t.Cleanup(e.server.Close)
+	return e
+}
+
+// attach adds account alias to h behind e, whose mode then decides how the account's
+// connections go. The account waits headTimeout for a response head instead of the
+// production 30 s.
+func (e *flakyExit) attach(t *testing.T, h *harness, alias, token string) {
+	t.Helper()
+	exitURL, err := url.Parse(e.server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := h.addWithExit(alias, token, exitURL)
+	a.transport.ResponseHeaderTimeout = headTimeout
+	through, closed := a.transport.Proxy, &url.URL{Scheme: "http", Host: "127.0.0.1:1"}
+	a.transport.Proxy = func(r *http.Request) (*url.URL, error) {
+		switch e.mode.Load().(string) {
+		case "down":
+			return closed, nil
+		case "wait":
+			select {
+			case e.waiting <- struct{}{}:
+			default:
+			}
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+		return through(r)
+	}
+}
+
+// headTimeout is how long a flaky exit's account waits for a response head.
+const headTimeout = 200 * time.Millisecond
+
+// TestUpstreamFailuresPauseAccount checks that upstreamFailureRun requests in a row that
+// do not get through an account's exit pause the account for upstreamFailurePause: no
+// connection to the exit can be made, or once the exit has the whole request, with a
+// declared length or chunked, it drops the connection or sends no response head in
+// time. The session's next request rebinds
+// to the other account, and once the pause ends the account is chosen again. Control
+// arms pause nothing, and the session's next request stays on the account: one failure
+// fewer; requests the client left while the gateway waited for a connection; a run
+// broken by an upstream response (a 101 the gateway rejects); a malformed client body.
+func TestUpstreamFailuresPauseAccount(t *testing.T) {
+	type step struct {
+		mode  string
+		count int
+	}
+	for _, arm := range []struct {
+		name   string
+		steps  []step
+		pauses bool
+	}{
+		{"run", []step{{"down", upstreamFailureRun}}, true},
+		{"one_short", []step{{"down", upstreamFailureRun - 1}}, false},
+		{"client_left", []step{{"wait", upstreamFailureRun}}, false},
+		{"answered_between", []step{{"down", upstreamFailureRun - 1}, {"upgrade", 1}, {"down", upstreamFailureRun - 1}}, false},
+		{"dropped", []step{{"close", upstreamFailureRun}}, true},
+		{"dropped_chunked", []step{{"close_chunked", upstreamFailureRun}}, true},
+		{"no_head", []step{{"silent", upstreamFailureRun}}, true},
+		{"malformed_body", []step{{"malformed", upstreamFailureRun}}, false},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			h := newHarness(t)
+			exitA, exitB := startFlakyExit(t), startAccountExit(t, "B", 200)
+			exitA.attach(t, h, "sample-a", "sk-ant-oat01-synthetic-token-a")
+			h.addWithExit("sample-b", "sk-ant-oat01-synthetic-token-b", exitB.url(t))
+			h.token, h.sessionID = h.issue()
+			server := h.gateway("http://127.0.0.1:1")
+			sent := 0
+			for _, s := range arm.steps {
+				mode := s.mode
+				switch mode {
+				case "malformed":
+					mode = "ok"
+				case "close_chunked":
+					mode = "close"
+				}
+				exitA.mode.Store(mode)
+				for range s.count {
+					switch s.mode {
+					case "wait":
+						leave(t, h, server, exitA)
+					case "malformed":
+						sendMalformed(t, h, server)
+					case "close_chunked":
+						if got := postChunked(t, h, server); got != http.StatusBadGateway {
+							t.Fatalf("%s: status=%d", s.mode, got)
+						}
+					default:
+						if got, _ := post(t, h, server, h.token, `{"messages":[]}`, "", ""); got != http.StatusBadGateway {
+							t.Fatalf("%s: status=%d", s.mode, got)
+						}
+					}
+					sent++
+					// The pause is written before the row; wait for the row so the next
+					// request sees it.
+					if rows := h.trafficRows(sent); len(rows) != sent || rows[sent-1].result != "upstream_failed" || rows[sent-1].alias != "sample-a" {
+						t.Fatalf("%s: rows=%+v", s.mode, rows)
+					}
+				}
+			}
+			exitA.mode.Store("ok")
+			paused := h.paused()
+			got, body := post(t, h, server, h.token, `{"messages":[]}`, "", "")
+			if !arm.pauses {
+				if len(paused) != 0 {
+					t.Fatalf("paused=%v", paused)
+				}
+				if alias, _, _ := h.binding(h.sessionID); got != 200 || body != `{"exit":"A"}` || alias != "sample-a" || len(exitB.seen()) != 0 {
+					t.Fatalf("next request: status=%d body=%q bound to %s, exit B saw %d", got, body, alias, len(exitB.seen()))
+				}
+				return
+			}
+			if len(paused) != 1 || paused["sample-a"] != upstreamFailedReason {
+				t.Fatalf("paused=%v", paused)
+			}
+			if alias, _, _ := h.binding(h.sessionID); got != 200 || body != `{"exit":"B"}` || alias != "sample-b" {
+				t.Fatalf("next request: status=%d body=%q bound to %s", got, body, alias)
+			}
+			h.clock = h.clock.Add(upstreamFailurePause - time.Millisecond)
+			if len(h.paused()) != 1 {
+				t.Fatal("pause ended early")
+			}
+			h.clock = h.clock.Add(time.Millisecond)
+			if len(h.paused()) != 0 {
+				t.Fatal("pause did not end")
+			}
+			h.token, h.sessionID = h.issue()
+			if got, body := post(t, h, server, h.token, `{"messages":[]}`, "", ""); got != 200 || body != `{"exit":"A"}` {
+				t.Fatalf("after the pause: status=%d body=%q", got, body)
+			}
+		})
+	}
+}
+
+// leave sends one inference request without a body and gives it up once the gateway
+// waits for a connection through exit, as a client that leaves does. Without a body
+// the gateway notices at once that the client has gone.
+func leave(t *testing.T, h *harness, server *httptest.Server, exit *flakyExit) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		select {
+		case <-exit.waiting:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	req, err := http.NewRequestWithContext(ctx, "POST", server.URL+"/v1/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := h.client().Do(req); err == nil {
+		_ = res.Body.Close()
+		t.Fatalf("a request the client left got status %d", res.StatusCode)
+	}
+}
+
+// postChunked sends one inference request with the session credential and a whole
+// chunked body, and returns the status.
+func postChunked(t *testing.T, h *harness, server *httptest.Server) int {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/v1/messages", strings.NewReader(`{"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength, req.TransferEncoding = -1, []string{"chunked"}
+	res, err := h.client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := res.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return res.StatusCode
+}
+
+// sendMalformed sends one inference request whose chunked body is malformed, on a
+// connection it keeps open until the answer arrives.
+func sendMalformed(t *testing.T, h *harness, server *httptest.Server) {
+	t.Helper()
+	addr := strings.TrimPrefix(server.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	request := "POST /v1/messages HTTP/1.1\r\nHost: " + addr + "\r\nAuthorization: Bearer " + h.token +
+		"\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n{\"a\":\r\nzz\r\n"
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+}
+
+// TestGuardRefusalsPauseNothing checks that requests a provider's guard refuses, which
+// the gateway answers 502 without reaching the upstream, never count against the
+// account, however many arrive in a row; the next request reaches the upstream through
+// the same account.
+func TestGuardRefusalsPauseNothing(t *testing.T) {
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guarded := Claude
+	guarded.Guard = func(out *http.Request) error {
+		if out.Header.Get("X-Refuse") != "" {
+			return errors.New("refused by the guard")
+		}
+		return nil
+	}
+	h := newHarness(t, "sample-a", "sample-b")
+	rt := newRouter(h.store, h.accounts, target, guarded, accountTransport{})
+	rt.now = func() time.Time { return h.clock }
+	server := httptest.NewServer(rt)
+	t.Cleanup(server.Close)
+	for i := range upstreamFailureRun {
+		req, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/v1/messages", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Refuse", "1")
+		res, err := h.client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusBadGateway {
+			t.Fatalf("refused request: status=%d", res.StatusCode)
+		}
+		if rows := h.trafficRows(i + 1); len(rows) != i+1 || rows[i].result != "upstream_failed" {
+			t.Fatalf("rows=%+v", rows)
+		}
+	}
+	if paused := h.paused(); len(paused) != 0 {
+		t.Fatalf("paused=%v", paused)
+	}
+	if status := send(t, h, server, "POST", "/v1/messages", true); status != 200 || requests.Load() != 1 {
+		t.Fatalf("next request: status=%d upstream saw %d", status, requests.Load())
+	}
+	if alias, _, _ := h.binding(h.sessionID); alias != "sample-a" {
+		t.Fatalf("bound to %s", alias)
+	}
+}
+
+// TestFailureRunWindow checks that a run counts only failures within
+// upstreamFailureWindow: a failure that old drops out, so one more failure completes
+// no run, while the same failures a millisecond closer together complete one.
+func TestFailureRunWindow(t *testing.T) {
+	start := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	for _, arm := range []struct {
+		name  string
+		last  time.Duration
+		takes bool
+	}{
+		{"in_window", upstreamFailureWindow - time.Millisecond, true},
+		{"out_of_window", upstreamFailureWindow, false},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			var runs failureRuns
+			for range upstreamFailureRun - 1 {
+				if runs.fail("sample-a", start) {
+					t.Fatal("a run completed early")
+				}
+			}
+			if got := runs.fail("sample-a", start.Add(arm.last)); got != arm.takes {
+				t.Fatalf("failure after %v completed a run: %v", arm.last, got)
+			}
+		})
+	}
+}
+
+// TestLimitCutsPauseNothing checks that requests the gateway's own limits end while it
+// waits for a connection never count against the account, however many arrive in a
+// row; the next request goes through the same account.
+func TestLimitCutsPauseNothing(t *testing.T) {
+	h := newHarness(t)
+	exit := startFlakyExit(t)
+	exit.attach(t, h, "sample-a", "sk-ant-oat01-synthetic-token-a")
+	h.add("sample-b", "sk-ant-oat01-synthetic-token-b")
+	h.token, h.sessionID = h.issue()
+	target, err := url.Parse("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := h.router(target, accountTransport{})
+	rt.limits.Idle = 50 * time.Millisecond
+	server := httptest.NewServer(rt)
+	t.Cleanup(server.Close)
+	exit.mode.Store("wait")
+	for i := range upstreamFailureRun {
+		if got, _ := post(t, h, server, h.token, `{"messages":[]}`, "", ""); got != http.StatusBadGateway {
+			t.Fatalf("cut request: status=%d", got)
+		}
+		if rows := h.trafficRows(i + 1); len(rows) != i+1 || rows[i].result != "idle_timeout" {
+			t.Fatalf("rows=%+v", rows)
+		}
+	}
+	if paused := h.paused(); len(paused) != 0 {
+		t.Fatalf("paused=%v", paused)
+	}
+	exit.mode.Store("ok")
+	if got, body := post(t, h, server, h.token, `{"messages":[]}`, "", ""); got != 200 || body != `{"exit":"A"}` {
+		t.Fatalf("next request: status=%d body=%q", got, body)
 	}
 }
