@@ -235,8 +235,10 @@ func failureOf(ctx context.Context, err error, phases *upstreamPhases, proxied b
 		}
 	case errors.As(err, &timeout) && timeout.Timeout():
 		return "response_header_timeout"
+	// net.ErrClosed: the transport closed the connection when its read saw the peer
+	// drop it, and the request body's write then failed on it.
 	case errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &stream):
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.As(err, &stream):
 		return "reset"
 	}
 	return "other"

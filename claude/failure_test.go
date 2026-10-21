@@ -217,12 +217,13 @@ type failureSetup struct {
 // TestUpstreamFailureIsNamed makes each kind of upstream failure happen against a fake
 // upstream or a fake exit and checks the name the traffic row's failure column and the
 // one log line give it, and that the log holds no URL, header or credential. Control
-// arm: a request the upstream answers has no failure and logs nothing.
+// arms: a request the upstream answers, and one whose response breaks off after its
+// head, have no failure and log nothing.
 func TestUpstreamFailureIsNamed(t *testing.T) {
 	const token = "sk-ant-oat01-synthetic-failure-token"
 	for _, arm := range []struct {
 		name    string
-		failure string // empty: the control arm, which logs nothing
+		failure string // empty: a control arm, which logs nothing
 		result  string
 		status  int
 		setup   func(t *testing.T, h *harness) failureSetup // adds the account sample-a
@@ -230,6 +231,19 @@ func TestUpstreamFailureIsNamed(t *testing.T) {
 		{name: "ok", result: "ok", status: http.StatusOK, setup: func(t *testing.T, h *harness) failureSetup {
 			h.add("sample-a", token)
 			upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			t.Cleanup(upstream.Close)
+			return failureSetup{upstream: upstream.URL}
+		}},
+		// Once the response head has gone out, a broken body is not answered in the
+		// upstream's place: the row is incomplete and names no failure.
+		{name: "mid_response", result: "incomplete", status: http.StatusOK, setup: func(t *testing.T, h *harness) failureSetup {
+			h.add("sample-a", token)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: message_start\n\n")
+				_ = http.NewResponseController(w).Flush()
+				panic(http.ErrAbortHandler)
+			}))
 			t.Cleanup(upstream.Close)
 			return failureSetup{upstream: upstream.URL}
 		}},
@@ -397,7 +411,7 @@ func TestUpstreamFailureIsNamed(t *testing.T) {
 			}
 			if arm.failure == "" {
 				if lines := logged.lines("upstream unavailable"); len(lines) != 0 {
-					t.Fatalf("answered request logged %q", lines)
+					t.Fatalf("request with a response logged %q", lines)
 				}
 				return
 			}

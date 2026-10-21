@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -900,11 +901,11 @@ const headTimeout = 200 * time.Millisecond
 // do not get through an account's exit pause the account for upstreamFailurePause: no
 // connection to the exit can be made, or once the exit has the whole request, with a
 // declared length or chunked, it drops the connection or sends no response head in
-// time. The session's next request rebinds
-// to the other account, and once the pause ends the account is chosen again. Control
-// arms pause nothing, and the session's next request stays on the account: one failure
-// fewer; requests the client left while the gateway waited for a connection; a run
-// broken by an upstream response (a 101 the gateway rejects); a malformed client body.
+// time. The session's next request rebinds to the other account, and once the pause
+// ends the account is chosen again. Control arms pause nothing, and the session's next
+// request stays on the account: one failure fewer; requests the client left while the
+// gateway waited for a connection; a run broken by an upstream response (a 101 the
+// gateway rejects); a malformed client body.
 func TestUpstreamFailuresPauseAccount(t *testing.T) {
 	type step struct {
 		mode  string
@@ -1061,6 +1062,65 @@ func sendMalformed(t *testing.T, h *harness, server *httptest.Server) {
 		t.Fatal(err)
 	}
 	_ = res.Body.Close()
+}
+
+// TestUnreadBodyResetsPauseNothing checks the body condition on a failure after the
+// connection: an upstream that resets the connection once it has read the first bytes
+// of the body pauses the account after a run when those bytes are the whole body, and
+// pauses nothing when the body is 8 MB, of which the transport stops reading when its
+// write fails. The body is marked gzip, so the identity rewrite does not read it ahead
+// and it streams.
+func TestUnreadBodyResetsPauseNothing(t *testing.T) {
+	const head = `{"a":"bc"}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.ReadFull(r.Body, make([]byte, len(head))); err != nil {
+			return
+		}
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		_ = conn.(*net.TCPConn).SetLinger(0)
+		closeQuietly(conn)
+	}))
+	t.Cleanup(upstream.Close)
+	for _, arm := range []struct {
+		name   string
+		body   string
+		pauses bool
+	}{{"whole_body", head, true}, {"body_left_unread", head + strings.Repeat(" ", 8<<20), false}} {
+		t.Run(arm.name, func(t *testing.T) {
+			h := newHarness(t, "sample-a")
+			server := h.gateway(upstream.URL)
+			addr := strings.TrimPrefix(server.URL, "http://")
+			for i := range upstreamFailureRun {
+				conn, err := net.Dial("tcp", addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				request := fmt.Sprintf("POST /v1/messages HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", addr, h.token, len(arm.body), arm.body)
+				// The gateway answers before it has read the whole body, so the body is
+				// written while the response is read; its write may then fail.
+				go func() { _, _ = io.WriteString(conn, request) }()
+				res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = res.Body.Close()
+				_ = conn.Close()
+				if rows := h.trafficRows(i + 1); res.StatusCode != http.StatusBadGateway || len(rows) != i+1 || rows[i].failure != "reset" {
+					t.Fatalf("request %d: status=%d rows=%+v", i, res.StatusCode, rows)
+				}
+			}
+			paused := h.paused()
+			if arm.pauses != (paused["sample-a"] == upstreamFailedReason) || len(paused) > 1 {
+				t.Fatalf("paused=%v, want a pause: %v", paused, arm.pauses)
+			}
+		})
+	}
 }
 
 // TestGuardRefusalsPauseNothing checks that requests a provider's guard refuses, which
