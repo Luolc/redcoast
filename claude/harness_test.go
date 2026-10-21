@@ -150,9 +150,9 @@ func (h *harness) clientFor(token string) *http.Client {
 
 // trafficRow is one traffic row as read back from the file.
 type trafficRow struct {
-	sessionID, alias, kind, result, claudeSession, claudeAgent, route, request string
-	status                                                                     int
-	bytesUp, bytesDown                                                         int64
+	sessionID, alias, kind, result, claudeSession, claudeAgent, route, request, failure string
+	status                                                                              int
+	bytesUp, bytesDown                                                                  int64
 }
 
 // trafficRows reads the traffic table once it holds at least n rows or two seconds
@@ -174,7 +174,7 @@ func (h *harness) trafficRows(n int) []trafficRow {
 func (h *harness) traffic() []trafficRow {
 	h.t.Helper()
 	db := h.openFile()
-	rows, err := db.Query("SELECT COALESCE(session_id, ''), COALESCE(alias, ''), kind, result, COALESCE(claude_session_id, ''), COALESCE(claude_agent_id, ''), COALESCE(route, ''), COALESCE(request, ''), COALESCE(status, 0), bytes_up, bytes_down FROM traffic ORDER BY id")
+	rows, err := db.Query("SELECT COALESCE(session_id, ''), COALESCE(alias, ''), kind, result, COALESCE(claude_session_id, ''), COALESCE(claude_agent_id, ''), COALESCE(route, ''), COALESCE(request, ''), COALESCE(failure, ''), COALESCE(status, 0), bytes_up, bytes_down FROM traffic ORDER BY id")
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func (h *harness) traffic() []trafficRow {
 	var out []trafficRow
 	for rows.Next() {
 		var row trafficRow
-		if err := rows.Scan(&row.sessionID, &row.alias, &row.kind, &row.result, &row.claudeSession, &row.claudeAgent, &row.route, &row.request, &row.status, &row.bytesUp, &row.bytesDown); err != nil {
+		if err := rows.Scan(&row.sessionID, &row.alias, &row.kind, &row.result, &row.claudeSession, &row.claudeAgent, &row.route, &row.request, &row.failure, &row.status, &row.bytesUp, &row.bytesDown); err != nil {
 			h.t.Fatal(err)
 		}
 		out = append(out, row)

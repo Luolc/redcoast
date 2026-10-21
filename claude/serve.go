@@ -133,14 +133,17 @@ func afterGrace(ctx context.Context, grace time.Duration) (context.Context, cont
 	}
 }
 
+// errGatewayStopped is the cause Serve cancels the requests in progress with.
+var errGatewayStopped = errors.New("gateway stopped")
+
 // Serve runs an HTTP server on listener until ctx is canceled, then stops accepting.
 // Requests in progress are canceled at once, or after a Handoff when its Requests
 // ends; those still running five seconds later are cut off with Close.
 func Serve(ctx context.Context, listener net.Listener, handler http.Handler) error {
 	// Hijacked tunnels outlive the server, so requests is cut when ctx ends (or its
 	// handoff drain does), not when Serve returns.
-	requests, cut := context.WithCancel(context.WithoutCancel(ctx))
-	context.AfterFunc(ctx, func() { context.AfterFunc(requestsOf(ctx), cut) })
+	requests, cut := context.WithCancelCause(context.WithoutCancel(ctx))
+	context.AfterFunc(ctx, func() { context.AfterFunc(requestsOf(ctx), func() { cut(errGatewayStopped) }) })
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,

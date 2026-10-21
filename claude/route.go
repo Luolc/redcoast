@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -27,12 +28,13 @@ import (
 type requestState struct {
 	sessionID           string
 	alias               string
-	upstreamStatus      int         // the upstream's status when a response arrived; 0 otherwise
-	upstreamUnavailable bool        // set by respondUpstreamUnavailable
-	upstreamErr         error       // the error respondUpstreamUnavailable answered for
-	connected           atomic.Bool // set once the transport holds a connection for the request
-	cut                 error       // errIdleTimeout or errMaxDuration when the limits ended the request
-	meter               *usageMeter // reads the response's usage; nil when it is not read
+	upstreamStatus      int            // the upstream's status when a response arrived; 0 otherwise
+	upstreamUnavailable bool           // set by respondUpstreamUnavailable
+	failure             string         // why the upstream could not be reached, set with upstreamUnavailable
+	forwarded           time.Time      // when the request was handed to the reverse proxy
+	phases              upstreamPhases // how far the request got toward the upstream
+	cut                 error          // errIdleTimeout or errMaxDuration when the limits ended the request
+	meter               *usageMeter    // reads the response's usage; nil when it is not read
 }
 
 // stateKey is the context key of the request's *requestState.
@@ -190,7 +192,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// after the response started. Record first, then re-panic so net/http still
 		// aborts the client connection.
 		aborted := recover()
-		row.BytesUp, row.BytesDown, row.Status = up.count, down.count, state.upstreamStatus
+		row.BytesUp, row.BytesDown, row.Status, row.Failure = up.count, down.count, state.upstreamStatus, state.failure
 		row.Duration = time.Since(start)
 		if state.meter != nil {
 			row.Usage = state.meter.result()
@@ -273,8 +275,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(down, "gateway busy", http.StatusServiceUnavailable)
 		return
 	}
-	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { state.connected.Store(true) }})
-	serveWithLimits(rt.proxy, rt.limits, state, up, down, r.WithContext(withAccount(ctx, a, rt.now())))
+	state.forwarded = time.Now()
+	forwarded := httptrace.WithClientTrace(withAccount(ctx, a, rt.now()), state.phases.trace())
+	serveWithLimits(rt.proxy, rt.limits, state, up, down, r.WithContext(forwarded))
 }
 
 // screenResult is the result of a request the provider's screen answered with status.
@@ -403,26 +406,31 @@ const (
 // failures.
 const upstreamFailedReason = "upstream_failed"
 
-// accountFault reports whether a request counts against its account: the gateway
-// answered it for an unreachable upstream (result upstream_failed) with no upstream
-// response (so not for a rejected upgrade), and it was not ended by the client (client
-// is the client's request context), by a limit, or by the provider's guard. A failure
-// before the transport got a connection for the request, through the account's exit
-// to the upstream, counts as it is: getting a connection reads nothing of the request.
-// A failure after it (a dropped connection, a timeout awaiting the response head)
-// counts only when bodyRead reports the client's body read to its end without an
-// error, so that a body the client breaks never counts.
-func accountFault(client context.Context, state *requestState, bodyRead bool) bool {
-	return state.upstreamUnavailable && state.upstreamStatus == 0 && state.cut == nil &&
-		client.Err() == nil && !errors.Is(state.upstreamErr, errGuardRefused) &&
-		(!state.connected.Load() || bodyRead)
+// accountFault reports whether a request counts against its account, by the failure
+// respondUpstreamUnavailable named. A failure before the transport got a connection
+// for the request, through the account's exit to the upstream, counts as it is:
+// getting a connection reads nothing of the request. A reset or a timeout awaiting the
+// response head comes after it and counts only when bodyRead reports the client's body
+// read to its end without an error, so that a body the client breaks never counts.
+// Every other failure says nothing about the account: the client left or broke its
+// body, a limit, a stop or the provider's guard ended the request, the upstream
+// switched protocols, or the cause is unknown.
+func accountFault(state *requestState, bodyRead bool) bool {
+	switch failure := state.failure; {
+	case failure == "egress_dial", failure == "egress_unanswered", failure == "dial", failure == "tls",
+		strings.HasPrefix(failure, "egress_connect_"):
+		return true
+	case failure == "reset", failure == "response_header_timeout":
+		return bodyRead
+	}
+	return false
 }
 
 // upstreamFailed counts a request that accountFault holds against its account and,
 // when it completes a run, pauses the account for upstreamFailurePause. The log line
 // names only the alias.
 func (rt *router) upstreamFailed(client context.Context, state *requestState, bodyRead bool) {
-	if !accountFault(client, state, bodyRead) {
+	if !accountFault(state, bodyRead) {
 		return
 	}
 	alias, now := state.alias, rt.now()
@@ -575,9 +583,14 @@ func claudeID(header http.Header, name string) string {
 	return ""
 }
 
+// errClientBody wraps an error reading the client's request body, so that the failed
+// forward it causes is not taken for the upstream's failure.
+var errClientBody = errors.New("client request body")
+
 // countingReader counts the bytes read from a request body and reports them to the
 // request's watchdog once it has one. It also notes whether the body was read to its
-// end, its declared length or io.EOF, and whether a read failed.
+// end, its declared length or io.EOF, and whether a read failed; an error other than
+// io.EOF comes wrapped in errClientBody.
 type countingReader struct {
 	io.ReadCloser
 	count  int64
@@ -596,6 +609,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	}
 	if err != nil && err != io.EOF {
 		c.broken.Store(true)
+		err = fmt.Errorf("%w: %w", errClientBody, err)
 	}
 	if err == io.EOF || c.length >= 0 && c.count >= c.length {
 		c.whole.Store(true)
