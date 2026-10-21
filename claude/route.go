@@ -9,11 +9,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Luolc/redcoast/session"
@@ -26,6 +29,8 @@ type requestState struct {
 	alias               string
 	upstreamStatus      int         // the upstream's status when a response arrived; 0 otherwise
 	upstreamUnavailable bool        // set by respondUpstreamUnavailable
+	upstreamErr         error       // the error respondUpstreamUnavailable answered for
+	connected           atomic.Bool // set once the transport holds a connection for the request
 	cut                 error       // errIdleTimeout or errMaxDuration when the limits ended the request
 	meter               *usageMeter // reads the response's usage; nil when it is not read
 }
@@ -147,6 +152,7 @@ type router struct {
 	proxy    *httputil.ReverseProxy
 	limits   Limits
 	refusals refusalRows
+	failures failureRuns
 	renewals renewals
 	rounds   roundLock
 	now      func() time.Time // the clock Retry-After and pauses are measured on; tests inject the store's
@@ -176,10 +182,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	row := session.Traffic{At: start.UTC(), Kind: "inference", Host: rt.upstream.Hostname(), Port: rt.port,
 		ClaudeSession: claudeID(r.Header, "X-Claude-Code-Session-Id"), ClaudeAgent: claudeID(r.Header, "X-Claude-Code-Agent-Id")}
-	up := &countingReader{ReadCloser: r.Body}
-	if r.Body != nil && r.Body != http.NoBody {
-		r.Body = up
-	}
+	up := countBody(r)
 	down := &countingWriter{ResponseWriter: w}
 	line := requestLine(r)
 	defer func() {
@@ -195,6 +198,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if row.Result == "" {
 			row.Result = outcome(state, r.Context().Err() != nil || aborted != nil)
 		}
+		rt.upstreamFailed(r.Context(), state, up.complete())
 		if !refusedBeforeBinding[row.Result] || rt.refusals.allow(session.SourceOf(r.RemoteAddr), rt.now()) {
 			rt.record(row)
 		}
@@ -269,6 +273,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(down, "gateway busy", http.StatusServiceUnavailable)
 		return
 	}
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { state.connected.Store(true) }})
 	serveWithLimits(rt.proxy, rt.limits, state, up, down, r.WithContext(withAccount(ctx, a, rt.now())))
 }
 
@@ -316,9 +321,9 @@ func outcome(state *requestState, interrupted bool) string {
 }
 
 // inspectUpstream runs on every upstream response before it is written back. It keeps
-// the upstream's status for the traffic row, hands the response to recordUpstream and
-// puts a usage meter on its body. The response passes through unchanged and is not
-// replayed.
+// the upstream's status for the traffic row, hands the response to recordUpstream,
+// ends the account's run of upstream failures and puts a usage meter on its body. The
+// response passes through unchanged and is not replayed.
 func (rt *router) inspectUpstream(res *http.Response) error {
 	state, ok := res.Request.Context().Value(stateKey{}).(*requestState)
 	if ok {
@@ -329,6 +334,7 @@ func (rt *router) inspectUpstream(res *http.Response) error {
 		source = "429"
 	}
 	rt.recordUpstream(res, source)
+	rt.failures.answered(accountFrom(res.Request.Context()).alias)
 	if ok {
 		if state.meter = newUsageMeter(res, rt.provider.Usage); state.meter != nil {
 			res.Body = state.meter
@@ -380,6 +386,93 @@ func (rt *router) recordUpstream(res *http.Response, source string) []session.Re
 		}
 	}
 	return readings
+}
+
+// An account through which the upstream could not be reached upstreamFailureRun
+// times in a row within upstreamFailureWindow rests for upstreamFailurePause, so that
+// the sessions bound to it rebind instead of failing on it. The pause ends on its own:
+// an exit or an upstream route that recovers is chosen again without an operator, and
+// one that has not recovered fails another run and rests again.
+const (
+	upstreamFailureRun    = 5
+	upstreamFailureWindow = 2 * time.Minute
+	upstreamFailurePause  = 5 * time.Minute
+)
+
+// upstreamFailedReason is the pause reason of an account after a run of upstream
+// failures.
+const upstreamFailedReason = "upstream_failed"
+
+// accountFault reports whether a request counts against its account: the gateway
+// answered it for an unreachable upstream (result upstream_failed) with no upstream
+// response (so not for a rejected upgrade), and it was not ended by the client (client
+// is the client's request context), by a limit, or by the provider's guard. A failure
+// before the transport got a connection for the request, through the account's exit
+// to the upstream, counts as it is: getting a connection reads nothing of the request.
+// A failure after it (a dropped connection, a timeout awaiting the response head)
+// counts only when bodyRead reports the client's body read to its end without an
+// error, so that a body the client breaks never counts.
+func accountFault(client context.Context, state *requestState, bodyRead bool) bool {
+	return state.upstreamUnavailable && state.upstreamStatus == 0 && state.cut == nil &&
+		client.Err() == nil && !errors.Is(state.upstreamErr, errGuardRefused) &&
+		(!state.connected.Load() || bodyRead)
+}
+
+// upstreamFailed counts a request that accountFault holds against its account and,
+// when it completes a run, pauses the account for upstreamFailurePause. The log line
+// names only the alias.
+func (rt *router) upstreamFailed(client context.Context, state *requestState, bodyRead bool) {
+	if !accountFault(client, state, bodyRead) {
+		return
+	}
+	alias, now := state.alias, rt.now()
+	if !rt.failures.fail(alias, now) {
+		return
+	}
+	until := now.Add(upstreamFailurePause)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(client), captureWriteTimeout)
+	defer cancel()
+	if err := rt.store.Pause(ctx, alias, until, upstreamFailedReason); err != nil {
+		log.Printf("account pause failed alias=%s", alias)
+		return
+	}
+	log.Printf("account paused alias=%s reason=%s failures=%d until=%s", alias, upstreamFailedReason, upstreamFailureRun, until.UTC().Format(time.RFC3339))
+}
+
+// failureRuns holds, by alias, the times of the upstream failures since the account's
+// last upstream response.
+type failureRuns struct {
+	mu   sync.Mutex
+	runs map[string][]time.Time
+}
+
+// fail notes a failure of alias at now and reports whether it completes a run:
+// upstreamFailureRun failures within upstreamFailureWindow with no upstream response
+// in between. A completed run starts over.
+func (f *failureRuns) fail(alias string, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.runs == nil {
+		f.runs = map[string][]time.Time{}
+	}
+	run := f.runs[alias]
+	for len(run) > 0 && now.Sub(run[0]) >= upstreamFailureWindow {
+		run = run[1:]
+	}
+	run = append(run, now)
+	if len(run) >= upstreamFailureRun {
+		delete(f.runs, alias)
+		return true
+	}
+	f.runs[alias] = run
+	return false
+}
+
+// answered ends alias's run: the upstream answered a request sent through the account.
+func (f *failureRuns) answered(alias string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.runs, alias)
 }
 
 // maxErrorBody bounds the part of a 401 body read to classify it.
@@ -483,11 +576,15 @@ func claudeID(header http.Header, name string) string {
 }
 
 // countingReader counts the bytes read from a request body and reports them to the
-// request's watchdog once it has one.
+// request's watchdog once it has one. It also notes whether the body was read to its
+// end, its declared length or io.EOF, and whether a read failed.
 type countingReader struct {
 	io.ReadCloser
-	count int64
-	dog   *watchdog
+	count  int64
+	length int64 // the declared length; -1 when unknown
+	dog    *watchdog
+	whole  atomic.Bool
+	broken atomic.Bool
 }
 
 // Read reads from the body and adds to the count.
@@ -497,7 +594,30 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	if n > 0 && c.dog != nil {
 		c.dog.touch()
 	}
+	if err != nil && err != io.EOF {
+		c.broken.Store(true)
+	}
+	if err == io.EOF || c.length >= 0 && c.count >= c.length {
+		c.whole.Store(true)
+	}
 	return n, err
+}
+
+// countBody puts a countingReader on r's body and returns it. A request without a body
+// counts as read to its end.
+func countBody(r *http.Request) *countingReader {
+	up := &countingReader{ReadCloser: r.Body, length: r.ContentLength}
+	if r.Body == nil || r.Body == http.NoBody {
+		up.whole.Store(true)
+		return up
+	}
+	r.Body = up
+	return up
+}
+
+// complete reports whether the body was read to its end and no read failed.
+func (c *countingReader) complete() bool {
+	return c.whole.Load() && !c.broken.Load()
 }
 
 // countingWriter counts the body bytes written to the client and reports them to the
