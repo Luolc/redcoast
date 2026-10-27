@@ -14,10 +14,17 @@ func TestStatusShowsThePlanInEffect(t *testing.T) {
 	store, _ := open(t, c)
 	ctx := context.Background()
 	now := c.Now()
-	ended := PlanPeriod{Alias: "sample-b", Plan: "max-20x", From: time.UnixMilli(0), To: now.Add(-time.Hour), Source: "manual"}
-	bounded := PlanPeriod{Alias: "sample-d", Plan: "max-5x", From: now.Add(-24 * time.Hour), To: now.Add(24 * time.Hour), Source: "manual"}
-	for _, period := range []PlanPeriod{ended, bounded} {
-		if err := store.SetPlanSchedule(ctx, period); err != nil {
+	for _, period := range []struct {
+		PlanPeriod
+		end time.Time
+	}{
+		{PlanPeriod{Alias: "sample-b", Plan: "max-20x", From: time.UnixMilli(0), Source: "manual"}, now.Add(-time.Hour)},
+		{PlanPeriod{Alias: "sample-d", Plan: "max-5x", From: now.Add(-24 * time.Hour), Source: "manual"}, now.Add(24 * time.Hour)},
+	} {
+		if err := store.SetPlanSchedule(ctx, period.PlanPeriod); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.EndPlan(ctx, period.Alias, period.end); err != nil {
 			t.Fatal(err)
 		}
 	}

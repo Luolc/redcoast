@@ -88,9 +88,6 @@ func TestDashboardSnapshot(t *testing.T) {
 	if err := store.Pause(ctx, "sample-a", now.Add(time.Hour), "manual check"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetPlanSchedule(ctx, PlanPeriod{Alias: "sample-b", Plan: "pro", From: time.UnixMilli(0), To: now.Add(72 * time.Hour), Source: "manual"}); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.SetPlanSchedule(ctx, PlanPeriod{Alias: "sample-b", Plan: "max-5x", From: now.Add(72 * time.Hour), Source: "manual"}); err != nil {
 		t.Fatal(err)
 	}
