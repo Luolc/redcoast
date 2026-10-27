@@ -132,12 +132,17 @@ func writeFile(t *testing.T, path, data string, dirMode, mode os.FileMode) {
 	}
 }
 
+// fixtureLastRefresh is when the fixtures' logins were last renewed: an hour before the
+// tests start, far inside renewInterval, so that no sweep finds an opaque access token
+// due for a scheduled renewal while they run, whatever the date.
+var fixtureLastRefresh = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+
 // authJSON is a login in $CODEX_HOME's format with the synthetic token and account ID.
 func authJSON() string {
 	data, _ := json.Marshal(map[string]any{
 		"OPENAI_API_KEY": nil,
 		"tokens":         map[string]string{"id_token": "synthetic-id-token", "access_token": syntheticAccessToken, "refresh_token": "synthetic-refresh-token", "account_id": syntheticAccountID},
-		"last_refresh":   "2026-10-19T00:00:00Z",
+		"last_refresh":   fixtureLastRefresh,
 	})
 	return string(data)
 }
