@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -14,21 +15,36 @@ import (
 	"github.com/Luolc/redcoast/session"
 )
 
-// planCommand is a parsed `redcoast claude plan ...` invocation: one plan unit period or
-// one account plan period to write.
+// planCommand is a parsed `redcoast claude plan ...` invocation: a plan's quota unit
+// or an account's plan to set from a time on, or an account's plan to end at a time.
+// A zero time is the moment of the write.
 type planCommand struct {
 	sessionDB   string
 	adminSocket string // the running gateway's, to refresh the accounts whose quota unit went up
 	unit        *session.PlanUnit
 	period      *session.PlanPeriod
+	end         *planEnd
+}
+
+// planEnd is an account's plan to end at a time.
+type planEnd struct {
+	alias string
+	at    time.Time
 }
 
 // errPlanUsage is returned when the plan subcommand is misused.
 var errPlanUsage = errors.New(`usage:
-  redcoast claude|codex plan --session-db <path> [--admin-socket <path>] unit <plan> <quota-unit> <monthly-usd> <from> [<to>]
-  redcoast claude|codex plan --session-db <path> [--admin-socket <path>] schedule <alias> <plan> <from> [<to>] [--note <text>]
-times are RFC 3339 (for example 2026-10-29T00:00:00Z); an omitted <to> is open-ended;
-with --admin-socket, every account whose quota unit is higher now than before the
+  redcoast claude|codex plan --session-db <path> [--admin-socket <path>] unit <plan> <quota-unit> <monthly-usd> [<from>]
+  redcoast claude|codex plan --session-db <path> [--admin-socket <path>] schedule <alias> <plan> [<from>] [--note <text>]
+  redcoast claude|codex plan --session-db <path> end <alias> [<at>]
+times are RFC 3339 (for example 2026-10-29T00:00:00Z), past or future; an omitted time
+is now. unit and schedule set the plan's unit or the account's plan from that time on,
+open-ended, in one transaction: the period in effect then ends there, later periods
+are deleted, earlier ones stay. A write that would leave an account without a plan
+with a quota unit at a time it had one is refused, and so is a schedule onto a plan
+that lacks a quota unit at some time from <from> on; nothing is written then.
+end takes the account off its plan from <at> on: the only way to leave it without one.
+With --admin-socket, every account whose quota unit is higher now than before the
 change has its quota read again by the gateway (as with refresh)`)
 
 // parsePlanCommand parses the arguments after "plan".
@@ -49,6 +65,8 @@ func parsePlanCommand(arguments []string) (planCommand, error) {
 		cmd.unit, err = parseUnit(rest[1:])
 	case "schedule":
 		cmd.period, err = parseSchedule(rest[1:], *note)
+	case "end":
+		cmd.end, err = parseEnd(rest[1:])
 	default:
 		err = errPlanUsage
 	}
@@ -88,9 +106,9 @@ func isBoolFlag(flags *flag.FlagSet, argument string) bool {
 	return ok && b.IsBoolFlag()
 }
 
-// parseUnit parses "<plan> <quota-unit> <monthly-usd> <from> [<to>]".
+// parseUnit parses "<plan> <quota-unit> <monthly-usd> [<from>]".
 func parseUnit(rest []string) (*session.PlanUnit, error) {
-	if len(rest) < 4 || len(rest) > 5 {
+	if len(rest) < 3 || len(rest) > 4 {
 		return nil, errPlanUsage
 	}
 	unit := session.PlanUnit{Plan: rest[0]}
@@ -101,15 +119,18 @@ func parseUnit(rest []string) (*session.PlanUnit, error) {
 	if unit.MonthlyUSD, err = parsePositive(rest[2]); err != nil {
 		return nil, err
 	}
-	if unit.From, unit.To, err = parsePeriod(rest[3:]); err != nil {
+	if unit.From, err = optionalTime(rest[3:]); err != nil {
 		return nil, err
 	}
 	return &unit, nil
 }
 
-// parseSchedule parses "<alias> <plan> <from> [<to>]".
+// parseSchedule parses "<alias> <plan> [<from>]".
 func parseSchedule(rest []string, note string) (*session.PlanPeriod, error) {
-	if len(rest) < 3 || len(rest) > 4 {
+	if len(rest) == 4 {
+		return nil, fmt.Errorf("%w\nschedule takes no <to>: to take an account off its plan at a time, use end <alias> [<at>]", errPlanUsage)
+	}
+	if len(rest) < 2 || len(rest) > 3 {
 		return nil, errPlanUsage
 	}
 	period := session.PlanPeriod{Alias: rest[0], Plan: rest[1], Source: "manual", Note: note}
@@ -117,10 +138,25 @@ func parseSchedule(rest []string, note string) (*session.PlanPeriod, error) {
 		return nil, errors.New("invalid account alias")
 	}
 	var err error
-	if period.From, period.To, err = parsePeriod(rest[2:]); err != nil {
+	if period.From, err = optionalTime(rest[2:]); err != nil {
 		return nil, err
 	}
 	return &period, nil
+}
+
+// parseEnd parses "<alias> [<at>]".
+func parseEnd(rest []string) (*planEnd, error) {
+	if len(rest) < 1 || len(rest) > 2 {
+		return nil, errPlanUsage
+	}
+	if !accountAlias.MatchString(rest[0]) {
+		return nil, errors.New("invalid account alias")
+	}
+	at, err := optionalTime(rest[1:])
+	if err != nil {
+		return nil, err
+	}
+	return &planEnd{alias: rest[0], at: at}, nil
 }
 
 // parsePositive parses a positive decimal number.
@@ -132,28 +168,25 @@ func parsePositive(text string) (float64, error) {
 	return value, nil
 }
 
-// parsePeriod parses one or two RFC 3339 times; a missing second one is open-ended.
-func parsePeriod(texts []string) (from, to time.Time, err error) {
-	if from, err = time.Parse(time.RFC3339, texts[0]); err != nil {
-		return from, to, fmt.Errorf("%q is not an RFC 3339 time", texts[0])
+// optionalTime parses the one RFC 3339 time in texts, or returns the zero time when
+// texts is empty.
+func optionalTime(texts []string) (time.Time, error) {
+	if len(texts) == 0 {
+		return time.Time{}, nil
 	}
-	if len(texts) == 2 {
-		if to, err = time.Parse(time.RFC3339, texts[1]); err != nil {
-			return from, to, fmt.Errorf("%q is not an RFC 3339 time", texts[1])
-		}
-		if !to.After(from) {
-			return from, to, errors.New("the period's end must be after its start")
-		}
+	t, err := time.Parse(time.RFC3339, texts[0])
+	if err != nil {
+		return t, fmt.Errorf("%q is not an RFC 3339 time", texts[0])
 	}
-	return from.UTC(), to.UTC(), nil
+	return t.UTC(), nil
 }
 
-// runPlan writes the parsed period to the store. The accounts whose quota unit at this
+// runPlan writes the parsed change to the store. The accounts whose quota unit at this
 // moment is higher after the write than before it are refreshed over the admin socket
-// when one is given; an account the gateway does not refresh because of a pause other
-// than quota gets a line, not an error. Without the socket one line says how to refresh
-// them. A unit that stays
-// the same or goes down sends nothing, and neither does a period that starts later.
+// when one is given; an account the gateway does not refresh, because of a pause other
+// than quota (409) or because the gateway cannot refresh (501, Codex), gets a line, not
+// an error. Without the socket one line says how to refresh them. A unit that stays
+// the same or goes down sends nothing, and neither does a change that starts later.
 func runPlan(ctx context.Context, cmd planCommand, out io.Writer) error {
 	raised, err := writePlan(ctx, cmd)
 	if err != nil || len(raised) == 0 {
@@ -168,7 +201,7 @@ func runPlan(ctx context.Context, cmd planCommand, out io.Writer) error {
 		err := runAdmin(ctx, refreshCommand(cmd.adminSocket, alias), out)
 		var refused *refusal
 		switch {
-		case errors.As(err, &refused) && refused.status == http.StatusConflict:
+		case errors.As(err, &refused) && (refused.status == http.StatusConflict || refused.status == http.StatusNotImplemented):
 			if _, err := fmt.Fprintf(out, "%s not refreshed: %s\n", alias, refused.message); err != nil {
 				return err
 			}
@@ -179,8 +212,9 @@ func runPlan(ctx context.Context, cmd planCommand, out io.Writer) error {
 	return errors.Join(errs...)
 }
 
-// writePlan writes the period and returns, sorted, the accounts whose quota unit now is
-// higher after the write than before it.
+// writePlan makes the change and returns, sorted, the accounts whose quota unit now is
+// higher after it than before it. A change without a time takes effect at that same
+// now.
 func writePlan(ctx context.Context, cmd planCommand) ([]string, error) {
 	store, err := session.Open(ctx, cmd.sessionDB, session.Config{})
 	if err != nil {
@@ -192,10 +226,17 @@ func writePlan(ctx context.Context, cmd planCommand) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cmd.unit != nil {
-		err = store.SetPlanUnit(ctx, *cmd.unit)
-	} else {
-		err = store.SetPlanSchedule(ctx, *cmd.period)
+	switch {
+	case cmd.unit != nil:
+		unit := *cmd.unit
+		unit.From = cmp.Or(unit.From, now)
+		err = store.SetPlanUnit(ctx, unit)
+	case cmd.period != nil:
+		period := *cmd.period
+		period.From = cmp.Or(period.From, now)
+		err = store.SetPlanSchedule(ctx, period)
+	default:
+		err = store.EndPlan(ctx, cmd.end.alias, cmp.Or(cmd.end.at, now))
 	}
 	if err != nil {
 		return nil, err
