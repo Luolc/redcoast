@@ -46,7 +46,7 @@ func loginJSON(access, refresh, id, accountID string) string {
 		"auth_mode":      "chatgpt",
 		"OPENAI_API_KEY": nil,
 		"tokens":         map[string]string{"id_token": id, "access_token": access, "refresh_token": refresh, "account_id": accountID},
-		"last_refresh":   "2026-10-19T00:00:00Z",
+		"last_refresh":   fixtureLastRefresh,
 	})
 	return string(data)
 }
@@ -198,7 +198,7 @@ func TestImport(t *testing.T) {
 	}
 	doc, err := readAuth(filepath.Dir(path))
 	if err != nil || doc.Tokens.AccessToken != "synthetic-access-1" || doc.Tokens.RefreshToken != "synthetic-refresh-token-1" || doc.Tokens.AccountID != syntheticAccountID ||
-		string(doc.raw["auth_mode"]) != `"chatgpt"` || doc.LastRefresh == "2026-10-19T00:00:00Z" {
+		string(doc.raw["auth_mode"]) != `"chatgpt"` || doc.LastRefresh == fixtureLastRefresh {
 		t.Fatalf("stored login after the renewal: %v", err)
 	}
 	if reason := g.pauseReason(); reason != "" {
