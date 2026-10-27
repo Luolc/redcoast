@@ -150,6 +150,7 @@ func TestPlanRefreshesRaisedAccounts(t *testing.T) {
 		{[]string{"schedule", "sample-a", "pro", "--note", "downgrade"}, nil},
 		{[]string{"schedule", "sample-c", "pro", "2025-01-01T00:00:00Z"}, []string{"sample-c"}},
 		{[]string{"schedule", "sample-c", "max-20x", "2099-01-01T00:00:00Z"}, nil},
+		{[]string{"unit", "max-5x", "8", "160"}, []string{"sample-b"}},
 	} {
 		mu.Lock()
 		received = nil
@@ -183,7 +184,7 @@ func TestPlanRefreshesRaisedAccounts(t *testing.T) {
 	mu.Lock()
 	received = nil
 	mu.Unlock()
-	cmd, err = parsePlanCommand([]string{"--session-db", db, "unit", "max-5x", "7", "140", "1970-01-01T00:00:00Z"})
+	cmd, err = parsePlanCommand([]string{"--session-db", db, "unit", "max-5x", "9", "180"})
 	if err != nil {
 		t.Fatal(err)
 	}
