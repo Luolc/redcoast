@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   accountState,
   durationSeries,
+  expired,
   idleSessions,
   pausedForGood,
   windowTier,
@@ -208,12 +209,16 @@ describe("accountState", () => {
     expect(word({ ...base, quota: { "5h": q(0.95) } })).toBe("Over hard limit");
   });
 
-  it("reads windows as selection does: a passed reset unread, rejected as hard", () => {
+  it("reads windows as selection does: a passed reset as none, rejected as hard", () => {
     const passed = q(1, "2026-10-07T12:00:00Z");
-    expect(windowTier(passed, 0.9, 0.95, now)).toBe("unread");
+    expect(expired(passed, now)).toBe(true);
+    expect(expired(q(1, "2026-10-07T12:01:00Z"), now)).toBe(false);
     expect(word({ ...base, quota: { "5h": passed } })).toBe("Available");
+    expect(word({ ...base, quota: { "5h": passed, "7d": q(0.9) } })).toBe(
+      "Near limit",
+    );
     const rejected = q(0.6, "2026-10-07T14:00:00Z", "rejected");
-    expect(windowTier(rejected, 0.9, 0.95, now)).toBe("exhausted");
+    expect(windowTier(rejected, 0.9, 0.95)).toBe("exhausted");
     expect(word({ ...base, quota: { "5h": rejected } })).toBe(
       "Over hard limit",
     );

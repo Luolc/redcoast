@@ -2,7 +2,6 @@ import {
   CircleCheck,
   CircleSlash,
   CircleX,
-  Clock,
   Info,
   TriangleAlert,
   type LucideIcon,
@@ -15,7 +14,7 @@ import {
   formatUntil,
   LA,
 } from "../lib/format";
-import { pace, windowTier, type State, type Tone } from "../lib/stats";
+import { expired, pace, windowTier, type State, type Tone } from "../lib/stats";
 import type { Quota } from "../lib/types";
 
 const TONE_ICONS: Record<Tone, LucideIcon> = {
@@ -121,13 +120,11 @@ export function Share({ part, whole }: { part: number; whole: number }) {
   );
 }
 
-// A reading older than this is shown as stale: the account served nothing since.
-const STALE_MS = 30 * 60_000;
-
 /**
  * One quota window: a bar with the soft limit as a tick and an even pace
  * through the window as a hollow mark, then the reset and the pace. Its
- * ink follows how selection reads the window (windowTier).
+ * ink follows how selection reads the window (windowTier); a reading whose
+ * reset has passed shows as no reading, as selection takes it.
  */
 export function Meter({
   quota,
@@ -144,20 +141,18 @@ export function Meter({
   paused: boolean;
   now: Date;
 }) {
-  if (quota === undefined)
+  if (quota === undefined || expired(quota, now))
     return <span className="muted small">No reading</span>;
   const u = quota.utilization;
-  const tier = windowTier(quota, soft, hard, now);
+  const tier = windowTier(quota, soft, hard);
   const tone: Tone = paused
     ? "off"
     : {
-        unread: "off" as const,
         open: "ok" as const,
         soft: "warn" as const,
         exhausted: "bad" as const,
       }[tier];
   const p = paused ? null : pace(quota, window, now);
-  const stale = now.getTime() - Date.parse(quota.observed_at) > STALE_MS;
   return (
     <div className={`meter s-${tone}`}>
       <div className="track">
@@ -183,8 +178,6 @@ export function Meter({
         <span>
           {quota.reset_at === undefined ? (
             "reset unknown"
-          ) : Date.parse(quota.reset_at) <= now.getTime() ? (
-            <Time iso={quota.reset_at}>reset passed, counts as unread</Time>
           ) : (
             <Time iso={quota.reset_at}>
               resets {formatUntil(quota.reset_at, now)}
@@ -195,14 +188,6 @@ export function Meter({
           <span className="s-bad">rejected by the upstream</span>
         ) : null}
         {p === null ? null : <PaceText by={p.by} />}
-        {stale ? (
-          <span className="stale s-warn">
-            <Clock className="icon sm" aria-hidden="true" />
-            <span>
-              read <Ago iso={quota.observed_at} now={now} />
-            </span>
-          </span>
-        ) : null}
       </span>
     </div>
   );

@@ -53,7 +53,6 @@ th.n {
    line with an icon is as tall as one without. */
 .status,
 .pace,
-.stale,
 .with-icon,
 .btn,
 .tools .item {
@@ -61,8 +60,7 @@ th.n {
   align-items: baseline;
   gap: var(--t-space-1);
 }
-:is(.status, .pace, .stale, .with-icon, .btn, .tools .item, .client-name)
-  > .icon {
+:is(.status, .pace, .with-icon, .btn, .tools .item, .client-name) > .icon {
   position: relative;
   top: calc(var(--icon-size) / 2 - 0.35em);
   margin-top: calc(-1 * var(--icon-size));
@@ -790,9 +788,6 @@ tbody tr.link {
 }
 .meter .when .pace {
   margin-left: auto;
-}
-.meter .stale {
-  flex-basis: 100%;
 }
 
 .empty {

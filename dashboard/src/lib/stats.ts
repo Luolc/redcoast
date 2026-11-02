@@ -235,26 +235,26 @@ const PAUSES: Record<string, State> = {
 };
 
 /**
- * How selection reads one window (session/select.go): a reading whose reset
- * has passed counts as unread, and an upstream "rejected" as over the hard
- * limit, whatever the utilization.
+ * Whether a reading's reset has passed. Selection (session/select.go) then
+ * takes the window as having no reading, and so does the page.
  */
-export type Tier = "unread" | "open" | "soft" | "exhausted";
+export function expired(q: Quota, now: Date): boolean {
+  return q.reset_at !== undefined && Date.parse(q.reset_at) <= now.getTime();
+}
 
-export function windowTier(
-  q: Quota,
-  soft: number,
-  hard: number,
-  now: Date,
-): Tier {
-  if (q.reset_at !== undefined && Date.parse(q.reset_at) <= now.getTime())
-    return "unread";
+/**
+ * How selection reads one window that has not expired: an upstream
+ * "rejected" counts as over the hard limit, whatever the utilization.
+ */
+export type Tier = "open" | "soft" | "exhausted";
+
+export function windowTier(q: Quota, soft: number, hard: number): Tier {
   if (q.utilization >= hard || q.status === "rejected") return "exhausted";
   if (q.utilization >= soft) return "soft";
   return "open";
 }
 
-const TIER_ORDER: Tier[] = ["unread", "open", "soft", "exhausted"];
+const TIER_ORDER: Tier[] = ["open", "soft", "exhausted"];
 
 export function accountState(
   a: Account,
@@ -265,9 +265,9 @@ export function accountState(
   if (a.paused_until !== undefined)
     return PAUSES[a.pause_reason ?? ""] ?? { tone: "off", word: "Paused" };
   if (a.plan === null) return { tone: "bad", word: "No plan" };
-  const tiers = Object.values(a.quota).map((q) =>
-    windowTier(q, soft, hard, now),
-  );
+  const tiers = Object.values(a.quota)
+    .filter((q) => !expired(q, now))
+    .map((q) => windowTier(q, soft, hard));
   const worst =
     TIER_ORDER[Math.max(0, ...tiers.map((t) => TIER_ORDER.indexOf(t)))];
   if (worst === "exhausted") return { tone: "bad", word: "Over hard limit" };
