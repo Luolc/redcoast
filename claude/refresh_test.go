@@ -20,12 +20,14 @@ import (
 )
 
 // refreshExit is a fake exit in front of a fake upstream: it answers every request with
-// status and the 5h and 7d readings at utilization, and keeps what it received.
+// status and the readings of windows (5h and 7d when nil) at utilization, and keeps
+// what it received.
 type refreshExit struct {
 	server      *httptest.Server
 	mu          sync.Mutex
 	status      int
 	utilization string // empty sends no readings
+	windows     []string
 	received    []*http.Request
 	bodies      []string
 	shared      *overlap // when set, each request is held a moment and counted in it
@@ -59,8 +61,11 @@ func startRefreshExit(t *testing.T, clock time.Time) *refreshExit {
 		body, _ := io.ReadAll(r.Body)
 		e.mu.Lock()
 		e.received, e.bodies = append(e.received, r), append(e.bodies, string(body))
-		status, utilization, shared, onRequest := e.status, e.utilization, e.shared, e.onRequest
+		status, utilization, windows, shared, onRequest := e.status, e.utilization, e.windows, e.shared, e.onRequest
 		e.mu.Unlock()
+		if windows == nil {
+			windows = []string{session.Window5h, session.Window7d}
+		}
 		if onRequest != nil {
 			onRequest()
 		}
@@ -70,7 +75,7 @@ func startRefreshExit(t *testing.T, clock time.Time) *refreshExit {
 			time.Sleep(50 * time.Millisecond)
 		}
 		if utilization != "" {
-			for _, window := range []string{"5h", "7d"} {
+			for _, window := range windows {
 				w.Header().Set("Anthropic-Ratelimit-Unified-"+window+"-Utilization", utilization)
 				w.Header().Set("Anthropic-Ratelimit-Unified-"+window+"-Reset", strconv.FormatInt(clock.Add(time.Hour).Unix(), 10))
 			}
@@ -350,6 +355,58 @@ func TestQuotaRecheck(t *testing.T) {
 			t.Errorf("log names %s, paused for another reason:\n%s", alias, logged.String())
 		}
 	}
+
+	// sample-a's answers stopped carrying 5h: its last 5h reading is over soft and reset
+	// an hour ago. It is refreshed once, since no answer has come since that reset, and
+	// not again after that answer came with 7d only. sample-b's 7d reading is over soft
+	// and reset a minute ago; a 429 half an hour ago carried only 5h, but came before that
+	// reset, so sample-b is still refreshed.
+	t.Run("window no longer given", func(t *testing.T) {
+		h := newHarness(t)
+		start := h.clock
+		exits := map[string]*refreshExit{}
+		for _, alias := range []string{"sample-a", "sample-b"} {
+			exit := startRefreshExit(t, h.clock)
+			exit.answer(200, "0.1")
+			exitURL, err := url.Parse(exit.server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.addWithExit(alias, "sk-ant-oat01-synthetic-token-"+alias, exitURL)
+			exits[alias] = exit
+		}
+		exits["sample-a"].mu.Lock()
+		exits["sample-a"].windows = []string{session.Window7d}
+		exits["sample-a"].mu.Unlock()
+		record := func(at time.Time, alias string, readings ...session.Reading) {
+			h.clock = at
+			for i := range readings {
+				readings[i].Source = "response"
+			}
+			if err := h.store.RecordQuota(ctx, alias, readings); err != nil {
+				t.Fatal(err)
+			}
+		}
+		record(start.Add(-2*time.Hour), "sample-a",
+			session.Reading{Window: session.Window5h, Utilization: 0.97, ResetAt: start.Add(-time.Hour)},
+			session.Reading{Window: session.Window7d, Utilization: 0.3, ResetAt: start.Add(72 * time.Hour)})
+		record(start.Add(-2*time.Hour), "sample-b",
+			session.Reading{Window: session.Window5h, Utilization: 0.4, ResetAt: start.Add(time.Hour)},
+			session.Reading{Window: session.Window7d, Utilization: 0.95, ResetAt: start.Add(-time.Minute)})
+		record(start.Add(-30*time.Minute), "sample-b",
+			session.Reading{Window: session.Window5h, Utilization: 1, Status: "rejected", ResetAt: start.Add(time.Hour)})
+		rt := h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{})
+
+		for round, at := range []time.Time{start, start.Add(5 * time.Minute), start.Add(10 * time.Minute)} {
+			h.clock = at
+			rt.recheckQuota(ctx)
+			for alias, exit := range exits {
+				if exit.requests() != 1 {
+					t.Errorf("after round %d, exit of %s received %d requests, want 1", round+1, alias, exit.requests())
+				}
+			}
+		}
+	})
 }
 
 // TestQuotaRecheckStopsOnShutdown checks that a round of the quota recheck whose context
