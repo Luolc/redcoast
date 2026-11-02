@@ -326,7 +326,7 @@ export function Accounts({
       />
       <Section
         title="Accounts"
-        note={`Soft limit ${formatPercent(data.soft)}, hard limit ${formatPercent(data.hard)}. A reading older than 30 min is marked with the time it was read. Egress checks and requests in flight are the process's memory since it started.`}
+        note={`Soft limit ${formatPercent(data.soft)}, hard limit ${formatPercent(data.hard)}. A reading whose reset has passed counts as none, as in selection, and is not shown. Egress checks and requests in flight are the process's memory since it started.`}
         action={<QuotaRefreshButton data={data} now={now} reload={reload} />}
       >
         <AccountsTable data={data} now={now} />

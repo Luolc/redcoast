@@ -141,13 +141,13 @@ it("sets each icon on the baseline of the text beside it", () => {
   // The pair keeps the text's baseline; the icon is centred on the letters
   // and adds no height to the line.
   const pair =
-    /\n\.status,\n\.pace,\n\.stale,\n\.with-icon,\n\.btn,\n\.tools \.item \{[^}]*\}/.exec(
+    /\n\.status,\n\.pace,\n\.with-icon,\n\.btn,\n\.tools \.item \{[^}]*\}/.exec(
       appCss,
     )?.[0] ?? "";
   expect(pair).toContain("align-items: baseline;");
   const icon = rule(
     appCss,
-    ":is(.status, .pace, .stale, .with-icon, .btn, .tools .item, .client-name)\n  > .icon",
+    ":is(.status, .pace, .with-icon, .btn, .tools .item, .client-name) > .icon",
   );
   expect(icon).toContain("top: calc(var(--icon-size) / 2 - 0.35em);");
   expect(icon).toContain("margin-top: calc(-1 * var(--icon-size));");
@@ -161,17 +161,11 @@ it("sets each icon on the baseline of the text beside it", () => {
     ".seg a",
   ])
     expect(rule(appCss, sel)).toContain("align-items: baseline;");
-  // Every icon beside a word in the binding history and a stale reading
-  // is in such a pair.
+  // Every icon beside a word in the binding history is in such a pair.
   const html = renderToStaticMarkup(
     <Page data={data} now={now} route={{ view: "sessions" }} reload={noop} />,
   );
   expect(html).toMatch(/<span class="with-icon"><svg/);
-  expect(
-    renderToStaticMarkup(
-      <Page data={data} now={now} route={{ view: "accounts" }} reload={noop} />,
-    ),
-  ).toMatch(/<span class="stale s-warn"><svg[^]*?<\/svg><span>read /);
 });
 
 it("right-aligns Clients' share and steps the egress check alike", () => {
@@ -566,6 +560,43 @@ it("places the last reset and the first reading on the history's time axis", () 
   expect(html).toContain(
     `class="used" points="${x(Date.parse(first.at)).toFixed(1)},${y(first.utilization).toFixed(1)} `,
   );
+});
+
+it("leaves a window empty once its reading's reset has passed", () => {
+  const [ab] = data.accounts;
+  const q = ab?.quota["5h"];
+  if (ab === undefined || q === undefined)
+    throw new Error("the sample has no 5 h reading");
+  // The last 5 h reading, from three days before, near the hard limit.
+  const accounts = (reset_at: string) =>
+    page(
+      { view: "accounts" },
+      {
+        ...data,
+        accounts: [
+          {
+            ...ab,
+            quota: {
+              ...ab.quota,
+              "5h": {
+                ...q,
+                utilization: 0.97,
+                reset_at,
+                observed_at: "2026-10-04T12:20:00Z",
+              },
+            },
+          },
+        ],
+      },
+    );
+  const live = accounts("2026-10-07T12:21:00Z");
+  expect(live).toContain("97%");
+  expect(live).not.toContain("No reading");
+  const passed = accounts(now.toISOString());
+  expect(passed).toContain("No reading");
+  expect(passed).not.toContain("97%");
+  expect(passed).not.toContain("reset passed");
+  expect(passed).not.toMatch(/read \d/);
 });
 
 it("offers the quota refresh where the accounts' quota is, only when the gateway can refresh", () => {
