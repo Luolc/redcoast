@@ -291,9 +291,10 @@ func (e *Entrypoint) RunQuotaRechecks(ctx context.Context, interval time.Duratio
 }
 
 // recheckQuota refreshes, one after another, each account of the current set that has
-// a stored reading at or over the soft threshold, or rejected, whose reset has passed.
-// Selection prefers other accounts to such an account, or never chooses it, so no
-// response would read its quota again. A quota pause needs no rule of its own: it ends
+// a stored reading at or over the soft threshold, or rejected, whose reset has passed,
+// unless the upstream's latest answer since that reset came without its window (see
+// staleBehindThreshold). Selection prefers other accounts to such an account, or never
+// chooses it, so no response would read its quota again. A quota pause needs no rule of its own: it ends
 // by itself at the earliest reset its 429 reported, and a rejected window is rechecked
 // at its own reset. An account paused for another reason is skipped without a log
 // line, since refresh sends it nothing; a failed refresh is logged and tried again
@@ -336,9 +337,21 @@ func (rt *router) recheckQuota(ctx context.Context) {
 }
 
 // staleBehindThreshold reports whether a window of readings is at or over soft, or
-// rejected, and has a reset that is not after now.
+// rejected, and has a reset that is not after now, leaving out a reading older than the
+// newest one when the newest was observed at or after that reset. RecordQuota stores
+// all windows of one answer with one observed_at, so such a reading is of a window the
+// latest answer since its reset did not carry, which a refresh would not read either.
 func staleBehindThreshold(readings map[string]session.Quota, soft float64, now time.Time) bool {
+	var newest time.Time
 	for _, q := range readings {
+		if q.ObservedAt.After(newest) {
+			newest = q.ObservedAt
+		}
+	}
+	for _, q := range readings {
+		if newest.After(q.ObservedAt) && !newest.Before(q.ResetAt) {
+			continue
+		}
 		if (q.Utilization >= soft || q.Status == "rejected") && !q.ResetAt.IsZero() && !q.ResetAt.After(now) {
 			return true
 		}
