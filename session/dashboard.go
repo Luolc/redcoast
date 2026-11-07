@@ -105,6 +105,8 @@ type AccountView struct {
 	AccountStatus
 	NextPlan     *PlanStatus             `json:"next_plan"`     // the first period starting after now; null when none
 	QuotaHistory map[string][]QuotaPoint `json:"quota_history"` // by window, oldest first
+	Burn         Burn                    `json:"burn"`
+	Totals       Totals                  `json:"totals"`
 }
 
 // MachineView is a registered client machine with its live sessions and the latest
@@ -651,6 +653,13 @@ func (r *Reader) account(ctx context.Context, a AccountStatus, now int64) (Accou
 	view := AccountView{AccountStatus: a}
 	var err error
 	if view.QuotaHistory, err = r.store.QuotaHistory(ctx, a.Alias); err != nil {
+		return AccountView{}, err
+	}
+	at := fromMillis(now)
+	if view.Burn, err = r.burn(ctx, a.Alias, view.QuotaHistory, a.Quota, at); err != nil {
+		return AccountView{}, err
+	}
+	if view.Totals, err = r.totals(ctx, a.Alias, at); err != nil {
 		return AccountView{}, err
 	}
 	var next PlanStatus

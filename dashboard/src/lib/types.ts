@@ -78,6 +78,46 @@ interface QuotaPoint {
   utilization: number;
 }
 
+// An account's estimate for one quota window from its readings since the last
+// reset. The numbers are null, with a reason, when the readings do not allow one.
+interface WindowBurn {
+  rate_per_hour: number | null; // utilization per hour; 1 is the whole quota
+  exhausts_at: string | null;
+  resets_at: string | null;
+  before_reset: boolean | null;
+  points: number;
+  span_minutes: number;
+  reason?: string | undefined;
+}
+
+// A client machine's share of an account's rate in one window, an estimate.
+interface MachineBurn {
+  window: string;
+  machine: string;
+  share: number;
+  rate_per_hour: number;
+  estimate: boolean;
+}
+
+interface Burn {
+  "5h": WindowBurn;
+  "7d": WindowBurn;
+  by_machine: MachineBurn[];
+}
+
+interface WindowTotals {
+  requests: number;
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_creation: number;
+}
+
+interface Totals {
+  "24h": WindowTotals;
+  "7d": WindowTotals;
+}
+
 interface Plan {
   name: string;
   effective_from: string;
@@ -98,6 +138,9 @@ export interface Account {
   // window without readings has no key. Absent from a gateway older than this
   // page.
   quota_history?: Record<string, QuotaPoint[]> | undefined;
+  // Absent from a gateway older than this page.
+  burn?: Burn | undefined;
+  totals?: Totals | undefined;
   plan: Plan | null;
   next_plan: Plan | null;
   in_flight: number;
@@ -272,6 +315,24 @@ const isPlan: Guard<Plan> = object<Plan>({
   effective_to: nullable(isString),
 });
 
+const isWindowBurn = object<WindowBurn>({
+  rate_per_hour: nullable(isNumber),
+  exhausts_at: nullable(isString),
+  resets_at: nullable(isString),
+  before_reset: nullable(isBoolean),
+  points: isNumber,
+  span_minutes: isNumber,
+  reason: optional(isString),
+});
+
+const isWindowTotals = object<WindowTotals>({
+  requests: isNumber,
+  input: isNumber,
+  output: isNumber,
+  cache_read: isNumber,
+  cache_creation: isNumber,
+});
+
 const latency = {
   requests: isNumber,
   duration_p50_ms: isNumber,
@@ -356,6 +417,24 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
         recordOf(
           arrayOf(object<QuotaPoint>({ at: isString, utilization: isNumber })),
         ),
+      ),
+      burn: optional(
+        object<Burn>({
+          "5h": isWindowBurn,
+          "7d": isWindowBurn,
+          by_machine: arrayOf(
+            object<MachineBurn>({
+              window: isString,
+              machine: isString,
+              share: isNumber,
+              rate_per_hour: isNumber,
+              estimate: isBoolean,
+            }),
+          ),
+        }),
+      ),
+      totals: optional(
+        object<Totals>({ "24h": isWindowTotals, "7d": isWindowTotals }),
       ),
       plan: nullable(isPlan),
       next_plan: nullable(isPlan),
