@@ -121,7 +121,7 @@ func accountAgentCommand(a *agentFlags, socket string, rest []string) (adminComm
 		cmd.body = a.createBody(alias)
 		cmd.timeout = 30 * time.Second
 	case "set":
-		if !a.only("rev", "receiver-email", "proxy-provider", "proxy-type", "source-thread", "source-ts") || !a.has("rev", "source-thread", "source-ts") || !a.setsAField() {
+		if !a.only("rev", "receiver-email", "device-id", "proxy-provider", "proxy-type", "source-thread", "source-ts") || !a.has("rev", "source-thread", "source-ts") || !a.setsAField() {
 			return adminCommand{}, errAdminUsage
 		}
 		cmd.method, cmd.path, cmd.body = http.MethodPatch, "/accounts/"+alias, a.setBody()
@@ -158,7 +158,7 @@ func (a *agentFlags) createBody(alias string) map[string]any {
 
 // setsAField reports whether a flag of `account set` that names a field is given.
 func (a *agentFlags) setsAField() bool {
-	return a.given["receiver-email"] || a.given["proxy-provider"] || a.given["proxy-type"]
+	return a.given["receiver-email"] || a.given["device-id"] || a.given["proxy-provider"] || a.given["proxy-type"]
 }
 
 // setBody is the body of `account set`: the fields given, an empty value clearing one.
@@ -166,6 +166,9 @@ func (a *agentFlags) setBody() map[string]any {
 	body := a.revBody()
 	if a.given["receiver-email"] {
 		body["receiver_email"] = a.receiverEmail
+	}
+	if a.given["device-id"] {
+		body["device_id"] = a.deviceID
 	}
 	proxy := map[string]any{}
 	if a.given["proxy-provider"] {

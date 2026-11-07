@@ -83,11 +83,30 @@ type adminProxyBody struct {
 type adminSetBody struct {
 	Rev           *int64  `json:"rev"`
 	ReceiverEmail *string `json:"receiver_email"`
-	Proxy         *struct {
+	// DeviceID is accepted for a testing account only.
+	DeviceID *string `json:"device_id"`
+	Proxy    *struct {
 		Provider *string `json:"provider"`
 		Type     *string `json:"type"`
 	} `json:"proxy"`
 	Source *sourceBody `json:"source"`
+}
+
+// checkDeviceIDSettable refuses a device ID that is not 64 lower-case hex digits and one
+// for an account whose status is not testing: the identity of a served or retired account
+// does not change under it. The duplicate check is the edit's own.
+func (w *AccountWriter) checkDeviceIDSettable(ctx context.Context, alias, deviceID string) error {
+	if !deviceIDShape.MatchString(deviceID) {
+		return fieldProblem("device_id", "not 64 lower-case hex digits")
+	}
+	row, err := w.cfg.Store.Account(ctx, alias)
+	if err != nil {
+		return storeError(err)
+	}
+	if row.Status != "testing" {
+		return writeError{status: http.StatusConflict, message: "the device ID is set only on a testing account", check: "status", code: codeNotReady}
+	}
+	return nil
 }
 
 // adminRevBody is the body of verify, activate and setup request of the management socket.
@@ -119,7 +138,12 @@ func (a *Admin) handleAccountWrites(mux *http.ServeMux) {
 		return w.create(r, "", body.toCreate(), entry)
 	}, func(b *adminCreateBody) *sourceBody { return b.Source }, false))
 	mux.HandleFunc("PATCH /accounts/{alias}", adminWrite(a, actionUpdate, func(w *AccountWriter, r *http.Request, alias string, body *adminSetBody, entry session.AuditEntry) (any, error) {
-		patch := &patchBody{Rev: body.Rev, ReceiverEmail: body.ReceiverEmail}
+		patch := &patchBody{Rev: body.Rev, ReceiverEmail: body.ReceiverEmail, DeviceID: body.DeviceID}
+		if body.DeviceID != nil {
+			if err := w.checkDeviceIDSettable(r.Context(), alias, *body.DeviceID); err != nil {
+				return nil, err
+			}
+		}
 		if body.Proxy != nil {
 			patch.Proxy = &proxyBody{Provider: body.Proxy.Provider, Type: body.Proxy.Type}
 		}

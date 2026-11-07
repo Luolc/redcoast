@@ -829,3 +829,44 @@ func TestAgentSetBackfillsThreeFields(t *testing.T) {
 		t.Fatalf("a refused set wrote: %+v", row)
 	}
 }
+
+// TestAgentSetDeviceID: the device ID is set through the socket on a testing account
+// only, as 64 lower-case hex digits, and not to another account's; each refusal writes
+// nothing.
+func TestAgentSetDeviceID(t *testing.T) {
+	h := newSetupHarness(t, true)
+	if status, _, body := h.agent(t, "POST", "/accounts", h.agentCreateBody("sample-new")); status != 200 {
+		t.Fatalf("create: %d %s", status, body)
+	}
+	if status, _, body := h.serve(t, request("POST", "/accounts", h.bodyFor("sample-two"))); status != 200 {
+		t.Fatalf("create the second: %d %s", status, body)
+	}
+	set := func(alias string, deviceID any) (int, map[string]any, string) {
+		return h.agent(t, "PATCH", "/accounts/"+alias, map[string]any{"rev": h.revOf(t, alias), "device_id": deviceID, "source": slackSource()})
+	}
+	other := strings.Repeat("c", 64)
+	status, answer, body := set("sample-new", other)
+	if account, _ := answer["account"].(map[string]any); status != 200 || account["device_id"] != other {
+		t.Fatalf("set on a testing account: %d %s", status, body)
+	}
+	for _, test := range []struct {
+		name, alias string
+		deviceID    any
+		status      int
+		key, want   string
+	}{
+		{"active", "sample-a", other, 409, "check", "status"},
+		{"duplicate", "sample-two", other, 409, "field", "device_id"},
+		{"not_hex", "sample-new", "ABC", 400, "field", "device_id"},
+		{"empty", "sample-new", "", 400, "field", "device_id"},
+		{"upper_case", "sample-new", strings.Repeat("C", 64), 400, "field", "device_id"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := h.state(t)
+			status, answer, body := set(test.alias, test.deviceID)
+			if status != test.status || answer[test.key] != test.want || h.state(t) != before {
+				t.Fatalf("%d %s", status, body)
+			}
+		})
+	}
+}
