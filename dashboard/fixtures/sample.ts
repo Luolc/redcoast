@@ -78,6 +78,50 @@ export function sampleDashboard(now: Date): Dashboard {
           "5h": quotaHistory(now, 5 * 60, 15, 0.42, 0.02),
           "7d": quotaHistory(now, 7 * 24 * 60, 60, 0.92, 0.005),
         },
+        burn: {
+          "5h": {
+            rate_per_hour: 0.08,
+            exhausts_at: at(7 * 60),
+            resets_at: at(130),
+            before_reset: false,
+            points: 20,
+            span_minutes: 285,
+          },
+          "7d": {
+            rate_per_hour: null,
+            exhausts_at: null,
+            resets_at: at(3 * 24 * 60),
+            before_reset: null,
+            points: 2,
+            span_minutes: 60,
+            reason: "too_few_points",
+          },
+          by_machine: [
+            {
+              window: "5h",
+              machine: "sample-machine-a",
+              share: 0.75,
+              rate_per_hour: 0.06,
+              estimate: true,
+            },
+          ],
+        },
+        totals: {
+          "24h": {
+            requests: 120,
+            input: 5000,
+            output: 9000,
+            cache_read: 400000,
+            cache_creation: 20000,
+          },
+          "7d": {
+            requests: 700,
+            input: 30000,
+            output: 60000,
+            cache_read: 2400000,
+            cache_creation: 120000,
+          },
+        },
         plan: {
           name: "max-20x",
           effective_from: "1970-01-01T00:00:00Z",

@@ -175,3 +175,31 @@ it("accepts a gateway with or without the top-level hourly and results", () => {
   for (const sample of [newer, older])
     expect(parseDashboard(JSON.stringify(sample)).at).toBe(newer.at);
 });
+
+it("accepts burn and totals, or none, and refuses drift", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const [first] = sample.accounts;
+  expect(first?.burn?.["7d"].reason).toBe("too_few_points");
+  const older = {
+    ...sample,
+    accounts: sample.accounts.map((a) => ({
+      ...a,
+      burn: undefined,
+      totals: undefined,
+    })),
+  };
+  const parsed = parseDashboard(JSON.stringify(older));
+  expect(parsed.accounts[0]?.burn).toBeUndefined();
+  for (const drifted of [
+    { burn: { ...first?.burn, "5h": { rate_per_hour: "fast" } } },
+    { totals: { "24h": { requests: 1 } } },
+  ])
+    expect(() =>
+      parseDashboard(
+        JSON.stringify({
+          ...sample,
+          accounts: sample.accounts.map((a) => ({ ...a, ...drifted })),
+        }),
+      ),
+    ).toThrow();
+});
