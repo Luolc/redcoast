@@ -33,6 +33,7 @@ import {
   TextField,
   WriteNotice,
 } from "./AdminUi";
+import { SetupPanel } from "./Setup";
 import { Empty, PageHead, Section, Status } from "./ui";
 
 const NO_OPTIONS: ProxyRefOption[] = [];
@@ -284,10 +285,12 @@ function Saved({ m }: { m: Managed }) {
 }
 
 function Verify({
+  data,
   m,
   now,
   reload,
 }: {
+  data: Dashboard;
   m: Managed;
   now: Date;
   reload: () => void;
@@ -317,15 +320,16 @@ function Verify({
     <>
       <Section
         title="3 · Log in and set up the token"
-        note="The login is done outside this page."
+        note="A login machine does the login; this page only asks for it."
       >
         <div className="panel">
           <RefLine label="OAuth token reference" reference={c.token_ref} />
           <p className="small muted">
-            Put the account&apos;s token in the secret manager at this
-            reference, then press Verify.
+            Start the setup below, or put the account&apos;s token in the secret
+            manager at this reference by hand; then press Verify.
           </p>
         </div>
+        <SetupPanel data={data} m={m} now={now} reload={reload} />
       </Section>
       <Section
         title="Verify"
@@ -575,7 +579,9 @@ export function AddAccount({
       {m === undefined ? null : (
         <>
           {step === 2 ? <Saved m={m} /> : null}
-          {step === 3 ? <Verify m={m} now={now} reload={reload} /> : null}
+          {step === 3 ? (
+            <Verify data={data} m={m} now={now} reload={reload} />
+          ) : null}
           {step === 4 ? <Details m={m} reload={reload} /> : null}
           {step === 5 ? <Activate m={m} now={now} reload={reload} /> : null}
         </>

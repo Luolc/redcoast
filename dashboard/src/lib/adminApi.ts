@@ -6,7 +6,11 @@ import { isString, object, optional } from "./guard";
 const ACTION_HEADER = "X-Redcoast-Action";
 
 export type Action =
-  "account-create" | "account-update" | "account-verify" | "account-activate";
+  | "account-create"
+  | "account-update"
+  | "account-verify"
+  | "account-activate"
+  | "account-setup";
 
 /** Why the gateway refused a write, or that it could not be reached. */
 export interface Refusal {

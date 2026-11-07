@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { requestSetup } from "./admin";
 import { accountPath, isConflict, writeAccount } from "./adminApi";
 
 function answer(status: number, body: string): typeof fetch {
@@ -96,4 +97,38 @@ it("reports an answer that is not the gateway's, and no answer", async () => {
     Promise.reject(new Error("offline")),
   );
   expect(!down.ok && down.refusal.status).toBe(0);
+});
+
+it("asks for a setup with the setup action, the action and the revision", async () => {
+  let seen: { url: string; init: RequestInit } | undefined;
+  const post: typeof fetch = (url, init) => {
+    seen = { url: typeof url === "string" ? url : "", init: init ?? {} };
+    return Promise.resolve(new Response("{}", { status: 202 }));
+  };
+  const out = await requestSetup("sample-ab", 4, post);
+  expect(out.ok).toBe(true);
+  expect(seen?.url).toBe("./accounts/sample-ab/setup");
+  expect(seen?.init.method).toBe("POST");
+  expect(seen?.init.headers).toEqual({
+    "X-Redcoast-Action": "account-setup",
+    "Content-Type": "application/json",
+  });
+  expect(seen?.init.body).toBe('{"action":"login_and_token","rev":4}');
+});
+
+it("reads the code of a refused setup", async () => {
+  const out = await requestSetup(
+    "sample-ab",
+    4,
+    answer(409, '{"error":"direct_account"}'),
+  );
+  expect(out).toEqual({
+    ok: false,
+    refusal: {
+      status: 409,
+      text: "direct_account",
+      field: undefined,
+      check: undefined,
+    },
+  });
 });

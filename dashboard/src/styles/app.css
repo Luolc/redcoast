@@ -1525,3 +1525,9 @@ a.btn {
 .est > div:last-child {
   display: block;
 }
+
+td.source {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 12rem;
+}

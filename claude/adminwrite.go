@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -221,7 +222,12 @@ func historyOf(row session.AuditRow) historyRow {
 // serveAccountShow gives an account's settings, its setup state and its audit rows. It
 // reads only; it does not depend on the write switch.
 func (a *Admin) serveAccountShow(rw http.ResponseWriter, r *http.Request) {
-	w := a.Writer
+	serveRecord(rw, r, a.Writer)
+}
+
+// serveRecord answers a read of an account's record from w: the answer of `account show`
+// and of GET /accounts/{alias}/record, which share this function.
+func serveRecord(rw http.ResponseWriter, r *http.Request, w *AccountWriter) {
 	if w == nil {
 		adminRefuse(rw, writeError{status: http.StatusNotImplemented, code: codeWriteUnavailable})
 		return
@@ -231,25 +237,31 @@ func (a *Admin) serveAccountShow(rw http.ResponseWriter, r *http.Request) {
 		adminRefuse(rw, writeError{status: http.StatusBadRequest, field: "alias", code: codeFieldInvalid})
 		return
 	}
-	ctx := r.Context()
-	row, err := w.cfg.Store.Account(ctx, alias)
+	out, err := w.record(r.Context(), alias)
 	if err != nil {
-		adminRefuse(rw, storeError(err))
+		adminRefuse(rw, err)
 		return
 	}
-	out := accountShow{Account: configOf(row), Served: a.accounts.set.Load().lookup(alias) != nil}
+	writeJSON(rw, http.StatusOK, out)
+}
+
+// record reads an account's settings, setup state, audit rows and creation record.
+func (w *AccountWriter) record(ctx context.Context, alias string) (*accountShow, error) {
+	row, err := w.cfg.Store.Account(ctx, alias)
+	if err != nil {
+		return nil, storeError(err)
+	}
+	out := &accountShow{Account: configOf(row), Served: w.cfg.Accounts.set.Load().lookup(alias) != nil}
 	if setup := w.Setup(); setup != nil {
 		rows, err := w.cfg.Store.SetupRows(ctx)
 		if err != nil {
-			adminRefuse(rw, errStoreUnavailable)
-			return
+			return nil, errStoreUnavailable
 		}
 		out.Setup = setup.block(alias, rows[alias])
 	}
 	history, truncated, err := w.cfg.Store.AccountAuditLast(ctx, alias, maxHistory)
 	if err != nil {
-		adminRefuse(rw, errStoreUnavailable)
-		return
+		return nil, errStoreUnavailable
 	}
 	out.History, out.HistoryTruncated = make([]historyRow, 0, len(history)), truncated
 	for _, h := range history {
@@ -257,12 +269,11 @@ func (a *Admin) serveAccountShow(rw http.ResponseWriter, r *http.Request) {
 	}
 	created, err := w.cfg.Store.AccountCreated(ctx, alias)
 	if err != nil {
-		adminRefuse(rw, errStoreUnavailable)
-		return
+		return nil, errStoreUnavailable
 	}
 	if created != nil {
 		h := historyOf(*created)
 		out.Created = &h
 	}
-	writeJSON(rw, http.StatusOK, out)
+	return out, nil
 }

@@ -54,6 +54,61 @@ interface Gateway {
   tunnel_limit: number;
   // null at a gateway that cannot refresh quota (Codex); absent from an older one.
   quota_refresh?: QuotaRefreshState | null | undefined;
+  // null while setup is off (the gateway has no setup, or it is switched off);
+  // absent from an older gateway.
+  setup?: GatewaySetup | null | undefined;
+}
+
+// The gateway's setup as a whole; present only while setup is on.
+interface GatewaySetup {
+  enabled: boolean;
+  queued: number; // requested tasks no login machine has taken yet
+  last_asked_at: string | null; // when a login machine last asked for a task
+}
+
+// What the gateway read of the token item's expiry: read (expires_at is that
+// day's start), no_field (the item has none), unreadable (the secret manager
+// did not answer) or unavailable (not read yet).
+interface TokenExpiry {
+  state: string;
+  expires_at: string | null;
+  read_at: string | null;
+}
+
+// Where a task or a change came from: the dashboard (no thread), or a Slack
+// message with its thread key and ts.
+export interface TaskSource {
+  kind: string;
+  thread?: string | undefined;
+  ts?: string | undefined;
+}
+
+export const isTaskSource = object<TaskSource>({
+  kind: isString,
+  thread: optional(isString),
+  ts: optional(isString),
+});
+
+// One account's latest setup task. Every field is a state, an ID, a fixed
+// code or a time; the gateway never sends a token.
+export interface SetupBlock {
+  state: string; // not_started, requested, running, needs_human, done or failed
+  request_id: string | null;
+  run_id: string | null;
+  step: string | null;
+  reason: string | null;
+  updated_at: string | null;
+  token_set_at: string | null; // null when the gateway did not write the token
+  action: string | null; // login_and_token or token_only
+  identity: string | null;
+  // When a login program said it would stop waiting for a person at a CAPTCHA
+  // page; absent from a gateway older than this page.
+  wait_until?: string | null | undefined;
+  // Where the task was requested from: a record only, never an approval.
+  source?: TaskSource | undefined;
+  // The expiry the token's secret manager item carries; absent from a gateway
+  // older than this page.
+  token_expiry?: TokenExpiry | undefined;
 }
 
 // The dashboard's refresh of every account's quota.
@@ -158,6 +213,8 @@ export interface AccountConfig {
   rev: number; // the version an edit is made against
   created_at: string;
   updated_at: string;
+  // Absent while setup is off.
+  setup?: SetupBlock | undefined;
 }
 
 // A proxy login that accounts already use; a write can only choose among these.
@@ -390,6 +447,27 @@ const isWindowTotals = object<WindowTotals>({
   cache_creation: isNumber,
 });
 
+const isTokenExpiry = object<TokenExpiry>({
+  state: isString,
+  expires_at: nullable(isString),
+  read_at: nullable(isString),
+});
+
+const isSetupBlock = object<SetupBlock>({
+  state: isString,
+  request_id: nullable(isString),
+  run_id: nullable(isString),
+  step: nullable(isString),
+  reason: nullable(isString),
+  updated_at: nullable(isString),
+  token_set_at: nullable(isString),
+  action: nullable(isString),
+  identity: nullable(isString),
+  wait_until: optional(nullable(isString)),
+  source: optional(isTaskSource),
+  token_expiry: optional(isTokenExpiry),
+});
+
 const isAccountConfig: Guard<AccountConfig> = object<AccountConfig>({
   alias: isString,
   email: isString,
@@ -415,6 +493,7 @@ const isAccountConfig: Guard<AccountConfig> = object<AccountConfig>({
   rev: isNumber,
   created_at: isString,
   updated_at: isString,
+  setup: optional(isSetupBlock),
 });
 
 const latency = {
@@ -473,6 +552,15 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
           last_started: optional(isString),
           last_finished: optional(isString),
           cooldown_until: optional(isString),
+        }),
+      ),
+    ),
+    setup: optional(
+      nullable(
+        object<GatewaySetup>({
+          enabled: isBoolean,
+          queued: isNumber,
+          last_asked_at: nullable(isString),
         }),
       ),
     ),

@@ -30,6 +30,8 @@ import {
   WriteNotice,
 } from "./AdminUi";
 import { QuotaCurve } from "./charts";
+import { SetupPanel, TokenDates } from "./Setup";
+import { Timeline } from "./Timeline";
 import {
   Ago,
   Empty,
@@ -107,6 +109,7 @@ function Settings({ m, now }: { m: Managed; now: Date }) {
             <Fact k="Device ID">
               <Unset value={c.device_id} mono="mono small" />
             </Fact>
+            <TokenDates m={m} />
           </>
         )}
       </dl>
@@ -599,6 +602,26 @@ export function AccountDetail({
           <Settings m={m} now={now} />
         )}
       </Section>
+      {writable ? (
+        <Section
+          title="Login and token"
+          note="The gateway queues the login for a login machine; the page never sees the token"
+        >
+          <SetupPanel data={data} m={m} now={now} reload={reload} />
+        </Section>
+      ) : null}
+      {writable ? (
+        <Section
+          title="Record"
+          note="Where the account came from and what was done to it; a source is a record, not an approval"
+        >
+          <Timeline
+            alias={m.alias}
+            stamp={`${String(m.config?.rev ?? 0)} ${m.config?.setup?.updated_at ?? ""}`}
+            now={now}
+          />
+        </Section>
+      ) : null}
       <Section
         title="Quota"
         note="Estimates run the last quarter of a window's readings on to full; use is not even, so they are rough."
