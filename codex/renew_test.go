@@ -650,7 +650,6 @@ func TestDashboardShowsCodexState(t *testing.T) {
 	t.Cleanup(func() { _ = reader.Close() })
 	egress := claude.NewEgress(g.accounts, g.store, codexUpstream)
 	egress.Problems = g.provider.Problems
-	dashboard := claude.NewDashboard(egress, claude.DashboardConfig{Reader: reader, Store: g.store, DBPath: filepath.Join(g.dir, "codex.sqlite")})
 	type view struct {
 		Health struct {
 			Status  string   `json:"status"`
@@ -663,6 +662,8 @@ func TestDashboardShowsCodexState(t *testing.T) {
 	}
 	read := func() view {
 		t.Helper()
+		// Each read has a dashboard of its own, whose snapshot is not an earlier one.
+		dashboard := claude.NewDashboard(egress, claude.DashboardConfig{Reader: reader, Store: g.store, DBPath: filepath.Join(g.dir, "codex.sqlite")})
 		res := httptest.NewRecorder()
 		dashboard.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
 		var v view
