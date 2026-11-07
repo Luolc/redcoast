@@ -20,6 +20,8 @@ type createBody struct {
 	Access *string    `json:"access"`
 	Plan   *string    `json:"plan"`
 	Proxy  *proxyBody `json:"proxy"`
+
+	DeviceID *string `json:"device_id"`
 }
 
 // patchBody is the body of PATCH /accounts/{alias}: the revision the edit is made
@@ -75,7 +77,7 @@ func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entr
 	for _, field := range []struct {
 		name string
 		set  bool
-	}{{"alias", body.Alias != nil}, {"email", body.Email != nil}, {"access", body.Access != nil}, {"plan", body.Plan != nil}, {"proxy", body.Proxy != nil}} {
+	}{{"alias", body.Alias != nil}, {"email", body.Email != nil}, {"access", body.Access != nil}, {"plan", body.Plan != nil}, {"proxy", body.Proxy != nil}, {"device_id", body.DeviceID != nil}} {
 		if !field.set {
 			return nil, fieldProblem(field.name, "missing")
 		}
@@ -86,7 +88,10 @@ func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entr
 	if !planShape.MatchString(*body.Plan) {
 		return nil, fieldProblem("plan", "not a plan name")
 	}
-	row := session.AccountRow{Alias: *body.Alias, Email: *body.Email, Access: *body.Access, Status: "testing",
+	if !deviceIDShape.MatchString(*body.DeviceID) {
+		return nil, fieldProblem("device_id", "not 64 lower-case hex digits")
+	}
+	row := session.AccountRow{Alias: *body.Alias, Email: *body.Email, Access: *body.Access, Status: "testing", DeviceID: *body.DeviceID,
 		TokenRef: strings.Replace(w.cfg.TokenRefTemplate, aliasPlaceholder, *body.Alias, 1)}
 	body.Proxy.applyProxy(&row)
 	rows, err := w.accountRows(ctx)
@@ -94,6 +99,9 @@ func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entr
 		return nil, err
 	}
 	if err := checkRow(row, proxyRefOptions(rows), true); err != nil {
+		return nil, err
+	}
+	if err := checkDeviceIDFree(row, rows); err != nil {
 		return nil, err
 	}
 	if checkRowRefs(row) != nil {
@@ -116,6 +124,20 @@ func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entr
 	logWrite(entry, row.Alias, session.AccountRow{}, created)
 	config := configOf(created)
 	return writeResponse{Account: &config}, nil
+}
+
+// checkDeviceIDFree refuses a row whose device ID another account has; an empty one is
+// not a value to compare.
+func checkDeviceIDFree(row session.AccountRow, rows []session.AccountRow) error {
+	if row.DeviceID == "" {
+		return nil
+	}
+	for _, other := range rows {
+		if other.Alias != row.Alias && other.DeviceID == row.DeviceID {
+			return writeError{status: http.StatusConflict, message: "another account has this device ID", field: "device_id", code: codeFieldInvalid}
+		}
+	}
+	return nil
 }
 
 // patched returns before with the fields of body put in. A status of active is refused,
@@ -178,6 +200,9 @@ func (w *AccountWriter) update(r *http.Request, alias string, body *patchBody, e
 	}
 	loginChanged := after.UsernameRef != before.UsernameRef || after.PasswordRef != before.PasswordRef
 	if err := checkRow(after, proxyRefOptions(rows), loginChanged); err != nil {
+		return nil, err
+	}
+	if err := checkDeviceIDFree(after, rows); err != nil {
 		return nil, err
 	}
 	if served(after) && servedSettings(before) != servedSettings(after) {
@@ -268,6 +293,8 @@ func activatable(account session.AccountRow, rev int64, onlyTesting bool) error 
 		return notReady("status", "only a testing account is activated this way")
 	case account.Access != "gateway":
 		return notReady("access", "the account is not on the gateway path")
+	case account.DeviceID == "":
+		return notReady("device_id", "the account has no device ID")
 	}
 	return nil
 }
