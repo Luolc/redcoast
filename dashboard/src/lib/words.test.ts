@@ -55,3 +55,9 @@ it("words the audit actions, the record's errors and a store that is down", () =
   expect(recordErrorWording("other_code")).toBe("other_code");
   expect(setupRefusalWording("store_unavailable")).toContain("store");
 });
+
+it("words the CAPTCHA step", () => {
+  expect(setupStepWording("awaiting_captcha")).toBe(
+    "Waiting for a person at the CAPTCHA page",
+  );
+});

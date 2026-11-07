@@ -115,7 +115,7 @@ export function TimelineView({
                   <td>
                     <Result x={x} />
                   </td>
-                  <td className="mono small">{sourceText(x)}</td>
+                  <td className="mono small source">{sourceText(x)}</td>
                 </tr>
               ))}
             </tbody>

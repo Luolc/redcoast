@@ -167,6 +167,7 @@ const SETUP_STEPS: Record<string, string> = {
   cli: "Starting the Claude CLI",
   email_page: "On the email page",
   email_sent: "Email sent",
+  awaiting_captcha: "Waiting for a person at the CAPTCHA page",
   magic_link: "Reading the sign-in link",
   verification_code: "Entering the verification code",
   authorize: "Authorizing the login",
