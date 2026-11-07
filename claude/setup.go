@@ -71,7 +71,7 @@ var setupReasons = []string{
 	"cli_missing", "cli_start_failed", "cli_environment_unreadable", "cli_output_failed", "cli_output_limit", "cli_url_timeout", "cli_exited_before_url", "ambiguous_auth_url",
 	"cli_exited_before_authorize", "cli_config_dir_mismatch", "cli_exited_before_code", "code_shape_unexpected", "cli_input_failed", "cli_exit_timeout", "cli_login_failed",
 	"cli_cleanup_timeout", "cli_status_timeout", "cli_status_failed", "cli_status_invalid",
-	"login_not_verified", "credentials_expiry_unreadable",
+	"login_not_verified", "credentials_expiry_unreadable", "profile_exists",
 	"step_timeout", "step_not_forward", "interrupted", "not_started", "not_implemented", "unexpected_error",
 	"token_cli_failed", "token_url_timeout", "token_output_unreadable", "handover_failed",
 }

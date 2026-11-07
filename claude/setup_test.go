@@ -951,6 +951,24 @@ func (h *setupHarness) setTokenRef(t *testing.T, alias, reference string) {
 	}
 }
 
+// TestSetupReportsProfileExists: profile_exists, the reason the login tool gives when the
+// browser step finds a profile directory already there, is a reason of failed and of no
+// other state.
+func TestSetupReportsProfileExists(t *testing.T) {
+	h := newSetupHarness(t, true)
+	id := h.running(t, "sample-a")
+	for _, state := range []string{"running", "needs_human"} {
+		if status, answer, body := h.report(t, "sample-a", id, setupRun, state, "browser", "profile_exists"); status != 400 || answer["error"] != "reason_invalid" {
+			t.Fatalf("%s with profile_exists: %d %s", state, status, body)
+		}
+	}
+	status, answer, body := h.report(t, "sample-a", id, setupRun, "failed", "browser", "profile_exists")
+	block, _ := answer["setup"].(map[string]any)
+	if status != 200 || block["state"] != "failed" || block["reason"] != "profile_exists" || block["step"] != "browser" {
+		t.Fatalf("failed with profile_exists: %d %s", status, body)
+	}
+}
+
 // TestSetupReports: a report takes one of three states with its step and reason from the
 // fixed sets; anything else is refused with its own code and changes nothing, and a task
 // that a report closed blocks no new one.

@@ -17,8 +17,10 @@ type fakeStore struct {
 	sets, creates int
 	lastValue     string
 	lastExpires   string
-	// createExtra are fields a created item gets besides those asked for.
-	createExtra []Field
+	// createExtra are fields a created item gets besides those asked for;
+	// createNoExpiry leaves out the expiry field that was asked for.
+	createExtra    []Field
+	createNoExpiry bool
 }
 
 type fakeItem struct {
@@ -72,8 +74,18 @@ func (f *fakeStore) Create(_ context.Context, vaultID, title, fieldTitle, value,
 	}
 	f.creates++
 	f.lastValue, f.lastExpires = value, expires
-	f.items[vaultID] = append(f.items[vaultID], fakeItem{info: ItemInfo{ID: "new-" + title, Title: title}, fields: append([]Field{{ID: fieldTitle, Title: fieldTitle}, {ID: ExpiresField, Title: ExpiresField}}, f.createExtra...), expires: []string{expires}})
+	f.items[vaultID] = append(f.items[vaultID], fakeItem{info: ItemInfo{ID: "new-" + title, Title: title}, fields: append(createdFields(fieldTitle, f.createNoExpiry), f.createExtra...), expires: []string{expires}})
 	return nil
+}
+
+// createdFields are the fields a created item has: the token's and, unless left out, the
+// expiry field.
+func createdFields(fieldTitle string, noExpiry bool) []Field {
+	fields := []Field{{ID: fieldTitle, Title: fieldTitle}}
+	if !noExpiry {
+		fields = append(fields, Field{ID: ExpiresField, Title: ExpiresField})
+	}
+	return fields
 }
 
 // newFake has one vault, "example-vault", holding an item "token-sample-a" with the
@@ -130,20 +142,25 @@ func TestWriteSetsOrCreates(t *testing.T) {
 func TestWriteChecksTheCreatedItem(t *testing.T) {
 	const ref = "op://example-vault/token-sample-b/credential"
 	for _, test := range []struct {
-		name  string
-		extra []Field
-		want  []string
+		name     string
+		extra    []Field
+		noExpiry bool
+		want     []string
 	}{
-		{"none", nil, nil},
-		{"another field", []Field{{ID: "valid_from", Title: "valid from"}}, []string{"valid from"}},
-		{"a second token field", []Field{{ID: "credential2", Title: "Credential"}}, []string{"Credential"}},
-		{"a second expiry field", []Field{{ID: "expires2", Title: "Expires"}}, []string{"Expires"}},
-		{"a field without a title", []Field{{ID: "x1"}}, []string{"x1"}},
-		{"a field with the ID of the expiry field only", []Field{{ID: ExpiresField, Title: "valid until"}}, []string{"valid until"}},
+		{"none", nil, false, nil},
+		{"another field", []Field{{ID: "valid_from", Title: "valid from"}}, false, []string{"valid from"}},
+		{"a second token field", []Field{{ID: "credential2", Title: "Credential"}}, false, []string{"Credential"}},
+		{"a second expiry field", []Field{{ID: "expires2", Title: "Expires"}}, false, []string{"Expires"}},
+		{"a field without a title", []Field{{ID: "x1"}}, false, []string{"x1"}},
+		// The only candidate for the expiry field has the ID of one and another title: a
+		// field is an expiry field by its title, so it is extra.
+		{"a field with the ID of the expiry field only", []Field{{ID: ExpiresField, Title: "valid until"}}, true, []string{"valid until"}},
+		// Control arm: the same field, titled expires, is the expiry field.
+		{"the expiry field has another ID", []Field{{ID: "f9", Title: "Expires"}}, true, nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFake()
-			f.createExtra = test.extra
+			f.createExtra, f.createNoExpiry = test.extra, test.noExpiry
 			created, err := Write(t.Context(), f, ref, writeValue, writeExpires, true)
 			var extra ExtraFieldsError
 			if test.want == nil {
