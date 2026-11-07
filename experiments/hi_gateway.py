@@ -35,11 +35,15 @@ import urllib.request
 
 SETTINGS_FILE = Path("/runner-settings.json")
 PERSISTENCE_FAILURE = b"capture persistence failed request_id="
-# The three lines the gateway writes at every start: its candidate accounts,
-# behind an exit that answers no CONNECT the egress check that read no IP,
-# and the retention sweep's counts.
+# The lines the gateway writes at every start: its candidate accounts, behind an
+# exit that answers no CONNECT the egress check that read no IP, and the
+# retention sweep's counts; and, at the first start on a new database, the
+# import of the inventory into the accounts table.
 KNOWN_LINE = re.compile(
-  r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} (?:accounts: (?P<accounts>.*)"
+  r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} "
+  r"(?:accounts: imported \d+ from the inventory directory; the accounts table"
+  r" is the source from now on and the directory's account files are ignored"
+  r"|accounts: (?P<accounts>.*)"
   r"|egress: check failed alias=(?P<alias>[^,]+), not paused:"
   r" exit IP not read: .*"
   r"|retention: deleted traffic=\d+ quota_history=\d+ binding_history=\d+"
