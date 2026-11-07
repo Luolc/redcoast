@@ -628,6 +628,7 @@ func TestMigrateToV12(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		"ALTER TABLE accounts DROP COLUMN receiver_email", "ALTER TABLE accounts DROP COLUMN proxy_provider", "ALTER TABLE accounts DROP COLUMN proxy_type",
 		"ALTER TABLE account_audit DROP COLUMN source_kind", "ALTER TABLE account_audit DROP COLUMN source_thread", "ALTER TABLE account_audit DROP COLUMN source_ts",
 		"ALTER TABLE account_setup DROP COLUMN source_kind", "ALTER TABLE account_setup DROP COLUMN source_thread", "ALTER TABLE account_setup DROP COLUMN source_ts",
 		"ALTER TABLE account_setup DROP COLUMN wait_until", "ALTER TABLE account_setup DROP COLUMN wait_until_set", "PRAGMA user_version = 11",
@@ -657,5 +658,52 @@ func TestMigrateToV12(t *testing.T) {
 	}
 	if _, _, err := migrated.RequestSetup(ctx, "nobody", "login_and_token", nil, nextID(), slackSource); !errors.Is(err, ErrAccountNotFound) {
 		t.Fatalf("a write after the migration: %v", err)
+	}
+}
+
+// TestMigrateToV13: a version-12 file gets the receiver email and the proxy provider and
+// type, its rows keep what they had with the new columns empty, and the columns can then
+// be written. Control arm: the version-12 file has none of the columns before the migration.
+func TestMigrateToV13(t *testing.T) {
+	ctx := context.Background()
+	c := newClock()
+	store, path := open(t, c)
+	old := AccountRow{Alias: setupAlias, Email: "a@example.test", Access: "gateway", Status: "active", TokenRef: "op://example-vault/t/credential",
+		ProxyHost: "proxy.example.test", ProxyPort: 8001, ExpectedIP: "192.0.2.1", UsernameRef: "op://p/u/username", PasswordRef: "op://p/u/password", DeviceID: "d"}
+	if _, err := store.ImportAccounts(ctx, []AccountRow{old}); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		"ALTER TABLE accounts DROP COLUMN receiver_email", "ALTER TABLE accounts DROP COLUMN proxy_provider", "ALTER TABLE accounts DROP COLUMN proxy_type", "PRAGMA user_version = 12",
+	} {
+		if _, err := store.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec("SELECT receiver_email FROM accounts"); err == nil {
+		t.Fatal("control arm: the version-12 file has the column")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(ctx, path, Config{Now: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = migrated.Close() }()
+	row, err := migrated.Account(ctx, setupAlias)
+	if err != nil || row.Email != old.Email || row.ProxyHost != old.ProxyHost || row.DeviceID != "d" || row.ReceiverEmail != "" || row.ProxyProvider != "" || row.ProxyType != "" {
+		t.Fatalf("migrated row = %+v %v", row, err)
+	}
+	updated, err := migrated.UpdateAccount(ctx, setupAlias, row.Rev, AuditEntry{SourceIP: "192.0.2.50", Action: "account-update"}, func(r *AccountRow) error {
+		r.ReceiverEmail, r.ProxyProvider, r.ProxyType = "r@example.test", "example-provider", "residential"
+		return nil
+	})
+	if err != nil || updated.ReceiverEmail != "r@example.test" || updated.ProxyProvider != "example-provider" || updated.ProxyType != "residential" {
+		t.Fatalf("written row = %+v %v", updated, err)
+	}
+	again, err := migrated.Account(ctx, setupAlias)
+	if err != nil || again.ReceiverEmail != "r@example.test" || again.ProxyProvider != "example-provider" || again.ProxyType != "residential" {
+		t.Fatalf("read back = %+v %v", again, err)
 	}
 }

@@ -103,6 +103,16 @@ function Settings({ m, now }: { m: Managed; now: Date }) {
         </Fact>
         {c === undefined ? null : (
           <>
+            <Fact k="Receiver email">
+              <Unset value={c.receiver_email} />
+            </Fact>
+            <Fact k="Proxy provider and type">
+              <Unset
+                value={[c.proxy.provider, c.proxy.type]
+                  .filter((v) => v !== "")
+                  .join(" · ")}
+              />
+            </Fact>
             <Fact k="Account UUID">
               <Unset value={c.account_uuid} mono="mono" />
             </Fact>
@@ -249,6 +259,29 @@ function EditForm({
             />
           </>
         )}
+        <TextField
+          label="Receiver email"
+          value={d.receiver}
+          onChange={set("receiver")}
+          error={err.receiver}
+          hint="The address that receives the account's mail; may be empty"
+        />
+        <TextField
+          label="Proxy provider"
+          mono
+          value={d.provider}
+          onChange={set("provider")}
+          error={err.provider}
+          hint="Kept for reference; may be empty"
+        />
+        <TextField
+          label="Proxy type"
+          mono
+          value={d.kind}
+          onChange={set("kind")}
+          error={err.kind}
+          hint="Kept for reference; may be empty"
+        />
         <TextField
           label="Device ID"
           mono

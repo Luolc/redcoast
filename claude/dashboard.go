@@ -134,24 +134,27 @@ type dashboardAccount struct {
 // accountConfig is one row of the accounts table as the dashboard shows it. The
 // references are the strings themselves; no credential value is read to build it.
 type accountConfig struct {
-	Alias       string               `json:"alias"`
-	Email       string               `json:"email"`
-	Access      string               `json:"access"`
-	Status      string               `json:"status"`
-	TokenRef    string               `json:"token_ref"`
-	Proxy       proxyConfig          `json:"proxy"`
-	DeviceID    string               `json:"device_id"`
-	AccountUUID string               `json:"account_uuid"`
-	Verify      session.Verification `json:"verify"`
-	Rev         int64                `json:"rev"`
-	CreatedAt   time.Time            `json:"created_at"`
-	UpdatedAt   time.Time            `json:"updated_at"`
+	Alias         string               `json:"alias"`
+	Email         string               `json:"email"`
+	ReceiverEmail string               `json:"receiver_email"`
+	Access        string               `json:"access"`
+	Status        string               `json:"status"`
+	TokenRef      string               `json:"token_ref"`
+	Proxy         proxyConfig          `json:"proxy"`
+	DeviceID      string               `json:"device_id"`
+	AccountUUID   string               `json:"account_uuid"`
+	Verify        session.Verification `json:"verify"`
+	Rev           int64                `json:"rev"`
+	CreatedAt     time.Time            `json:"created_at"`
+	UpdatedAt     time.Time            `json:"updated_at"`
 	// Setup is the account's setup state; absent while setup is off.
 	Setup *setupBlock `json:"setup,omitempty"`
 }
 
 // proxyConfig is the exit of an accountConfig.
 type proxyConfig struct {
+	Provider    string `json:"provider"`
+	Type        string `json:"type"`
 	Direct      bool   `json:"direct"`
 	Host        string `json:"host"`
 	Port        int    `json:"port"`
@@ -163,8 +166,8 @@ type proxyConfig struct {
 // configOf returns row as the dashboard shows it.
 func configOf(row session.AccountRow) accountConfig {
 	return accountConfig{
-		Alias: row.Alias, Email: row.Email, Access: row.Access, Status: row.Status, TokenRef: row.TokenRef,
-		Proxy:    proxyConfig{Direct: row.Direct, Host: row.ProxyHost, Port: row.ProxyPort, ExpectedIP: row.ExpectedIP, UsernameRef: row.UsernameRef, PasswordRef: row.PasswordRef},
+		Alias: row.Alias, Email: row.Email, ReceiverEmail: row.ReceiverEmail, Access: row.Access, Status: row.Status, TokenRef: row.TokenRef,
+		Proxy:    proxyConfig{Provider: row.ProxyProvider, Type: row.ProxyType, Direct: row.Direct, Host: row.ProxyHost, Port: row.ProxyPort, ExpectedIP: row.ExpectedIP, UsernameRef: row.UsernameRef, PasswordRef: row.PasswordRef},
 		DeviceID: row.DeviceID, AccountUUID: row.AccountUUID, Verify: row.Verify, Rev: row.Rev, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 	}
 }

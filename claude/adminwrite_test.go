@@ -751,3 +751,26 @@ func TestDashboardRecord(t *testing.T) {
 		t.Fatalf("without a writer: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestAgentCreateTakesReceiverEmail: the management socket's create takes the optional
+// receiver email and the proxy's provider and type, `account show` gives them, and a
+// receiver email that is not a bare address is refused.
+func TestAgentCreateTakesReceiverEmail(t *testing.T) {
+	h := newSetupHarness(t, true)
+	bad := h.agentCreateBody("sample-new")
+	bad["receiver_email"] = "Someone <receiver@example.test>"
+	if status, answer, body := h.agent(t, "POST", "/accounts", bad); status != 400 || answer["field"] != "receiver_email" {
+		t.Fatalf("display name: %d %s", status, body)
+	}
+	good := h.agentCreateBody("sample-new")
+	good["receiver_email"] = "receiver@example.test"
+	good["proxy"].(map[string]any)["provider"], good["proxy"].(map[string]any)["type"] = "example-provider", "dedicated-isp"
+	if status, _, body := h.agent(t, "POST", "/accounts", good); status != 200 {
+		t.Fatalf("create: %d %s", status, body)
+	}
+	account := h.show(t, "sample-new")["account"].(map[string]any)
+	proxy := account["proxy"].(map[string]any)
+	if account["receiver_email"] != "receiver@example.test" || proxy["provider"] != "example-provider" || proxy["type"] != "dedicated-isp" {
+		t.Fatalf("show = %v", account)
+	}
+}

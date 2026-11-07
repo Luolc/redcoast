@@ -126,6 +126,8 @@ it("checks no proxy field of a direct account", () => {
     config: {
       ...m.config,
       proxy: {
+        provider: "",
+        type: "",
         direct: true,
         host: "",
         port: 0,
@@ -163,4 +165,34 @@ it("saves against the revision the form was opened on", async () => {
   expect(sent?.url).toBe("./accounts/sample-ab");
   expect(sent?.init.method).toBe("PATCH");
   expect(sent?.init.body).toBe('{"rev":4,"proxy":{"port":9000}}');
+});
+
+it("edits the receiver email and the proxy's provider and type", () => {
+  const m = findManaged(data, "sample-ab");
+  if (m === undefined) throw new Error("no sample-ab");
+  const was = draftOf(m, options);
+  expect(was.receiver).toBe(m.config?.receiver_email);
+  expect(was.provider).toBe(m.config?.proxy.provider);
+  const changes = changesOf(was, {
+    ...was,
+    receiver: "other@example.test",
+    provider: "other-provider",
+    kind: "",
+  });
+  expect(patchBody(2, changes, options)).toEqual({
+    rev: 2,
+    receiver_email: "other@example.test",
+    proxy: { provider: "other-provider", type: "" },
+  });
+  expect(draftErrors({ ...was, receiver: "" })).toEqual({});
+  expect(
+    Object.keys(
+      draftErrors({
+        ...was,
+        receiver: "Name <a@example.test>",
+        provider: "a b",
+        kind: "a b",
+      }),
+    ),
+  ).toEqual(["receiver", "provider", "kind"]);
 });

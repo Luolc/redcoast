@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/mail"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -38,7 +39,9 @@ const aliasPlaceholder = "{alias}"
 var (
 	emailShape = regexp.MustCompile(`^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
 	hostShape  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
-	planShape  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+	// kindShape is a proxy's provider or type: a short word, as in the inventory.
+	kindShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	planShape = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
 )
 
 // CheckTokenRefTemplate reports whether template can build a token reference from an
@@ -325,6 +328,8 @@ func noRepeatedKeys(decoder *json.Decoder) error {
 
 // proxyBody is the proxy object of a create or an edit; a key left out is nil.
 type proxyBody struct {
+	Provider    *string `json:"provider"`
+	Type        *string `json:"type"`
 	Direct      *bool   `json:"direct"`
 	Host        *string `json:"host"`
 	Port        *int    `json:"port"`
@@ -337,6 +342,12 @@ type proxyBody struct {
 func (b *proxyBody) applyProxy(row *session.AccountRow) {
 	if b == nil {
 		return
+	}
+	if b.Provider != nil {
+		row.ProxyProvider = *b.Provider
+	}
+	if b.Type != nil {
+		row.ProxyType = *b.Type
 	}
 	if b.Direct != nil {
 		row.Direct = *b.Direct
@@ -393,6 +404,9 @@ func checkRow(row session.AccountRow, options []proxyRefOption, checkLogin bool)
 	if len(row.Email) > 254 || !emailShape.MatchString(row.Email) {
 		return fieldProblem("email", "not an email address")
 	}
+	if err := checkReceiverEmail(row.ReceiverEmail); err != nil {
+		return err
+	}
 	if row.Access != "gateway" && row.Access != "direct" {
 		return fieldProblem("access", "must be gateway or direct")
 	}
@@ -405,8 +419,27 @@ func checkRow(row session.AccountRow, options []proxyRefOption, checkLogin bool)
 	return checkExit(row, options, checkLogin)
 }
 
+// checkReceiverEmail refuses a receiver email that is set and is not a bare address: a
+// display name or a comment around it is refused.
+func checkReceiverEmail(value string) error {
+	if value == "" {
+		return nil
+	}
+	addr, err := mail.ParseAddress(value)
+	if len(value) > 254 || err != nil || addr.Address != value || !emailShape.MatchString(value) {
+		return fieldProblem("receiver_email", "not an email address")
+	}
+	return nil
+}
+
 // checkExit is checkRow for the exit's fields.
 func checkExit(row session.AccountRow, options []proxyRefOption, checkLogin bool) error {
+	if row.ProxyProvider != "" && !kindShape.MatchString(row.ProxyProvider) {
+		return fieldProblem("proxy.provider", "not a provider name")
+	}
+	if row.ProxyType != "" && !kindShape.MatchString(row.ProxyType) {
+		return fieldProblem("proxy.type", "not a proxy type")
+	}
 	if ip, err := netip.ParseAddr(row.ExpectedIP); err != nil || ip.Zone() != "" {
 		return fieldProblem("proxy.expected_egress_ip", "not an IP address")
 	}
@@ -438,10 +471,11 @@ func served(row session.AccountRow) bool {
 	return row.Status == "active" && row.Access == "gateway"
 }
 
-// servedSettings is a row without what no served set depends on: the email, the
+// servedSettings is a row without what no served set depends on: the emails, the proxy's provider and type, the
 // revision, the times and the checks.
 func servedSettings(row session.AccountRow) session.AccountRow {
-	row.Email, row.Rev, row.CreatedAt, row.UpdatedAt, row.Verify = "", 0, time.Time{}, time.Time{}, session.Verification{}
+	row.Email, row.ReceiverEmail, row.ProxyProvider, row.ProxyType = "", "", "", ""
+	row.Rev, row.CreatedAt, row.UpdatedAt, row.Verify = 0, time.Time{}, time.Time{}, session.Verification{}
 	return row
 }
 

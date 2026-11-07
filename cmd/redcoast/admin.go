@@ -59,6 +59,7 @@ var errAdminUsage = errors.New(`usage:
   redcoast claude setup request <alias> --rev <n> --source-thread <CHANNEL/TS> --source-ts <TS> --admin-socket <path>
   redcoast claude account create <alias> --email <email> --device-id <hex> --plan <plan> --proxy-host <host> --proxy-port <port>
       --expected-egress-ip <ip> --proxy-username-ref <ref> --proxy-password-ref <ref>
+      [--receiver-email <email>] [--proxy-provider <name>] [--proxy-type <name>]
       --source-thread <CHANNEL/TS> --source-ts <TS> --admin-socket <path>
   redcoast claude account show <alias> --admin-socket <path>
   redcoast claude account verify <alias> [--rev <n>] --source-thread <CHANNEL/TS> --source-ts <TS> --admin-socket <path>

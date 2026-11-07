@@ -61,11 +61,15 @@ type adminCreateBody struct {
 	Plan     *string         `json:"plan"`
 	Proxy    *adminProxyBody `json:"proxy"`
 	DeviceID *string         `json:"device_id"`
-	Source   *sourceBody     `json:"source"`
+	// ReceiverEmail is optional.
+	ReceiverEmail *string     `json:"receiver_email"`
+	Source        *sourceBody `json:"source"`
 }
 
 // adminProxyBody is the proxy of an adminCreateBody.
 type adminProxyBody struct {
+	Provider    *string `json:"provider"`
+	Type        *string `json:"type"`
 	Host        *string `json:"host"`
 	Port        *int    `json:"port"`
 	ExpectedIP  *string `json:"expected_egress_ip"`
@@ -122,10 +126,10 @@ func (a *Admin) handleAccountWrites(mux *http.ServeMux) {
 // gateway path behind the proxy b names.
 func (b *adminCreateBody) toCreate() *createBody {
 	access := "gateway"
-	out := &createBody{Alias: b.Alias, Email: b.Email, Plan: b.Plan, Access: &access, DeviceID: b.DeviceID}
+	out := &createBody{Alias: b.Alias, Email: b.Email, Plan: b.Plan, Access: &access, DeviceID: b.DeviceID, ReceiverEmail: b.ReceiverEmail}
 	if b.Proxy != nil {
 		direct := false
-		out.Proxy = &proxyBody{Direct: &direct, Host: b.Proxy.Host, Port: b.Proxy.Port, ExpectedIP: b.Proxy.ExpectedIP,
+		out.Proxy = &proxyBody{Provider: b.Proxy.Provider, Type: b.Proxy.Type, Direct: &direct, Host: b.Proxy.Host, Port: b.Proxy.Port, ExpectedIP: b.Proxy.ExpectedIP,
 			UsernameRef: b.Proxy.UsernameRef, PasswordRef: b.Proxy.PasswordRef}
 	}
 	return out

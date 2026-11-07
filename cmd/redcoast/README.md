@@ -35,16 +35,19 @@ The Claude dashboard's "Refresh all quota" button, next to the accounts' quota, 
 
 ### The inventory
 
-`inventory` names a directory with one file per account, `<alias>.yaml`, where the alias matches `^[a-z0-9][a-z0-9_-]{0,63}$`. The gateway serves the accounts with `status: active` and `access: gateway`; other keys are ignored, so the directory can hold more facts than the gateway reads. An example with made-up values:
+`inventory` names a directory with one file per account, `<alias>.yaml`, where the alias matches `^[a-z0-9][a-z0-9_-]{0,63}$`. The gateway serves the accounts with `status: active` and `access: gateway`; start from the directory ignores other keys, but the first import into the `accounts` table (below) refuses a key it has no column for. An example with made-up values:
 
 ```yaml
 email: someone@example.test # optional; shown on the dashboard
+receiver_email: inbox@example.test # optional; the address that receives the account's mail
 access: gateway # gateway or direct
 status: active # active, paused, suspended, retired or testing
 oauth_token: op://example-vault/example-a/token # a `claude setup-token` token
 device_id: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef # optional; 64 lower-case hex digits
 account_uuid: 01234567-89ab-cdef-0123-456789abcdef # optional; lower-case UUID
 proxy: # the account's exit, an HTTP proxy
+  provider: example-provider # optional; kept and shown, not used to serve
+  type: residential # optional; kept and shown, not used to serve
   host: proxy.example.test
   port: 8080
   expected_egress_ip: 192.0.2.10
@@ -75,7 +78,7 @@ Subscription plans live in the database, not the inventory. Every served account
 
 #### The Claude accounts are kept in the database
 
-The Claude gateway reads the directory once. At its first start with an `accounts` table that was never imported, it reads every `<alias>.yaml` (the accounts it does not serve too), refuses the directory as above when it does not load, and otherwise writes all the accounts and a marker (the `accounts_imported` row of `settings`) in one transaction. From then on the table is the source of the account set, at start and on every reload, and the account files in `inventory` are ignored, so editing one has no effect; `direct-hosts.yaml` is still read from that directory. The table holds the consumed keys of the file as they are (`email`, `access`, `status`, `oauth_token`, `device_id`, `account_uuid` and the `proxy` block), each credential only as its reference, plus a revision number and the times. The Codex gateway keeps reading its directory.
+The Claude gateway reads the directory once. At its first start with an `accounts` table that was never imported, it reads every `<alias>.yaml` (the accounts it does not serve too), refuses the directory as above when it does not load, and otherwise writes all the accounts and a marker (the `accounts_imported` row of `settings`) in one transaction. From then on the table is the source of the account set, at start and on every reload, and the account files in `inventory` are ignored, so editing one has no effect; `direct-hosts.yaml` is still read from that directory. The import refuses, naming the file and the key and never a value, a key that is not one of those below, at the top or under `proxy`, and imports nothing then. The table holds every key of the file as it is (`email`, `receiver_email`, `access`, `status`, `oauth_token`, `device_id`, `account_uuid` and the `proxy` block with `provider`, `type`, `direct`, `host`, `port`, `expected_egress_ip`, `username_ref` and `password_ref`), each credential only as its reference, plus a revision number and the times. The Codex gateway keeps reading its directory.
 
 `redcoast claude inventory export --session-db <path> <dir>` writes the table back as `<alias>.yaml` files of this format into `<dir>` (created when missing; a file of the same name is replaced, other files stay), so the accounts can be archived elsewhere. It reads the database through a read-only connection and can run beside the gateway. Keys the gateway does not consume (for example `receiver_email` or `proxy.provider`) are not stored and so not exported.
 
@@ -94,8 +97,8 @@ Writes are off until `dashboard_write.allow_from` lists the TCP peer addresses t
 
 | Route | What it does |
 | --- | --- |
-| `POST /accounts` | create an account as `testing`: `alias`, `email`, `access`, `device_id` (64 lower-case hex digits, different from every other account's; an edit of it is checked the same way), `plan` and `proxy` (`host`, `port`, `expected_egress_ip`, or `direct: true` with the IP only; `username_ref` and `password_ref` as one pair that accounts use already). The token reference is the template with the alias. It serves nothing yet. The plan is written after the account, so a failure of that step says the account exists |
-| `PATCH /accounts/{alias}` | change `email`, `status` (anything but `active`), `device_id`, `account_uuid`, `proxy` fields or `plan`, at the `rev` the page read; another revision answers 409. The plan goes through the plan schedule as `redcoast claude plan schedule` does, and a raised quota unit reads the quota of a served account once. A change that can alter the served set reloads, after the references of the changed account were resolved without writing; a change of the exit, the expected IP or a reference voids the checks below |
+| `POST /accounts` | create an account as `testing`: `alias`, `email`, optional `receiver_email` (one bare address, no display name), `access`, `device_id` (64 lower-case hex digits, different from every other account's; an edit of it is checked the same way), `plan` and `proxy` (optional `provider` and `type`; `host`, `port`, `expected_egress_ip`, or `direct: true` with the IP only; `username_ref` and `password_ref` as one pair that accounts use already). The token reference is the template with the alias. It serves nothing yet. The plan is written after the account, so a failure of that step says the account exists |
+| `PATCH /accounts/{alias}` | change `email`, `receiver_email`, `status` (anything but `active`), `device_id`, `account_uuid`, `proxy` fields or `plan`, at the `rev` the page read; another revision answers 409. The plan goes through the plan schedule as `redcoast claude plan schedule` does, and a raised quota unit reads the quota of a served account once. A change that can alter the served set reloads, after the references of the changed account were resolved without writing; a change of the exit, the expected IP or a reference voids the checks below |
 | `POST /accounts/{alias}/verify` | run three checks on the account in memory, while no other write runs: `token_ok` (its token reference resolves to a usable token), `egress_ok` (its own exit reads the expected IP and reaches the upstream) and `probe_ok` (the quota probe of `refresh` gets a 2xx through that exit, with the account's own token; it waits for a quota round in progress). Each result and the time are stored, never a value |
 | `POST /accounts/{alias}/activate` | at the `rev` given: the account has a plan, no other served account has its exit, and the three checks, run again now, pass; only then it is stored as `active` and the set reloaded. Anything else is a 409 naming the check |
 
@@ -111,7 +114,7 @@ The login machine reaches the management socket, over an ssh key restricted to t
 
 | Command | Route | What it does |
 | --- | --- | --- |
-| `redcoast claude setup next [--request-id <id>]` | `POST /setup/next[?request_id=<id>]` | prints `{"task": null}`, or one task, which becomes `running`. Without `--request-id` it is the next task the dashboard asked for, never one from Slack. With it, it is that one task, which must be the account's latest, from Slack and waiting; `{"task": null}` also when another task is running (try again). The task has `alias`, `action`, `request_id`, `requested_at`, `status` (`testing` or `active`), `source`, `email`, `device_id` and `proxy` (`host`, `port`, `username_ref`, `password_ref`, `expected_egress_ip`, `direct`; references, never values) |
+| `redcoast claude setup next [--request-id <id>]` | `POST /setup/next[?request_id=<id>]` | prints `{"task": null}`, or one task, which becomes `running`. Without `--request-id` it is the next task the dashboard asked for, never one from Slack. With it, it is that one task, which must be the account's latest, from Slack and waiting; `{"task": null}` also when another task is running (try again). The task has `alias`, `action`, `request_id`, `requested_at`, `status` (`testing` or `active`), `source`, `email`, `receiver_email` (always present, an empty string when the account has none), `device_id` and `proxy` (`host`, `port`, `username_ref`, `password_ref`, `expected_egress_ip`, `direct`; references, never values) |
 | `redcoast claude setup report <alias> <request-id> --run-id <id> --source-kind <dashboard\|slack> [--wait-until <RFC 3339>] --state <running\|needs_human\|failed> --step <code> [--reason <code>]` | `POST /accounts/{alias}/setup/report` | records one step. The first report sets the `run_id` (`YYYYMMDDTHHMMSSmmmZ`), which every later report and the handover must carry. `running` takes no reason; `needs_human` only `captcha_challenge`, `unknown_page` or `email_rejected`; `failed` any other reason of the fixed set. `done` is the gateway's alone |
 | `redcoast claude setup token <alias> <request-id> --run-id <id> --source-kind <dashboard\|slack>` | `POST /accounts/{alias}/setup/token?request_id=…&run_id=…&source_kind=…` | reads the token from stdin (one line, at most 4 KiB, one line break at the end dropped) and sends it as the raw request body; it prints the gateway's answer, which never holds the token |
 
@@ -129,7 +132,7 @@ With `admin_write.enabled: true` (off by default; it needs `dashboard_write.toke
 
 | Command | Route | What it does |
 | --- | --- | --- |
-| `redcoast claude account create <alias> --email … --device-id … --plan … --proxy-host … --proxy-port … --expected-egress-ip … --proxy-username-ref … --proxy-password-ref …` | `POST /accounts` | the page's create: a `testing` account on the gateway path behind that proxy (no direct account; the proxy login references must be ones an account already uses), the token reference from the template, the plan written. Prints `{"account": …}` with the `rev` the next steps need |
+| `redcoast claude account create <alias> --email … --device-id … [--receiver-email …] --plan … --proxy-host … --proxy-port … --expected-egress-ip … --proxy-username-ref … --proxy-password-ref … [--proxy-provider …] [--proxy-type …]` | `POST /accounts` | the page's create: a `testing` account on the gateway path behind that proxy (no direct account; the proxy login references must be ones an account already uses), the token reference from the template, the plan written. Prints `{"account": …}` with the `rev` the next steps need |
 | `redcoast claude account show <alias>` | `GET /accounts/{alias}` | prints `{account, served, setup, created, history, history_truncated}`: the settings (references, never values), whether this process serves it, the setup block (null with setup off), the audit row of the creation and the last 100 audit rows with their sources |
 | `redcoast claude setup request <alias> --rev <n>` | `POST /accounts/{alias}/setup/request` | queues a `login_and_token` task from Slack (needs `setup.enabled` as well; `account_write_unavailable` is checked before `setup_unavailable`); prints `{"setup": …}` with the `request_id` |
 | `redcoast claude account verify <alias> [--rev <n>]` | `POST /accounts/{alias}/verify` | the page's verify |

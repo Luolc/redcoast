@@ -89,7 +89,8 @@ type claudeFields struct {
 // the directory's file of the account would.
 func rowDocument(row session.AccountRow) (inventoryFile, []byte, error) {
 	var file inventoryFile
-	file.Email, file.Access, file.Status = row.Email, row.Access, row.Status
+	file.Email, file.ReceiverEmail, file.Access, file.Status = row.Email, row.ReceiverEmail, row.Access, row.Status
+	file.Proxy.Provider, file.Proxy.Type = row.ProxyProvider, row.ProxyType
 	file.Proxy.Direct, file.Proxy.Host, file.Proxy.Port = row.Direct, row.ProxyHost, row.ProxyPort
 	file.Proxy.ExpectedIP, file.Proxy.UsernameRef, file.Proxy.PasswordRef = row.ExpectedIP, row.UsernameRef, row.PasswordRef
 	fields := claudeFields{DeviceID: row.DeviceID, AccountUUID: row.AccountUUID}
@@ -182,47 +183,71 @@ func inventoryRows(dir string) ([]session.AccountRow, error) {
 			errs = append(errs, fieldError{alias, "file name", "not an account alias"})
 			continue
 		}
-		file, data, err := decodeInventoryFile(alias, filepath.Join(dir, entry.Name()))
+		row, err := inventoryRow(alias, filepath.Join(dir, entry.Name()))
 		if err != nil {
 			errs = append(errs, err)
 			continue
-		}
-		var fields claudeFields
-		if yaml.NewDecoder(bytes.NewReader(data)).Decode(&fields) != nil {
-			errs = append(errs, fieldError{alias, "file", "not a Claude account document"})
-			continue
-		}
-		row := session.AccountRow{
-			Alias: alias, Email: file.Email, Access: file.Access, Status: file.Status,
-			Direct: file.Proxy.Direct, ProxyHost: file.Proxy.Host, ProxyPort: file.Proxy.Port, ExpectedIP: file.Proxy.ExpectedIP,
-			UsernameRef: file.Proxy.UsernameRef, PasswordRef: file.Proxy.PasswordRef,
-			DeviceID: fields.DeviceID, AccountUUID: fields.AccountUUID,
-		}
-		if row.Status == "" {
-			row.Status = "testing"
-		}
-		if fields.OAuthToken != nil {
-			row.TokenRef = *fields.OAuthToken
 		}
 		rows = append(rows, row)
 	}
 	return rows, errors.Join(errs...)
 }
 
+// inventoryRow reads one account file as a row. A key that no column of the accounts table
+// holds is refused, by file and key, so that the import never drops one.
+func inventoryRow(alias, path string) (session.AccountRow, error) {
+	file, data, err := decodeInventoryFile(alias, path)
+	if err != nil {
+		return session.AccountRow{}, err
+	}
+	unknown, err := unknownKeys(data)
+	if err != nil {
+		unknown = []string{"file"}
+	}
+	var errs []error
+	for _, key := range unknown {
+		errs = append(errs, fieldError{alias, key, "unknown key; the accounts table has no column for it"})
+	}
+	if len(errs) > 0 {
+		return session.AccountRow{}, errors.Join(errs...)
+	}
+	var fields claudeFields
+	if yaml.NewDecoder(bytes.NewReader(data)).Decode(&fields) != nil {
+		return session.AccountRow{}, fieldError{alias, "file", "not a Claude account document"}
+	}
+	row := session.AccountRow{
+		Alias: alias, Email: file.Email, ReceiverEmail: file.ReceiverEmail, Access: file.Access, Status: file.Status,
+		ProxyProvider: file.Proxy.Provider, ProxyType: file.Proxy.Type,
+		Direct: file.Proxy.Direct, ProxyHost: file.Proxy.Host, ProxyPort: file.Proxy.Port, ExpectedIP: file.Proxy.ExpectedIP,
+		UsernameRef: file.Proxy.UsernameRef, PasswordRef: file.Proxy.PasswordRef,
+		DeviceID: fields.DeviceID, AccountUUID: fields.AccountUUID,
+	}
+	if row.Status == "" {
+		row.Status = "testing"
+	}
+	if fields.OAuthToken != nil {
+		row.TokenRef = *fields.OAuthToken
+	}
+	return row, nil
+}
+
 // exportFile is the layout of an exported account file: the keys of the inventory
 // format that the gateway consumes. A key the account does not have is left out.
 type exportFile struct {
-	Email       string      `yaml:"email"`
-	Access      string      `yaml:"access"`
-	Status      string      `yaml:"status"`
-	OAuthToken  string      `yaml:"oauth_token,omitempty"`
-	DeviceID    string      `yaml:"device_id,omitempty"`
-	AccountUUID string      `yaml:"account_uuid,omitempty"`
-	Proxy       *exportExit `yaml:"proxy,omitempty"`
+	Email         string      `yaml:"email"`
+	ReceiverEmail string      `yaml:"receiver_email,omitempty"`
+	Access        string      `yaml:"access"`
+	Status        string      `yaml:"status"`
+	OAuthToken    string      `yaml:"oauth_token,omitempty"`
+	DeviceID      string      `yaml:"device_id,omitempty"`
+	AccountUUID   string      `yaml:"account_uuid,omitempty"`
+	Proxy         *exportExit `yaml:"proxy,omitempty"`
 }
 
 // exportExit is the proxy block of an exported file.
 type exportExit struct {
+	Provider    string `yaml:"provider,omitempty"`
+	Type        string `yaml:"type,omitempty"`
 	Direct      bool   `yaml:"direct,omitempty"`
 	Host        string `yaml:"host,omitempty"`
 	Port        int    `yaml:"port,omitempty"`
@@ -243,8 +268,8 @@ func ExportInventory(dir string, rows []session.AccountRow) error {
 		if !accountAlias.MatchString(row.Alias) {
 			return fieldError{row.Alias, "alias", "not an account alias"}
 		}
-		file := exportFile{Email: row.Email, Access: row.Access, Status: row.Status, OAuthToken: row.TokenRef, DeviceID: row.DeviceID, AccountUUID: row.AccountUUID}
-		if exit := (exportExit{row.Direct, row.ProxyHost, row.ProxyPort, row.ExpectedIP, row.UsernameRef, row.PasswordRef}); exit != (exportExit{}) {
+		file := exportFile{Email: row.Email, ReceiverEmail: row.ReceiverEmail, Access: row.Access, Status: row.Status, OAuthToken: row.TokenRef, DeviceID: row.DeviceID, AccountUUID: row.AccountUUID}
+		if exit := (exportExit{row.ProxyProvider, row.ProxyType, row.Direct, row.ProxyHost, row.ProxyPort, row.ExpectedIP, row.UsernameRef, row.PasswordRef}); exit != (exportExit{}) {
 			file.Proxy = &exit
 		}
 		var data bytes.Buffer
@@ -279,4 +304,39 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(temp.Name(), path)
+}
+
+// inventoryKeys and proxyKeys are the keys of an account file, and of its proxy block, that
+// a column of the accounts table holds.
+var (
+	inventoryKeys = map[string]bool{"email": true, "receiver_email": true, "access": true, "status": true, "oauth_token": true, "device_id": true, "account_uuid": true, "proxy": true}
+	proxyKeys     = map[string]bool{"provider": true, "type": true, "direct": true, "host": true, "port": true, "expected_egress_ip": true, "username_ref": true, "password_ref": true}
+)
+
+// unknownKeys returns the keys of the account document data that no column of the accounts
+// table holds, those under proxy as proxy.<key>. It names keys, never values.
+func unknownKeys(data []byte) ([]string, error) {
+	var document yaml.Node
+	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&document); err != nil {
+		return nil, err
+	}
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil, errors.New("not a mapping")
+	}
+	var unknown []string
+	pairs := document.Content[0].Content
+	for i := 0; i+1 < len(pairs); i += 2 {
+		key, value := pairs[i].Value, pairs[i+1]
+		switch {
+		case key == "proxy" && value.Kind == yaml.MappingNode:
+			for j := 0; j+1 < len(value.Content); j += 2 {
+				if name := value.Content[j].Value; !proxyKeys[name] {
+					unknown = append(unknown, "proxy."+name)
+				}
+			}
+		case !inventoryKeys[key]:
+			unknown = append(unknown, key)
+		}
+	}
+	return unknown, nil
 }
