@@ -322,13 +322,43 @@ func TestSetupRenewals(t *testing.T) {
 	if q, _ := store.QueueRenewals(ctx, nextID); fmt.Sprint(q) != "[sample-a]" {
 		t.Fatalf("no renewal 24 hours after a failure: %v", q)
 	}
-	// A page task that failed does not hold a renewal back.
+	// A renewal that stopped for a person holds the next one back for 24 hours too; a
+	// request of the button is not held back by it.
 	task, _ = store.NextSetup(ctx)
 	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupNeedsHuman, "lock", "captcha_challenge"); err != nil {
 		t.Fatal(err)
 	}
+	if q, _ := store.QueueRenewals(ctx, nextID); len(q) != 0 {
+		t.Fatalf("a renewal queued right after needs_human: %v", q)
+	}
+	c.Advance(24*time.Hour - time.Second)
+	if q, _ := store.QueueRenewals(ctx, nextID); len(q) != 0 {
+		t.Fatalf("a renewal queued 23:59:59 after needs_human: %v", q)
+	}
+	c.Advance(time.Second)
 	if q, _ := store.QueueRenewals(ctx, nextID); fmt.Sprint(q) != "[sample-a]" {
-		t.Fatalf("needs_human held a renewal back: %v", q)
+		t.Fatalf("no renewal 24 hours after needs_human: %v", q)
+	}
+	task, _ = store.NextSetup(ctx)
+	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupNeedsHuman, "lock", "captcha_challenge"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RequestSetup(ctx, "sample-a", "token_only", SetupKindPage, nil, nextID()); err != nil {
+		t.Fatalf("the button after needs_human: %v", err)
+	}
+	if task, _ = store.NextSetup(ctx); task == nil {
+		t.Fatal("the button's task was not handed out")
+	}
+	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupFailed, "lock", "account_busy"); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(24 * time.Hour)
+	if q, _ := store.QueueRenewals(ctx, nextID); fmt.Sprint(q) != "[sample-a]" {
+		t.Fatalf("no renewal after the button's task failed 24 hours ago: %v", q)
+	}
+	task, _ = store.NextSetup(ctx)
+	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupFailed, "lock", "account_busy"); err != nil {
+		t.Fatal(err)
 	}
 	// 20 days later sample-a is overdue, sample-b is due in 45.
 	c.Advance(20 * 24 * time.Hour)
@@ -337,6 +367,7 @@ func TestSetupRenewals(t *testing.T) {
 		t.Fatalf("due = %v", due)
 	}
 	// A token written now is not due.
+	request(t, store, "sample-a", SetupKindPage)
 	task, _ = store.NextSetup(ctx)
 	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupRunning, "lock", ""); err != nil {
 		t.Fatal(err)

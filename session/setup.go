@@ -558,7 +558,7 @@ func (r SetupRow) renewalDue(now time.Time) bool {
 		return false
 	case r.State == SetupRequested || r.State == SetupRunning:
 		return false
-	case r.State == SetupFailed && r.Kind == SetupKindRenewal && now.Sub(r.UpdatedAt) < SetupRenewRetry:
+	case (r.State == SetupFailed || r.State == SetupNeedsHuman) && r.Kind == SetupKindRenewal && now.Sub(r.UpdatedAt) < SetupRenewRetry:
 		return false
 	}
 	return true
