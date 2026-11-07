@@ -1830,7 +1830,7 @@ class Run:
         if process is self.gateway:
           if process.poll() is None:
             result = self.docker(
-              "stop", "--time", "8", self.setup.names[0], timeout=12
+              "stop", "--time", "20", self.setup.names[0], timeout=24
             )
             if result.returncode:
               report["cleanup_failures"].append(
@@ -1839,6 +1839,8 @@ class Run:
               continue
           stdout, _ = process.communicate(timeout=10)
           report["gateway_container_exit_code"] = process.returncode
+          if not stdout.strip():
+            raise RuntimeError("gateway container printed no result")
           report["gateway"] = json.loads(stdout.splitlines()[-1])
         elif process.poll() is None:
           os.killpg(process.pid, signal.SIGTERM)
