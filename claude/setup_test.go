@@ -544,7 +544,7 @@ func TestSetupHandoverCreates(t *testing.T) {
 		t.Fatalf("request: %d %s", status, body)
 	}
 	task := h.next(t)
-	for key, want := range map[string]any{"alias": "sample-new", "action": "login_and_token", "email": "new@example.test", "device_id": ""} {
+	for key, want := range map[string]any{"alias": "sample-new", "action": "login_and_token", "email": "new@example.test", "device_id": testDeviceID} {
 		if task[key] != want {
 			t.Fatalf("task[%s] = %v, want %v", key, task[key], want)
 		}

@@ -122,7 +122,7 @@ func newWriteHarness(t *testing.T, allow ...netip.Prefix) *writeHarness {
 	w.dir = writeInventory(t, map[string]string{
 		"sample-a.yaml": strings.Replace(inventoryYAML("sample-a", "active", "gateway", "op://example-vault/token-sample-a/credential", port), "host: proxy.example.test", "host: "+host, 1),
 		"sample-spare.yaml": strings.NewReplacer("op://example-proxies/proxy-account/", "op://example-proxies/spare-account/", "192.0.2.1", "192.0.2.77").
-			Replace(inventoryYAML("sample-spare", "testing", "gateway", "op://example-vault/token-sample-spare/credential", "9")),
+			Replace(inventoryYAML("sample-spare", "testing", "gateway", "op://example-vault/token-sample-spare/credential", "9") + "device_id: " + strings.Repeat("a", 64) + "\n"),
 	})
 	importFixture(t, w.harness, w.dir)
 	set, err := LoadAccountsFrom(t.Context(), StoreSource(w.store, w.dir), Claude, writeResolve, DefaultAccountConcurrency)
@@ -237,11 +237,22 @@ func (w *writeHarness) exitAddress() (host, port string) {
 	return host, port
 }
 
+// testDeviceID is a made-up device ID; testDeviceID2 is another.
+const (
+	testDeviceID  = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testDeviceID2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+)
+
 // newBody is a create request that passes: a made-up account behind the fixture's exit,
 // with the fixture's proxy login.
 func (w *writeHarness) newBody() string {
 	host, port := w.exitAddress()
-	return `{"alias":"sample-new","email":"new@example.test","access":"gateway","plan":"pro","proxy":{"host":"` + host + `","port":` + port + `,"expected_egress_ip":"192.0.2.2","username_ref":"op://example-proxies/proxy-account/username","password_ref":"op://example-proxies/proxy-account/password"}}`
+	return `{"alias":"sample-new","email":"new@example.test","access":"gateway","device_id":"` + testDeviceID + `","plan":"pro","proxy":{"host":"` + host + `","port":` + port + `,"expected_egress_ip":"192.0.2.2","username_ref":"op://example-proxies/proxy-account/username","password_ref":"op://example-proxies/proxy-account/password"}}`
+}
+
+// bodyFor is newBody for another alias and another device ID.
+func (w *writeHarness) bodyFor(alias string) string {
+	return strings.Replace(strings.Replace(w.newBody(), "sample-new", alias, 1), testDeviceID, testDeviceID2, 1)
 }
 
 // TestWriteRouteChecks checks each check the write routes run before they read a field:
@@ -395,13 +406,17 @@ func TestCreateAccount(t *testing.T) {
 		status            int
 	}{
 		{"taken", w.newBody(), "alias", 409},
-		{"not_an_alias", strings.Replace(w.newBody(), "sample-new", "Not An Alias", 1), "alias", 400},
-		{"login_nobody_uses", strings.Replace(strings.Replace(w.newBody(), "sample-new", "sample-two", 1), "proxy-account/username", "other/username", 1), "proxy.username_ref", 400},
-		{"unknown_plan", strings.Replace(strings.Replace(w.newBody(), "sample-new", "sample-two", 1), `"pro"`, `"no-such-plan"`, 1), "plan", 400},
+		{"missing_device_id", strings.Replace(w.bodyFor("sample-two"), `"device_id":"`+testDeviceID2+`",`, "", 1), "device_id", 400},
+		{"bad_device_id", strings.Replace(w.bodyFor("sample-two"), testDeviceID2, "ABC", 1), "device_id", 400},
+		{"empty_device_id", strings.Replace(w.bodyFor("sample-two"), testDeviceID2, "", 1), "device_id", 400},
+		{"device_id_taken", strings.Replace(w.newBody(), "sample-new", "sample-two", 1), "device_id", 409},
+		{"not_an_alias", w.bodyFor("Not An Alias"), "alias", 400},
+		{"login_nobody_uses", strings.Replace(w.bodyFor("sample-two"), "proxy-account/username", "other/username", 1), "proxy.username_ref", 400},
+		{"unknown_plan", strings.Replace(w.bodyFor("sample-two"), `"pro"`, `"no-such-plan"`, 1), "plan", 400},
 		{"missing_proxy", `{"alias":"sample-two","email":"two@example.test","access":"gateway","plan":"pro"}`, "proxy", 400},
-		{"bad_port", strings.Replace(strings.Replace(w.newBody(), "sample-new", "sample-two", 1), port, "70000", 1), "proxy.port", 400},
-		{"bad_ip", strings.Replace(strings.Replace(w.newBody(), "sample-new", "sample-two", 1), "192.0.2.2", "not-an-ip", 1), "proxy.expected_egress_ip", 400},
-		{"bad_host", strings.Replace(strings.Replace(w.newBody(), "sample-new", "sample-two", 1), host, "a/b", 1), "proxy.host", 400},
+		{"bad_port", strings.Replace(w.bodyFor("sample-two"), port, "70000", 1), "proxy.port", 400},
+		{"bad_ip", strings.Replace(w.bodyFor("sample-two"), "192.0.2.2", "not-an-ip", 1), "proxy.expected_egress_ip", 400},
+		{"bad_host", strings.Replace(w.bodyFor("sample-two"), host, "a/b", 1), "proxy.host", 400},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			before := w.state(t)
@@ -416,16 +431,16 @@ func TestCreateAccount(t *testing.T) {
 	}
 	// A template whose result is no reference for some alias is refused for that alias.
 	w.writer.cfg.TokenRefTemplate = "env://TOKEN_{alias}"
-	status, answer, _ = w.serve(t, request("POST", "/accounts", strings.Replace(w.newBody(), "sample-new", "sample-x", 1)))
+	status, answer, _ = w.serve(t, request("POST", "/accounts", w.bodyFor("sample-x")))
 	if status != 400 || answer["field"] != "alias" {
 		t.Fatalf("alias that makes no reference: %d %v", status, answer)
 	}
-	if status, _, body := w.serve(t, request("POST", "/accounts", strings.Replace(w.newBody(), "sample-new", "samplex", 1))); status != 200 {
+	if status, _, body := w.serve(t, request("POST", "/accounts", w.bodyFor("samplex"))); status != 200 {
 		t.Fatalf("control arm, an alias that makes one: %d %s", status, body)
 	}
 	// Without a template no account can be created; with one the same body passes (above).
 	w.writer.cfg.TokenRefTemplate = ""
-	status, answer, _ = w.serve(t, request("POST", "/accounts", strings.Replace(w.newBody(), "sample-new", "sample-two", 1)))
+	status, answer, _ = w.serve(t, request("POST", "/accounts", w.bodyFor("sample-two")))
 	if status != 409 || answer["field"] != "token_ref" {
 		t.Fatalf("create without a template: %d %v", status, answer)
 	}
@@ -474,6 +489,9 @@ func TestUpdateAccount(t *testing.T) {
 		t.Fatalf("a no-op edit wrote %d audit rows", len(audit))
 	}
 
+	if status, _, body := w.serve(t, request("POST", "/accounts", w.newBody())); status != 200 {
+		t.Fatalf("create: %d %s", status, body)
+	}
 	// Refused edits, each with the field it names.
 	for _, test := range []struct {
 		name, body, field string
@@ -482,6 +500,7 @@ func TestUpdateAccount(t *testing.T) {
 		{"active_is_for_activate", `{"rev":2,"status":"active"}`, "status", 400},
 		{"unknown_status", `{"rev":2,"status":"gone"}`, "status", 400},
 		{"bad_device_id", `{"rev":2,"device_id":"ABC"}`, "device_id", 400},
+		{"device_id_taken", `{"rev":2,"device_id":"` + testDeviceID + `"}`, "device_id", 409},
 		{"bad_uuid", `{"rev":2,"account_uuid":"x"}`, "account_uuid", 400},
 		{"bad_email", `{"rev":2,"email":"sk-ant-oat01-PASTED"}`, "email", 400},
 		{"login_nobody_uses", `{"rev":2,"proxy":{"username_ref":"op://example-proxies/proxy-account/password"}}`, "proxy.username_ref", 400},
@@ -732,6 +751,21 @@ func TestActivate(t *testing.T) {
 	}
 }
 
+// TestActivateNeedsDeviceID checks that an account without a device ID, as an older one
+// may be, is not activated, whatever else is ready.
+func TestActivateNeedsDeviceID(t *testing.T) {
+	w := newWriteHarness(t)
+	w.serve(t, request("POST", "/accounts", w.newBody()))
+	if _, err := w.store.UpdateAccount(t.Context(), "sample-new", 1, session.AuditEntry{Action: "test"}, func(row *session.AccountRow) error { row.DeviceID = ""; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	before := w.state(t)
+	status, answer, body := w.serve(t, request("POST", "/accounts/sample-new/activate", `{"rev":2}`))
+	if status != 409 || answer["check"] != "device_id" || w.state(t) != before {
+		t.Fatalf("%d %s", status, body)
+	}
+}
+
 // TestNoCredentialValueIsKept checks, after a run of writes, that no credential value
 // the resolver gave out is in the log, an audit row, the table or a snapshot of the
 // store; a reference is (the control arm of the search).
@@ -740,7 +774,7 @@ func TestNoCredentialValueIsKept(t *testing.T) {
 	w.serve(t, request("POST", "/accounts", w.newBody()))
 	w.serve(t, request("POST", "/accounts/sample-a/verify", `{}`))
 	w.serve(t, request("PATCH", "/accounts/sample-a", `{"rev":1,"email":"changed@example.test"}`))
-	w.serve(t, request("POST", "/accounts", strings.Replace(w.newBody(), "sample-new", "sample-new", 1))) // refused, taken
+	w.serve(t, request("POST", "/accounts", w.bodyFor("sample-new"))) // refused, taken
 	snapshot := filepath.Join(t.TempDir(), "snapshot.sqlite")
 	if err := w.store.VacuumInto(t.Context(), snapshot); err != nil {
 		t.Fatal(err)

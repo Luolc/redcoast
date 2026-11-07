@@ -77,7 +77,8 @@ func TestAdminCommandParsing(t *testing.T) {
 		{"setup_request_without_source", []string{"setup", "request", "sample-a", "--rev", "3", "--source-thread", slackThread, "--admin-socket", "admin.sock"}, "", "", ""},
 		{"setup_request_with_run_id", []string{"setup", "request", "sample-a", "--rev", "3", "--run-id", setupRunID, "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "", "", ""},
 		{"account_create", append([]string{"account", "create", "sample-new"}, accountCreateFlags...), "POST", "/accounts",
-			`{"alias":"sample-new","email":"new@example.test","plan":"max-20x","proxy":{"expected_egress_ip":"192.0.2.9","host":"proxy.example.test","password_ref":"op://example-proxies/proxy-account/password","port":8080,"username_ref":"op://example-proxies/proxy-account/username"},"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
+			`{"alias":"sample-new","device_id":"` + testDeviceID + `","email":"new@example.test","plan":"max-20x","proxy":{"expected_egress_ip":"192.0.2.9","host":"proxy.example.test","password_ref":"op://example-proxies/proxy-account/password","port":8080,"username_ref":"op://example-proxies/proxy-account/username"},"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
+		{"account_create_without_device_id", withoutFlag(accountCreateFlags, "--device-id"), "", "", ""},
 		{"account_create_without_plan", withoutFlag(accountCreateFlags, "--plan"), "", "", ""},
 		{"account_create_without_source_ts", withoutFlag(accountCreateFlags, "--source-ts"), "", "", ""},
 		{"account_create_with_rev", append(append([]string{"account", "create", "sample-new"}, accountCreateFlags...), "--rev", "1"), "", "", ""},
@@ -307,8 +308,11 @@ func TestSetupTokenCommand(t *testing.T) {
 	}
 }
 
+// testDeviceID is a made-up device ID.
+const testDeviceID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 // accountCreateFlags are the flags of a complete `account create` after its alias.
-var accountCreateFlags = []string{"--email", "new@example.test", "--plan", "max-20x", "--proxy-host", "proxy.example.test", "--proxy-port", "8080",
+var accountCreateFlags = []string{"--email", "new@example.test", "--device-id", testDeviceID, "--plan", "max-20x", "--proxy-host", "proxy.example.test", "--proxy-port", "8080",
 	"--expected-egress-ip", "192.0.2.9", "--proxy-username-ref", "op://example-proxies/proxy-account/username",
 	"--proxy-password-ref", "op://example-proxies/proxy-account/password", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}
 

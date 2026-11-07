@@ -13,6 +13,7 @@ import (
 type agentFlags struct {
 	sourceKind, waitUntil, requestID, thread, ts string
 	email, plan, host, ip, userRef, passRef      string
+	deviceID                                     string
 	port                                         int
 	rev                                          int64
 	given                                        map[string]bool
@@ -31,6 +32,7 @@ func registerAgentFlags(flags *flag.FlagSet, subcommand string) *agentFlags {
 	flags.StringVar(&f.thread, "source-thread", "", "Thread key CHANNEL/TS of the Slack message a write came from")
 	flags.StringVar(&f.ts, "source-ts", "", "ts of the Slack message a write came from")
 	flags.StringVar(&f.email, "email", "", "Login email of a new account")
+	flags.StringVar(&f.deviceID, "device-id", "", "Device ID of a new account, 64 lower-case hex digits")
 	flags.StringVar(&f.plan, "plan", "", "Plan of a new account")
 	flags.StringVar(&f.host, "proxy-host", "", "Proxy host of a new account")
 	flags.IntVar(&f.port, "proxy-port", 0, "Proxy port of a new account")
@@ -107,12 +109,12 @@ func accountAgentCommand(a *agentFlags, socket string, rest []string) (adminComm
 		}
 		cmd.method, cmd.path, cmd.timeout = http.MethodGet, "/accounts/"+alias, 10*time.Second
 	case "create":
-		fields := []string{"email", "plan", "proxy-host", "proxy-port", "expected-egress-ip", "proxy-username-ref", "proxy-password-ref", "source-thread", "source-ts"}
+		fields := []string{"email", "device-id", "plan", "proxy-host", "proxy-port", "expected-egress-ip", "proxy-username-ref", "proxy-password-ref", "source-thread", "source-ts"}
 		if !a.only(fields...) || !a.has(fields...) {
 			return adminCommand{}, errAdminUsage
 		}
 		cmd.path = "/accounts"
-		cmd.body = map[string]any{"alias": alias, "email": a.email, "plan": a.plan, "source": a.source(),
+		cmd.body = map[string]any{"alias": alias, "email": a.email, "device_id": a.deviceID, "plan": a.plan, "source": a.source(),
 			"proxy": map[string]any{"host": a.host, "port": a.port, "expected_egress_ip": a.ip, "username_ref": a.userRef, "password_ref": a.passRef}}
 		cmd.timeout = 30 * time.Second
 	case "verify", "activate":

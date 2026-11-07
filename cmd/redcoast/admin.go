@@ -57,7 +57,7 @@ var errAdminUsage = errors.New(`usage:
   redcoast claude setup report <alias> <request-id> --run-id <id> --source-kind <dashboard|slack> --state <state> --step <code> [--reason <code>] [--wait-until <RFC 3339>] --admin-socket <path>
   redcoast claude setup token <alias> <request-id> --run-id <id> --source-kind <dashboard|slack> --admin-socket <path> < token
   redcoast claude setup request <alias> --rev <n> --source-thread <CHANNEL/TS> --source-ts <TS> --admin-socket <path>
-  redcoast claude account create <alias> --email <email> --plan <plan> --proxy-host <host> --proxy-port <port>
+  redcoast claude account create <alias> --email <email> --device-id <hex> --plan <plan> --proxy-host <host> --proxy-port <port>
       --expected-egress-ip <ip> --proxy-username-ref <ref> --proxy-password-ref <ref>
       --source-thread <CHANNEL/TS> --source-ts <TS> --admin-socket <path>
   redcoast claude account show <alias> --admin-socket <path>
