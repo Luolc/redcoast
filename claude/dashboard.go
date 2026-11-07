@@ -329,7 +329,7 @@ func (d *Dashboard) setupView(ctx context.Context, view *dashboardView) (*setupG
 		if c := view.Accounts[i].Config; c != nil {
 			shown = append(shown, c)
 		}
-		view.Accounts[i].Setup = blockOf(states[view.Accounts[i].Alias])
+		view.Accounts[i].Setup = setup.block(view.Accounts[i].Alias, states[view.Accounts[i].Alias])
 	}
 	return setup.decorate(states, shown), nil
 }

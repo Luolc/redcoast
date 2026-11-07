@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,11 +23,9 @@ import (
 // actionSetup is the action name the setup request of the page carries.
 const actionSetup = "account-setup"
 
-// The actions of a setup task.
-const (
-	actionLoginAndToken = "login_and_token"
-	actionTokenOnly     = "token_only"
-)
+// actionLoginAndToken is the one action of a setup task: log in, run `claude setup-token`
+// and hand the token over.
+const actionLoginAndToken = "login_and_token"
 
 // maxSetupReport bounds the body of a report; maxSetupToken the token of a handover.
 const (
@@ -72,7 +71,7 @@ var setupReasons = []string{
 	"cli_missing", "cli_start_failed", "cli_environment_unreadable", "cli_output_failed", "cli_output_limit", "cli_url_timeout", "cli_exited_before_url", "ambiguous_auth_url",
 	"cli_exited_before_authorize", "cli_config_dir_mismatch", "cli_exited_before_code", "code_shape_unexpected", "cli_input_failed", "cli_exit_timeout", "cli_login_failed",
 	"cli_cleanup_timeout", "cli_status_timeout", "cli_status_failed", "cli_status_invalid",
-	"login_not_verified", "credentials_expiry_unreadable",
+	"login_not_verified", "credentials_expiry_unreadable", "profile_exists",
 	"step_timeout", "step_not_forward", "interrupted", "not_started", "not_implemented", "unexpected_error",
 	"token_cli_failed", "token_url_timeout", "token_output_unreadable", "handover_failed",
 }
@@ -90,6 +89,7 @@ const (
 	reasonTargetMissing     = "write_target_missing"
 	reasonTargetAmbiguous   = "write_target_ambiguous"
 	reasonWriteFailed       = "write_failed"
+	reasonItemFields        = "created_item_has_other_fields"
 	reasonReadbackMismatch  = "readback_mismatch"
 	reasonReloadFailed      = "reload_failed"
 	errorSetupUnavailable   = "setup_unavailable"
@@ -102,7 +102,8 @@ const (
 	errorReasonInvalid      = "reason_invalid"
 	errorSetupOpen          = "setup_open"
 	errorRevStale           = "rev_stale"
-	errorAccountRetired     = "account_retired"
+	errorAccountStatus      = "account_status"
+	errorDirectAccount      = "direct_account"
 	errorSetupStoreNotReady = "session store unavailable"
 )
 
@@ -117,11 +118,17 @@ type setupError struct {
 func (e setupError) Error() string { return e.code }
 
 // Setup runs the gateway's side of setting an account's token: the tasks the page asks
-// for and the renewals it queues itself, handed to a login machine through the admin
-// socket, and the handover that ends in the secret store. It is nil while setup is off.
+// for, handed to a login machine through the admin socket, and the handover that ends in
+// the secret store. It also reads the expiry date of each account's token item. It is nil
+// while setup is off.
 type Setup struct {
 	w         *AccountWriter
 	lastAsked atomic.Pointer[time.Time]
+
+	mu       sync.Mutex
+	expiries map[string]tokenExpiry
+	// reread asks Run to read the expiry dates again.
+	reread chan struct{}
 }
 
 // Setup returns the gateway's setup, nil when it is off or w is nil.
@@ -145,17 +152,33 @@ func newRequestID() string {
 // is a state, an ID, a fixed code or a time; identity is null until the gateway can check
 // that a token is the account's own.
 type setupBlock struct {
-	State             string     `json:"state"`
-	RequestID         *string    `json:"request_id"`
-	RunID             *string    `json:"run_id"`
-	Step              *string    `json:"step"`
-	Reason            *string    `json:"reason"`
-	UpdatedAt         *time.Time `json:"updated_at"`
-	TokenSetAt        *time.Time `json:"token_set_at"`
-	TokenDueAt        *time.Time `json:"token_due_at"`
-	Action            *string    `json:"action"`
-	Identity          *string    `json:"identity"`
-	TokenSetEstimated bool       `json:"token_set_estimated"`
+	State       string      `json:"state"`
+	RequestID   *string     `json:"request_id"`
+	RunID       *string     `json:"run_id"`
+	Step        *string     `json:"step"`
+	Reason      *string     `json:"reason"`
+	UpdatedAt   *time.Time  `json:"updated_at"`
+	TokenSetAt  *time.Time  `json:"token_set_at"`
+	Action      *string     `json:"action"`
+	Identity    *string     `json:"identity"`
+	TokenExpiry tokenExpiry `json:"token_expiry"`
+}
+
+// The states of a token's expiry date as the gateway read it from the secret store item.
+const (
+	expiryRead        = "read"
+	expiryNoField     = "no_field"
+	expiryUnreadable  = "unreadable"
+	expiryUnavailable = "unavailable"
+)
+
+// tokenExpiry is the expiry date of the item at an account's token reference, as read:
+// state is read (ExpiresAt is set), no_field (the item has no expiry date), unreadable
+// (the item or its date could not be read) or unavailable (not read yet).
+type tokenExpiry struct {
+	State     string     `json:"state"`
+	ExpiresAt *time.Time `json:"expires_at"`
+	ReadAt    *time.Time `json:"read_at"`
 }
 
 func stringPointer(s string) *string {
@@ -173,7 +196,8 @@ func timePointer(t time.Time) *time.Time {
 	return &t
 }
 
-// blockOf returns row as the dashboard shows it; the zero row is not_started.
+// blockOf returns row as the dashboard shows it; the zero row is not_started. The expiry
+// is not read yet.
 func blockOf(row session.SetupRow) *setupBlock {
 	state := row.State
 	if state == "" {
@@ -181,7 +205,19 @@ func blockOf(row session.SetupRow) *setupBlock {
 	}
 	return &setupBlock{State: state, RequestID: stringPointer(row.RequestID), RunID: stringPointer(row.RunID), Step: stringPointer(row.Step),
 		Reason: stringPointer(row.Reason), UpdatedAt: timePointer(row.UpdatedAt), TokenSetAt: timePointer(row.TokenSetAt),
-		TokenDueAt: timePointer(row.TokenDueAt()), Action: stringPointer(row.Action), TokenSetEstimated: row.TokenSetEstimated}
+		Action: stringPointer(row.Action), TokenExpiry: tokenExpiry{State: expiryUnavailable}}
+}
+
+// block is blockOf with the expiry date last read for the account alias, whose row may
+// be the zero row.
+func (s *Setup) block(alias string, row session.SetupRow) *setupBlock {
+	b := blockOf(row)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.expiries[alias]; ok {
+		b.TokenExpiry = e
+	}
+	return b
 }
 
 // setupGateway is gateway.setup of /dashboard.json.
@@ -194,7 +230,7 @@ type setupGateway struct {
 // decorate puts each account's setup block into the views and returns the gateway's.
 func (s *Setup) decorate(rows map[string]session.SetupRow, configs []*accountConfig) *setupGateway {
 	for _, c := range configs {
-		c.Setup = blockOf(rows[c.Alias])
+		c.Setup = s.block(c.Alias, rows[c.Alias])
 	}
 	g := &setupGateway{Enabled: true, LastAskedAt: s.lastAskedAt()}
 	for _, row := range rows {
@@ -225,20 +261,22 @@ type accepted struct{ body any }
 // has a requested or running task, when rev is not the account's and when the account is
 // retired.
 func (w *AccountWriter) setupRequest(r *http.Request, alias string, body *setupBody, entry session.AuditEntry) (any, error) {
-	if body.Action == nil || *body.Action != actionLoginAndToken && *body.Action != actionTokenOnly {
-		return nil, fieldProblem("action", "must be login_and_token or token_only")
+	if body.Action == nil || *body.Action != actionLoginAndToken {
+		return nil, fieldProblem("action", "must be login_and_token")
 	}
 	if body.Rev == nil {
 		return nil, fieldProblem("rev", "missing")
 	}
-	row, before, err := w.cfg.Store.RequestSetup(r.Context(), alias, *body.Action, session.SetupKindPage, body.Rev, newRequestID())
+	row, before, err := w.cfg.Store.RequestSetup(r.Context(), alias, *body.Action, body.Rev, newRequestID())
 	switch {
 	case errors.Is(err, session.ErrRevConflict):
 		return nil, writeError{status: http.StatusConflict, message: errorRevStale, field: "rev"}
 	case errors.Is(err, session.ErrSetupOpen):
 		return nil, writeError{status: http.StatusConflict, message: errorSetupOpen}
-	case errors.Is(err, session.ErrSetupRetired):
-		return nil, writeError{status: http.StatusConflict, message: errorAccountRetired}
+	case errors.Is(err, session.ErrSetupStatus):
+		return nil, writeError{status: http.StatusConflict, message: errorAccountStatus}
+	case errors.Is(err, session.ErrSetupDirect):
+		return nil, writeError{status: http.StatusConflict, message: errorDirectAccount}
 	case err != nil:
 		return nil, storeError(err)
 	}
@@ -246,7 +284,7 @@ func (w *AccountWriter) setupRequest(r *http.Request, alias string, body *setupB
 		log.Printf("account write alias=%s: the setup request was not audited", alias)
 	}
 	log.Printf("account write ip=%s action=%s alias=%s result=ok setup_action=%s", entry.SourceIP, entry.Action, alias, *body.Action)
-	return accepted{body: map[string]any{"setup": blockOf(row)}}, nil
+	return accepted{body: map[string]any{"setup": w.Setup().block(alias, row)}}, nil
 }
 
 // nextTask is the task `setup next` answers: what a login machine needs of the account,
@@ -256,6 +294,7 @@ type nextTask struct {
 	Action      string        `json:"action"`
 	RequestID   string        `json:"request_id"`
 	RequestedAt time.Time     `json:"requested_at"`
+	Status      string        `json:"status"`
 	Email       string        `json:"email"`
 	DeviceID    string        `json:"device_id"`
 	Proxy       taskProxyView `json:"proxy"`
@@ -283,7 +322,7 @@ func (s *Setup) Next(ctx context.Context) (*nextTask, error) {
 	}
 	a := task.Account
 	log.Printf("setup alias=%s request_id=%s result=handed_out action=%s", task.Alias, task.RequestID, task.Action)
-	return &nextTask{Alias: task.Alias, Action: task.Action, RequestID: task.RequestID, RequestedAt: task.RequestedAt, Email: a.Email, DeviceID: a.DeviceID,
+	return &nextTask{Alias: task.Alias, Action: task.Action, RequestID: task.RequestID, RequestedAt: task.RequestedAt, Status: a.Status, Email: a.Email, DeviceID: a.DeviceID,
 		Proxy: taskProxyView{Host: a.ProxyHost, Port: a.ProxyPort, UsernameRef: a.UsernameRef, PasswordRef: a.PasswordRef, ExpectedIP: a.ExpectedIP, Direct: a.Direct}}, nil
 }
 
@@ -336,7 +375,7 @@ func (s *Setup) Report(ctx context.Context, alias string, body reportBody) (*set
 		return nil, err
 	}
 	log.Printf("setup alias=%s request_id=%s state=%s step=%s reason=%s", alias, body.RequestID, body.State, body.Step, reason)
-	return blockOf(row), nil
+	return s.block(alias, row), nil
 }
 
 // taskError maps the store's task errors to refusals.
@@ -465,8 +504,15 @@ func (s *Setup) handover(ctx context.Context, task session.SetupTask, token stri
 	if err := s.step(ctx, task, stepWrite); err != nil {
 		return nil, err
 	}
-	if _, err := credential.Write(ctx, secrets, account.TokenRef, token, true); err != nil {
+	expires := w.now().UTC().AddDate(session.SetupTokenYears, 0, 0)
+	if created, err := credential.Write(ctx, secrets, account.TokenRef, token, expires, true); err != nil {
+		var extra credential.ExtraFieldsError
 		switch {
+		case errors.As(err, &extra):
+			log.Printf("setup alias=%s request_id=%s: the created item has other fields: %s", task.Alias, task.RequestID, strings.Join(extra.Names, ","))
+			return nil, s.fail(ctx, task, stepWrite, reasonItemFields, http.StatusInternalServerError, true)
+		case created:
+			return nil, s.fail(ctx, task, stepWrite, reasonWriteFailed, http.StatusBadGateway, true)
 		case errors.Is(err, credential.ErrTargetMissing):
 			return nil, s.fail(ctx, task, stepWrite, reasonTargetMissing, http.StatusInternalServerError, false)
 		case errors.Is(err, credential.ErrTargetAmbiguous):
@@ -497,8 +543,9 @@ func (s *Setup) handover(ctx context.Context, task session.SetupTask, token stri
 		return nil, setupError{status: http.StatusConflict, code: errorNoOpenTask, written: true}
 	}
 	s.audit(rec, task, session.SetupDone)
+	s.readExpiry(rec, secrets, task.Alias, account.TokenRef)
 	log.Printf("setup alias=%s request_id=%s step=%s result=done written=true", task.Alias, task.RequestID, stepComplete)
-	return &handoverResult{Setup: blockOf(row), Probe: "ok", Written: true, Reload: "ok"}, nil
+	return &handoverResult{Setup: s.block(task.Alias, row), Probe: "ok", Written: true, Reload: "ok"}, nil
 }
 
 // probe sends the quota request with token as the account's token, through the account's
@@ -554,15 +601,15 @@ func (s *Setup) Start(ctx context.Context) error {
 	return nil
 }
 
-// Run applies the timeouts every minute and, once an hour, dates the tokens the gateway
-// did not write and queues the renewals, until ctx is canceled. On a nil Setup it only
-// waits for ctx.
+// Run applies the timeouts every minute and reads the expiry dates at start, once an
+// hour and whenever it is asked to, until ctx is canceled. On a nil Setup it only waits
+// for ctx.
 func (s *Setup) Run(ctx context.Context) error {
 	if s == nil {
 		<-ctx.Done()
 		return nil
 	}
-	const sweepEvery = time.Hour
+	const readEvery = time.Hour
 	last := time.Time{}
 	tick := time.NewTicker(time.Minute)
 	defer tick.Stop()
@@ -570,75 +617,75 @@ func (s *Setup) Run(ctx context.Context) error {
 		if err := s.w.cfg.Store.ExpireSetups(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("setup: timeouts not applied: session store unavailable")
 		}
-		if now := s.w.now(); now.Sub(last) >= sweepEvery {
+		if now := s.w.now(); now.Sub(last) >= readEvery {
 			last = now
-			s.sweep(ctx)
+			s.readExpiries(ctx)
 		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-tick.C:
+		case <-s.reread:
+			s.readExpiries(ctx)
 		}
 	}
 }
 
-// sweep dates the tokens of active and paused accounts that the gateway did not write,
-// from the secret store's item, and queues a renewal for each that is due.
-func (s *Setup) sweep(ctx context.Context) {
-	store := s.w.cfg.Store
-	if s.w.cfg.SetupSecrets != nil {
-		s.estimate(ctx)
-	}
-	queued, err := store.QueueRenewals(ctx, newRequestID)
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("setup: renewals not queued: session store unavailable")
-		}
+// RereadExpiries asks Run to read the expiry dates again, without waiting for it.
+func (s *Setup) RereadExpiries() {
+	if s == nil {
 		return
 	}
-	if len(queued) > 0 {
-		log.Printf("setup: queued token_only renewal for %s", strings.Join(queued, " "))
+	select {
+	case s.reread <- struct{}{}:
+	default:
 	}
 }
 
-// estimate sets the token time of each active or paused account whose token the gateway
-// did not write to the update time of its secret store item, when that can be read.
-func (s *Setup) estimate(ctx context.Context) {
+// readExpiries reads the expiry date of the item at each account's token reference,
+// whatever the account's status. A failure is noted for that account and changes nothing
+// else.
+func (s *Setup) readExpiries(ctx context.Context) {
 	rows, _, err := s.w.cfg.Store.Accounts(ctx)
 	if err != nil {
 		return
 	}
-	secrets, err := s.w.cfg.SetupSecrets(ctx)
-	if err != nil {
-		log.Printf("setup: the secret store is not available to date tokens")
-		return
-	}
+	secrets := s.secrets(ctx)
 	for _, row := range rows {
-		if row.Status != "active" && row.Status != "paused" {
-			continue
-		}
-		at, err := credential.Updated(ctx, secrets, row.TokenRef)
-		if err != nil || at.IsZero() {
-			continue
-		}
-		if err := s.w.cfg.Store.SetTokenEstimate(ctx, row.Alias, at.UTC()); err != nil {
-			log.Printf("setup alias=%s: the token time was not recorded", row.Alias)
-		}
+		s.readExpiry(ctx, secrets, row.Alias, row.TokenRef)
 	}
 }
 
-// Problems names, for /health, each active or paused account whose token is due within
-// 7 days of its due date and has no newer one.
-func (s *Setup) Problems() []string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	due, err := s.w.cfg.Store.TokensDue(ctx, 7*24*time.Hour)
+// secrets opens the secret store, nil when it cannot be opened.
+func (s *Setup) secrets(ctx context.Context) credential.Store {
+	if s.w.cfg.SetupSecrets == nil {
+		return nil
+	}
+	secrets, err := s.w.cfg.SetupSecrets(ctx)
 	if err != nil {
 		return nil
 	}
-	var out []string
-	for _, d := range due {
-		out = append(out, d.Alias+": token due "+d.At.UTC().Format("2006-01-02"))
+	return secrets
+}
+
+// readExpiry reads the expiry date at reference and keeps it for alias. It reads no
+// token, and logs only the alias and the state.
+func (s *Setup) readExpiry(ctx context.Context, secrets credential.Store, alias, reference string) {
+	now := s.w.now().UTC()
+	e := tokenExpiry{State: expiryUnreadable, ReadAt: &now}
+	if secrets != nil {
+		at, err := credential.Expires(ctx, secrets, reference)
+		switch {
+		case err == nil:
+			e.State, e.ExpiresAt = expiryRead, &at
+		case errors.Is(err, credential.ErrExpiresMissing):
+			e.State = expiryNoField
+		}
 	}
-	return out
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old, ok := s.expiries[alias]; !ok || old.State != e.State {
+		log.Printf("setup alias=%s token_expiry=%s", alias, e.State)
+	}
+	s.expiries[alias] = e
 }

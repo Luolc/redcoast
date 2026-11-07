@@ -16,12 +16,17 @@ type fakeStore struct {
 
 	sets, creates int
 	lastValue     string
+	lastExpires   string
+	// createExtra are fields a created item gets besides those asked for;
+	// createNoExpiry leaves out the expiry field that was asked for.
+	createExtra    []Field
+	createNoExpiry bool
 }
 
 type fakeItem struct {
-	info   ItemInfo
-	fields []Field
-	update time.Time
+	info    ItemInfo
+	fields  []Field
+	expires []string
 }
 
 func (f *fakeStore) Vaults(context.Context) ([]Vault, error) {
@@ -48,29 +53,39 @@ func (f *fakeStore) Item(_ context.Context, vaultID, itemID string) (Item, error
 	}
 	for _, it := range f.items[vaultID] {
 		if it.info.ID == itemID {
-			return Item{ID: it.info.ID, Title: it.info.Title, Fields: it.fields, UpdatedAt: it.update}, nil
+			return Item{ID: it.info.ID, Title: it.info.Title, Fields: it.fields, Expires: it.expires}, nil
 		}
 	}
 	return Item{}, errors.New("no such item")
 }
 
-func (f *fakeStore) SetField(_ context.Context, _, _ string, _ Field, value string) error {
-	if f.fail["SetField"] {
+func (f *fakeStore) SetFields(_ context.Context, _, _ string, _ Field, value, expires string) error {
+	if f.fail["SetFields"] {
 		return errors.New("store said sk-ant-oat01-LEAK")
 	}
 	f.sets++
-	f.lastValue = value
+	f.lastValue, f.lastExpires = value, expires
 	return nil
 }
 
-func (f *fakeStore) Create(_ context.Context, vaultID, title, fieldTitle, value string) error {
+func (f *fakeStore) Create(_ context.Context, vaultID, title, fieldTitle, value, expires string) error {
 	if f.fail["Create"] {
 		return errors.New("store said sk-ant-oat01-LEAK")
 	}
 	f.creates++
-	f.lastValue = value
-	f.items[vaultID] = append(f.items[vaultID], fakeItem{info: ItemInfo{ID: "new-" + title, Title: title}, fields: []Field{{ID: fieldTitle, Title: fieldTitle}}})
+	f.lastValue, f.lastExpires = value, expires
+	f.items[vaultID] = append(f.items[vaultID], fakeItem{info: ItemInfo{ID: "new-" + title, Title: title}, fields: append(createdFields(fieldTitle, f.createNoExpiry), f.createExtra...), expires: []string{expires}})
 	return nil
+}
+
+// createdFields are the fields a created item has: the token's and, unless left out, the
+// expiry field.
+func createdFields(fieldTitle string, noExpiry bool) []Field {
+	fields := []Field{{ID: fieldTitle, Title: fieldTitle}}
+	if !noExpiry {
+		fields = append(fields, Field{ID: ExpiresField, Title: ExpiresField})
+	}
+	return fields
 }
 
 // newFake has one vault, "example-vault", holding an item "token-sample-a" with the
@@ -79,7 +94,7 @@ func newFake() *fakeStore {
 	return &fakeStore{
 		vaults: []Vault{{ID: "v1", Title: "example-vault"}, {ID: "v2", Title: "other-vault"}},
 		items: map[string][]fakeItem{"v1": {
-			{info: ItemInfo{ID: "i1", Title: "token-sample-a"}, fields: []Field{{ID: "credential", Title: "credential"}, {ID: "f2", Title: "notes"}}, update: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+			{info: ItemInfo{ID: "i1", Title: "token-sample-a"}, fields: []Field{{ID: "credential", Title: "credential"}, {ID: "f2", Title: "notes"}, {ID: "expires", Title: "expires"}}, expires: []string{"2027-03-01"}},
 		}},
 		fail: map[string]bool{},
 	}
@@ -87,28 +102,81 @@ func newFake() *fakeStore {
 
 const writeValue = "sk-ant-oat01-synthetic-new-value"
 
+var writeExpires = time.Date(2027, 11, 6, 22, 30, 0, 0, time.FixedZone("west", -8*3600))
+
 // TestWriteSetsOrCreates: the four writes that are allowed.
 func TestWriteSetsOrCreates(t *testing.T) {
 	t.Run("existing item gets its one field set", func(t *testing.T) {
 		f := newFake()
-		created, err := Write(t.Context(), f, "op://example-vault/token-sample-a/credential", writeValue, true)
-		if err != nil || created || f.sets != 1 || f.creates != 0 || f.lastValue != writeValue {
-			t.Fatalf("created=%v err=%v sets=%d creates=%d", created, err, f.sets, f.creates)
+		created, err := Write(t.Context(), f, "op://example-vault/token-sample-a/credential", writeValue, writeExpires, true)
+		if err != nil || created || f.sets != 1 || f.creates != 0 || f.lastValue != writeValue || f.lastExpires != "2027-11-07" {
+			t.Fatalf("created=%v err=%v sets=%d creates=%d expires=%q", created, err, f.sets, f.creates, f.lastExpires)
 		}
 	})
 	t.Run("a name matches by ID or ignoring case", func(t *testing.T) {
 		f := newFake()
-		if _, err := Write(t.Context(), f, "op://v1/i1/Credential", writeValue, false); err != nil || f.sets != 1 {
+		if _, err := Write(t.Context(), f, "op://v1/i1/Credential", writeValue, writeExpires, false); err != nil || f.sets != 1 {
 			t.Fatalf("err=%v sets=%d", err, f.sets)
+		}
+	})
+	t.Run("an item without an expiry field is written, and gets the date", func(t *testing.T) {
+		f := newFake()
+		f.items["v1"][0].fields = f.items["v1"][0].fields[:2]
+		f.items["v1"][0].expires = nil
+		if _, err := Write(t.Context(), f, "op://example-vault/token-sample-a/credential", writeValue, writeExpires, false); err != nil || f.sets != 1 || f.lastExpires != "2027-11-07" {
+			t.Fatalf("err=%v sets=%d expires=%q", err, f.sets, f.lastExpires)
 		}
 	})
 	t.Run("missing item is created when that is allowed", func(t *testing.T) {
 		f := newFake()
-		created, err := Write(t.Context(), f, "op://example-vault/token-sample-b/credential", writeValue, true)
-		if err != nil || !created || f.creates != 1 || f.sets != 0 || f.lastValue != writeValue {
+		created, err := Write(t.Context(), f, "op://example-vault/token-sample-b/credential", writeValue, writeExpires, true)
+		if err != nil || !created || f.creates != 1 || f.sets != 0 || f.lastValue != writeValue || f.lastExpires != "2027-11-07" {
 			t.Fatalf("created=%v err=%v sets=%d creates=%d", created, err, f.sets, f.creates)
 		}
 	})
+}
+
+// TestWriteChecksTheCreatedItem: after a create the item's fields are read back; a field
+// besides the token's and one expiry date, or a second expiry field, is reported with its
+// name, the item is left as it is, and the write counts as created.
+func TestWriteChecksTheCreatedItem(t *testing.T) {
+	const ref = "op://example-vault/token-sample-b/credential"
+	for _, test := range []struct {
+		name     string
+		extra    []Field
+		noExpiry bool
+		want     []string
+	}{
+		{"none", nil, false, nil},
+		{"another field", []Field{{ID: "valid_from", Title: "valid from"}}, false, []string{"valid from"}},
+		{"a second token field", []Field{{ID: "credential2", Title: "Credential"}}, false, []string{"Credential"}},
+		{"a second expiry field", []Field{{ID: "expires2", Title: "Expires"}}, false, []string{"Expires"}},
+		{"a field without a title", []Field{{ID: "x1"}}, false, []string{"x1"}},
+		// The only candidate for the expiry field has the ID of one and another title: a
+		// field is an expiry field by its title, so it is extra.
+		{"a field with the ID of the expiry field only", []Field{{ID: ExpiresField, Title: "valid until"}}, true, []string{"valid until"}},
+		// Control arm: the same field, titled expires, is the expiry field.
+		{"the expiry field has another ID", []Field{{ID: "f9", Title: "Expires"}}, true, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFake()
+			f.createExtra, f.createNoExpiry = test.extra, test.noExpiry
+			created, err := Write(t.Context(), f, ref, writeValue, writeExpires, true)
+			var extra ExtraFieldsError
+			if test.want == nil {
+				if err != nil || !created {
+					t.Fatalf("created=%v err=%v", created, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrUnexpectedFields) || !errors.As(err, &extra) || !created || strings.Join(extra.Names, ",") != strings.Join(test.want, ",") {
+				t.Fatalf("created=%v err=%v", created, err)
+			}
+			if f.sets != 0 || f.creates != 1 || len(f.items["v1"]) != 2 || strings.Contains(err.Error(), writeValue) {
+				t.Fatalf("sets=%d creates=%d items=%d", f.sets, f.creates, len(f.items["v1"]))
+			}
+		})
+	}
 }
 
 // TestWriteRefuses: each refusal writes and creates nothing, and says nothing of the
@@ -138,13 +206,17 @@ func TestWriteRefuses(t *testing.T) {
 			f.items["v1"] = append(f.items["v1"], fakeItem{info: ItemInfo{ID: "i8", Title: "Token-Sample-A"}, fields: []Field{{ID: "credential", Title: "credential"}}})
 		}, ErrTargetAmbiguous},
 		{"item lacks the field", "op://example-vault/token-sample-a/password", true, nil, ErrTargetMissing},
+		{"reference names the expiry field", "op://example-vault/token-sample-a/Expires", true, nil, ErrTargetRefused},
+		{"item has two expiry fields", "op://example-vault/token-sample-a/credential", true, func(f *fakeStore) {
+			f.items["v1"][0].expires = []string{"2027-03-01", "2028-03-01"}
+		}, ErrTargetAmbiguous},
 		{"item has the field twice", "op://example-vault/token-sample-a/credential", true, func(f *fakeStore) {
 			f.items["v1"][0].fields = append(f.items["v1"][0].fields, Field{ID: "f9", Title: "Credential"})
 		}, ErrTargetAmbiguous},
 		{"vault listing fails", "op://example-vault/token-sample-a/credential", true, func(f *fakeStore) { f.fail["Vaults"] = true }, ErrWriteFailed},
 		{"item listing fails", "op://example-vault/token-sample-a/credential", true, func(f *fakeStore) { f.fail["Items"] = true }, ErrWriteFailed},
 		{"item read fails", "op://example-vault/token-sample-a/credential", true, func(f *fakeStore) { f.fail["Item"] = true }, ErrWriteFailed},
-		{"set fails", "op://example-vault/token-sample-a/credential", true, func(f *fakeStore) { f.fail["SetField"] = true }, ErrWriteFailed},
+		{"set fails", "op://example-vault/token-sample-a/credential", true, func(f *fakeStore) { f.fail["SetFields"] = true }, ErrWriteFailed},
 		{"create fails", "op://example-vault/token-sample-b/credential", true, func(f *fakeStore) { f.fail["Create"] = true }, ErrWriteFailed},
 	}
 	for _, test := range tests {
@@ -154,7 +226,7 @@ func TestWriteRefuses(t *testing.T) {
 				test.arrange(f)
 			}
 			before := len(f.items["v1"])
-			created, err := Write(t.Context(), f, test.reference, writeValue, test.mayCreate)
+			created, err := Write(t.Context(), f, test.reference, writeValue, writeExpires, test.mayCreate)
 			if !errors.Is(err, test.want) || created || f.sets != 0 || f.creates != 0 || len(f.items["v1"]) != before {
 				t.Fatalf("err=%v want %v created=%v sets=%d creates=%d", err, test.want, created, f.sets, f.creates)
 			}
@@ -165,17 +237,43 @@ func TestWriteRefuses(t *testing.T) {
 	}
 }
 
-// TestUpdated dates an item without reading a value, and fails like Write does.
-func TestUpdated(t *testing.T) {
+// TestExpires reads the expiry date without a token, and fails like Write does.
+func TestExpires(t *testing.T) {
+	const ref = "op://example-vault/token-sample-a/credential"
+	read := func(arrange func(f *fakeStore)) (time.Time, error) {
+		f := newFake()
+		if arrange != nil {
+			arrange(f)
+		}
+		return Expires(t.Context(), f, ref)
+	}
+	want := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+	if at, err := read(nil); err != nil || !at.Equal(want) {
+		t.Fatalf("date: at=%v err=%v", at, err)
+	}
+	if at, err := read(func(f *fakeStore) { f.items["v1"][0].expires = []string{"2027-03-01T05:00:00+05:00"} }); err != nil || !at.Equal(want) {
+		t.Fatalf("RFC 3339: at=%v err=%v", at, err)
+	}
+	for _, test := range []struct {
+		name    string
+		arrange func(f *fakeStore)
+		want    error
+	}{
+		{"no expiry field", func(f *fakeStore) { f.items["v1"][0].expires = nil }, ErrExpiresMissing},
+		{"empty expiry field", func(f *fakeStore) { f.items["v1"][0].expires = []string{" "} }, ErrExpiresMissing},
+		{"not a date", func(f *fakeStore) { f.items["v1"][0].expires = []string{"next spring"} }, ErrExpiresUnreadable},
+		{"two expiry fields", func(f *fakeStore) { f.items["v1"][0].expires = []string{"2027-03-01", "2027-03-02"} }, ErrTargetAmbiguous},
+		{"item missing", func(f *fakeStore) { f.items["v1"] = nil }, ErrTargetMissing},
+		{"item read fails", func(f *fakeStore) { f.fail["Item"] = true }, ErrWriteFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := read(test.arrange); !errors.Is(err, test.want) {
+				t.Fatalf("err=%v want %v", err, test.want)
+			}
+		})
+	}
 	f := newFake()
-	at, err := Updated(t.Context(), f, "op://example-vault/token-sample-a/credential")
-	if err != nil || !at.Equal(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)) {
-		t.Fatalf("at=%v err=%v", at, err)
-	}
-	if _, err := Updated(t.Context(), f, "op://example-vault/token-sample-b/credential"); !errors.Is(err, ErrTargetMissing) {
-		t.Fatalf("missing item: %v", err)
-	}
-	if _, err := Updated(t.Context(), f, "op://example-vault/token-sample-a/password"); !errors.Is(err, ErrTargetMissing) {
+	if _, err := Expires(t.Context(), f, "op://example-vault/token-sample-a/password"); !errors.Is(err, ErrTargetMissing) {
 		t.Fatalf("missing field: %v", err)
 	}
 }
