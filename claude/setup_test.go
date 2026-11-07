@@ -38,6 +38,9 @@ type fakeSecrets struct {
 	creates  int
 	failSet  bool
 	failOpen bool
+	// createExtra are fields the store adds to an item it creates, as a category's
+	// template might.
+	createExtra []secretField
 	// readback, when set, is what a reference to a written item resolves to instead.
 	readback string
 }
@@ -111,7 +114,7 @@ func (f *fakeSecrets) SetFields(_ context.Context, _, itemID string, field crede
 	return errors.New("no such field")
 }
 
-// setExpires sets the expiry field of the item, adding it when there is none.
+// setExpires sets the expiry field of the item; an item without one gets none.
 func (it *secretItem) setExpires(date string) {
 	for i := range it.fields {
 		if it.fields[i].id == credential.ExpiresField {
@@ -119,7 +122,6 @@ func (it *secretItem) setExpires(date string) {
 			return
 		}
 	}
-	it.fields = append(it.fields, secretField{credential.ExpiresField, credential.ExpiresField, date})
 }
 
 func (f *fakeSecrets) Create(_ context.Context, _, title, fieldTitle, value, expires string) error {
@@ -129,7 +131,7 @@ func (f *fakeSecrets) Create(_ context.Context, _, title, fieldTitle, value, exp
 		return errors.New("the store refused " + value)
 	}
 	f.creates++
-	f.items = append(f.items, &secretItem{info: credential.ItemInfo{ID: "i-" + title, Title: title}, fields: []secretField{{fieldTitle, fieldTitle, value}, {credential.ExpiresField, credential.ExpiresField, expires}}})
+	f.items = append(f.items, &secretItem{info: credential.ItemInfo{ID: "i-" + title, Title: title}, fields: append([]secretField{{fieldTitle, fieldTitle, value}, {credential.ExpiresField, credential.ExpiresField, expires}}, f.createExtra...)})
 	return nil
 }
 
@@ -643,18 +645,94 @@ func TestSetupHandoverSetsExisting(t *testing.T) {
 	}
 }
 
-// TestSetupHandoverAddsTheExpiry: an item that has no expiry field gets that one field
-// with the token; no other field is added.
-func TestSetupHandoverAddsTheExpiry(t *testing.T) {
+// TestSetupHandoverAddsNoField: an item that has no expiry field gets only the token; its
+// fields are afterwards the same set, and the read says there is no date.
+func TestSetupHandoverAddsNoField(t *testing.T) {
 	h := newSetupHarness(t, true)
 	h.secrets.items[0].fields = h.secrets.items[0].fields[:2]
 	id := h.running(t, "sample-a")
-	if status, _, body := h.token(t, "sample-a", id, setupRun, setupToken); status != 200 {
+	status, answer, body := h.token(t, "sample-a", id, setupRun, setupToken)
+	if status != 200 {
 		t.Fatalf("handover: %d %s", status, body)
 	}
 	fields := h.secrets.items[0].fields
-	if len(fields) != 3 || fields[2].id != "expires" || fields[2].value != h.clock.Add(365*24*time.Hour).UTC().Format("2006-01-02") {
+	if len(fields) != 2 || fields[0].value != setupToken || fields[1].title != "notes" || fields[1].value != "keep me" {
 		t.Fatalf("fields = %+v", fields)
+	}
+	if e := answer["setup"].(map[string]any)["token_expiry"].(map[string]any); e["state"] != "no_field" {
+		t.Fatalf("token_expiry = %v", e)
+	}
+}
+
+// TestSetupRunningTaskOfAnIneligibleAccount: a running task whose account was paused
+// meanwhile takes no handover: nothing is sent upstream and nothing is written. The
+// control arm is the same task with the account still active.
+func TestSetupRunningTaskOfAnIneligibleAccount(t *testing.T) {
+	h := newSetupHarness(t, true)
+	id := h.running(t, "sample-a")
+	row, _ := h.store.Account(t.Context(), "sample-a")
+	if _, err := h.store.UpdateAccountKeepRev(t.Context(), "sample-a", row.Rev, session.AuditEntry{Action: "test"}, func(r *session.AccountRow) { r.Status = "paused" }); err != nil {
+		t.Fatal(err)
+	}
+	status, answer, body := h.token(t, "sample-a", id, setupRun, setupToken)
+	if status != 409 || answer["error"] != "no_open_task" {
+		t.Fatalf("%d %s", status, body)
+	}
+	h.nothingSent(t)
+	if got := h.setupState(t, "sample-a"); got.State != "failed" || got.Reason != "account_status" {
+		t.Fatalf("task = %+v", got)
+	}
+}
+
+// TestSetupExpiryIsACalendarYear: the date is the UTC date of the write plus one calendar
+// year; a write on 29 February is dated 1 March of the year after.
+func TestSetupExpiryIsACalendarYear(t *testing.T) {
+	for _, test := range []struct{ now, want string }{
+		{"2027-11-06T23:30:00-08:00", "2028-11-07"},
+		{"2028-02-29T12:00:00Z", "2029-03-01"},
+		{"2027-03-01T00:00:00Z", "2028-03-01"},
+	} {
+		t.Run(test.now, func(t *testing.T) {
+			h := newSetupHarness(t, true)
+			h.clock, _ = time.Parse(time.RFC3339, test.now)
+			id := h.running(t, "sample-a")
+			if status, _, body := h.token(t, "sample-a", id, setupRun, setupToken); status != 200 {
+				t.Fatalf("handover: %d %s", status, body)
+			}
+			if got := h.secrets.items[0].fields[2].value; got != test.want {
+				t.Fatalf("expires = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+// TestSetupCreatedItemHasOtherFields: an item the store created with a field besides the
+// token and the expiry date ends the task as failed, with the token written; the item is
+// not changed or deleted, nothing is reloaded, and the log and the answer name the field
+// and carry no value. A created item with just the two fields is the control.
+func TestSetupCreatedItemHasOtherFields(t *testing.T) {
+	h := newSetupHarness(t, true)
+	h.created(t)
+	h.secrets.createExtra = []secretField{{"valid_from", "valid from", "synthetic-extra-value"}}
+	row, _ := h.store.Account(t.Context(), "sample-new")
+	h.page(t, "sample-new", fmt.Sprintf(`{"action":"login_and_token","rev":%d}`, row.Rev))
+	task := h.next(t)
+	id := task["request_id"].(string)
+	h.report(t, "sample-new", id, setupRun, "running", "token_read", nil)
+	h.logs.Reset()
+	status, answer, body := h.token(t, "sample-new", id, setupRun, setupToken)
+	if status != 500 || answer["error"] != "created_item_has_other_fields" || answer["written"] != true {
+		t.Fatalf("%d %s", status, body)
+	}
+	got := h.setupState(t, "sample-new")
+	if got.State != "failed" || got.Reason != "created_item_has_other_fields" || got.Step != "write" {
+		t.Fatalf("task = %+v", got)
+	}
+	if h.reloads != 0 || len(h.secrets.items) != 2 || len(h.secrets.items[1].fields) != 3 || h.secrets.sets != 0 || h.secrets.creates != 1 {
+		t.Fatalf("reloads=%d items=%d fields=%+v sets=%d creates=%d", h.reloads, len(h.secrets.items), h.secrets.items[len(h.secrets.items)-1].fields, h.secrets.sets, h.secrets.creates)
+	}
+	if !strings.Contains(h.logs.String(), "valid from") || strings.Contains(h.logs.String()+body, "synthetic-extra-value") || strings.Contains(h.logs.String()+body, setupToken) {
+		t.Fatalf("log or answer: %s %s", h.logs.String(), body)
 	}
 }
 

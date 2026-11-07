@@ -89,6 +89,7 @@ const (
 	reasonTargetMissing     = "write_target_missing"
 	reasonTargetAmbiguous   = "write_target_ambiguous"
 	reasonWriteFailed       = "write_failed"
+	reasonItemFields        = "created_item_has_other_fields"
 	reasonReadbackMismatch  = "readback_mismatch"
 	reasonReloadFailed      = "reload_failed"
 	errorSetupUnavailable   = "setup_unavailable"
@@ -503,9 +504,15 @@ func (s *Setup) handover(ctx context.Context, task session.SetupTask, token stri
 	if err := s.step(ctx, task, stepWrite); err != nil {
 		return nil, err
 	}
-	expires := w.now().Add(session.SetupTokenLife)
-	if _, err := credential.Write(ctx, secrets, account.TokenRef, token, expires, true); err != nil {
+	expires := w.now().UTC().AddDate(session.SetupTokenYears, 0, 0)
+	if created, err := credential.Write(ctx, secrets, account.TokenRef, token, expires, true); err != nil {
+		var extra credential.ExtraFieldsError
 		switch {
+		case errors.As(err, &extra):
+			log.Printf("setup alias=%s request_id=%s: the created item has other fields: %s", task.Alias, task.RequestID, strings.Join(extra.Names, ","))
+			return nil, s.fail(ctx, task, stepWrite, reasonItemFields, http.StatusInternalServerError, true)
+		case created:
+			return nil, s.fail(ctx, task, stepWrite, reasonWriteFailed, http.StatusBadGateway, true)
 		case errors.Is(err, credential.ErrTargetMissing):
 			return nil, s.fail(ctx, task, stepWrite, reasonTargetMissing, http.StatusInternalServerError, false)
 		case errors.Is(err, credential.ErrTargetAmbiguous):

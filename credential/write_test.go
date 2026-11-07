@@ -17,6 +17,8 @@ type fakeStore struct {
 	sets, creates int
 	lastValue     string
 	lastExpires   string
+	// createExtra are fields a created item gets besides those asked for.
+	createExtra []Field
 }
 
 type fakeItem struct {
@@ -70,7 +72,7 @@ func (f *fakeStore) Create(_ context.Context, vaultID, title, fieldTitle, value,
 	}
 	f.creates++
 	f.lastValue, f.lastExpires = value, expires
-	f.items[vaultID] = append(f.items[vaultID], fakeItem{info: ItemInfo{ID: "new-" + title, Title: title}, fields: []Field{{ID: fieldTitle, Title: fieldTitle}, {ID: ExpiresField, Title: ExpiresField}}, expires: []string{expires}})
+	f.items[vaultID] = append(f.items[vaultID], fakeItem{info: ItemInfo{ID: "new-" + title, Title: title}, fields: append([]Field{{ID: fieldTitle, Title: fieldTitle}, {ID: ExpiresField, Title: ExpiresField}}, f.createExtra...), expires: []string{expires}})
 	return nil
 }
 
@@ -120,6 +122,43 @@ func TestWriteSetsOrCreates(t *testing.T) {
 			t.Fatalf("created=%v err=%v sets=%d creates=%d", created, err, f.sets, f.creates)
 		}
 	})
+}
+
+// TestWriteChecksTheCreatedItem: after a create the item's fields are read back; a field
+// besides the token's and one expiry date, or a second expiry field, is reported with its
+// name, the item is left as it is, and the write counts as created.
+func TestWriteChecksTheCreatedItem(t *testing.T) {
+	const ref = "op://example-vault/token-sample-b/credential"
+	for _, test := range []struct {
+		name  string
+		extra []Field
+		want  []string
+	}{
+		{"none", nil, nil},
+		{"another field", []Field{{ID: "valid_from", Title: "valid from"}}, []string{"valid from"}},
+		{"a second token field", []Field{{ID: "credential2", Title: "Credential"}}, []string{"Credential"}},
+		{"a second expiry field", []Field{{ID: "expires2", Title: "Expires"}}, []string{"Expires"}},
+		{"a field without a title", []Field{{ID: "x1"}}, []string{"x1"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFake()
+			f.createExtra = test.extra
+			created, err := Write(t.Context(), f, ref, writeValue, writeExpires, true)
+			var extra ExtraFieldsError
+			if test.want == nil {
+				if err != nil || !created {
+					t.Fatalf("created=%v err=%v", created, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrUnexpectedFields) || !errors.As(err, &extra) || !created || strings.Join(extra.Names, ",") != strings.Join(test.want, ",") {
+				t.Fatalf("created=%v err=%v", created, err)
+			}
+			if f.sets != 0 || f.creates != 1 || len(f.items["v1"]) != 2 || strings.Contains(err.Error(), writeValue) {
+				t.Fatalf("sets=%d creates=%d items=%d", f.sets, f.creates, len(f.items["v1"]))
+			}
+		})
+	}
 }
 
 // TestWriteRefuses: each refusal writes and creates nothing, and says nothing of the

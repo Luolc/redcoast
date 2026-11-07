@@ -31,8 +31,8 @@ func onePasswordResolver(ctx context.Context, token string) (claude.Resolver, er
 
 // onePasswordItems is the write path of the official SDK as credential.Store: it lists
 // vaults and items, reads an item's field names and its expiry date, sets one field of an
-// item and its expiry date and creates one item with one concealed field and an expiry
-// date, and calls nothing else of the Items API.
+// item and the date of its expiry field and creates one item with one concealed field and
+// an expiry date, and calls nothing else of the Items API.
 type onePasswordItems struct{ client *onepassword.Client }
 
 // onePasswordSecretStore returns the secret store over the official SDK with the service
@@ -94,9 +94,9 @@ func isExpires(f onepassword.ItemField) bool {
 }
 
 // SetFields reads the item again and sets the value of its one field with this ID and
-// title and the date of its one expiry field, which it adds as a date field when there is
-// none, so a field that changed since the caller looked is not written blindly; the rest
-// of the item is put back as it was read.
+// title and the date of its one expiry field, if it has one, so a field that changed
+// since the caller looked is not written blindly; the rest of the item is put back as it
+// was read, and no field is added.
 func (s onePasswordItems) SetFields(ctx context.Context, vaultID, itemID string, field credential.Field, value, expires string) error {
 	item, err := s.client.Items().Get(ctx, vaultID, itemID)
 	runtime.KeepAlive(s.client)
@@ -124,8 +124,6 @@ func (s onePasswordItems) SetFields(ctx context.Context, vaultID, itemID string,
 	item.Fields[at].Value = value
 	if due >= 0 {
 		item.Fields[due].Value = expires
-	} else {
-		item.Fields = append(item.Fields, expiryField(expires))
 	}
 	_, err = s.client.Items().Put(ctx, item)
 	runtime.KeepAlive(s.client)

@@ -303,6 +303,49 @@ func TestSetupTimeouts(t *testing.T) {
 			}
 		})
 	}
+	for _, test := range []struct {
+		name   string
+		apply  func(row *AccountRow)
+		reason string
+		claim  bool
+	}{
+		{"retired", func(row *AccountRow) { row.Status = "retired" }, "account_status", false},
+		{"direct", func(row *AccountRow) { row.Direct = true }, "direct_account", false},
+		{"active", func(row *AccountRow) { row.Status = "active" }, "", false},
+		{"retired after the claim", func(row *AccountRow) { row.Status = "retired" }, "", true},
+	} {
+		t.Run("running task takes its handover only while the account is eligible: "+test.name, func(t *testing.T) {
+			store, c := setupStore(t)
+			task := running(store, c)
+			if test.claim {
+				if _, err := store.ClaimHandover(ctx, setupAlias, task.RequestID, runA); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.UpdateAccount(ctx, setupAlias, 1, AuditEntry{}, func(row *AccountRow) error { test.apply(row); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			err := store.CheckHandover(ctx, setupAlias, task.RequestID, runA)
+			switch {
+			case test.claim:
+				// A handover under way is not cut off by the account's change.
+				if !errors.Is(err, ErrSetupNoOpenTask) || state(store, setupAlias).State != SetupRunning {
+					t.Fatalf("claimed task: err=%v state=%s", err, state(store, setupAlias).State)
+				}
+			case test.reason == "":
+				if err != nil {
+					t.Fatalf("an eligible account's handover was refused: %v", err)
+				}
+			default:
+				if !errors.Is(err, ErrSetupNoOpenTask) {
+					t.Fatalf("an ineligible account's handover was taken: %v", err)
+				}
+				if got := state(store, setupAlias); got.State != SetupFailed || got.Reason != test.reason {
+					t.Fatalf("task = %+v, want failed with %s", got, test.reason)
+				}
+			}
+		})
+	}
 	t.Run("a claimed task at start is interrupted, an unclaimed one is not", func(t *testing.T) {
 		store, c := setupStore(t)
 		task := running(store, c)

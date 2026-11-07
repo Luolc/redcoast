@@ -25,9 +25,9 @@ const (
 	SetupHandoverTimeout = 5 * time.Minute
 )
 
-// SetupTokenLife is how long after a write the gateway dates the token's expiry in the
-// secret store item.
-const SetupTokenLife = 365 * 24 * time.Hour
+// SetupTokenYears is how many calendar years after a write the gateway dates the token's
+// expiry in the secret store item.
+const SetupTokenYears = 1
 
 // Reasons the store itself gives for a task it ends.
 const (
@@ -57,14 +57,12 @@ CREATE TABLE account_setup (
 	step TEXT NOT NULL,
 	reason TEXT NOT NULL,
 	action TEXT NOT NULL,
-	kind TEXT NOT NULL,
 	requested_at INTEGER,
 	started_at INTEGER,
 	reported_at INTEGER,
 	claimed_at INTEGER,
 	updated_at INTEGER,
-	token_set_at INTEGER,
-	token_set_estimated INTEGER NOT NULL
+	token_set_at INTEGER
 ) STRICT;
 `
 
@@ -103,9 +101,7 @@ type SetupTask struct {
 	Account AccountRow
 }
 
-// setupColumns are the columns of a SetupRow. The table also has the columns kind and
-// token_set_estimated of its first version, which nothing reads; a row gets the empty
-// string and 0 in them.
+// setupColumns are the columns of a SetupRow.
 const setupColumns = `alias, state, request_id, run_id, step, reason, action, requested_at, started_at, reported_at, claimed_at, updated_at, token_set_at`
 
 func scanSetup(r scanner) (SetupRow, error) {
@@ -140,7 +136,7 @@ func setupRow(ctx context.Context, tx *sql.Tx, alias string) (SetupRow, error) {
 
 // putSetup writes row, replacing the account's.
 func putSetup(ctx context.Context, tx *sql.Tx, row SetupRow) error {
-	_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO account_setup (`+setupColumns+`, kind, token_set_estimated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0)`,
+	_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO account_setup (`+setupColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.Alias, row.State, row.RequestID, row.RunID, row.Step, row.Reason, row.Action,
 		nullableTime(row.RequestedAt), nullableTime(row.StartedAt), nullableTime(row.ReportedAt), nullableTime(row.ClaimedAt), nullableTime(row.UpdatedAt),
 		nullableTime(row.TokenSetAt))
@@ -198,14 +194,15 @@ func (r SetupRow) expiry(now time.Time, ineligible string) (state, reason string
 		return SetupFailed, SetupReasonTimeout
 	case r.State == SetupRunning && r.ClaimedAt.IsZero() && (!now.Before(r.ReportedAt.Add(SetupReportTimeout)) || !now.Before(r.StartedAt.Add(SetupRunTimeout))):
 		return SetupFailed, SetupReasonTimeout
-	case r.State == SetupRequested && ineligible != "":
+	case (r.State == SetupRequested || r.State == SetupRunning && r.ClaimedAt.IsZero()) && ineligible != "":
 		return SetupFailed, ineligible
 	}
 	return "", ""
 }
 
 // expireSetups ends, inside tx, a running task that has outlived its time and a
-// requested task whose account cannot have a setup any more.
+// requested or running task, not yet claimed by a handover, whose account cannot have a
+// setup any more.
 func expireSetups(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	rows, err := readSetups(ctx, tx, "SELECT "+setupColumns+" FROM account_setup WHERE state IN ('requested', 'running')")
 	if err != nil {
