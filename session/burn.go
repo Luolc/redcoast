@@ -3,9 +3,9 @@ package session
 import (
 	"cmp"
 	"context"
-	"database/sql"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -187,8 +187,18 @@ func shares(window string, rate float64, tokens map[string]int64) []MachineBurn 
 	return out
 }
 
-// burn computes the account's Burn from its quota history and latest readings.
-func (r *Reader) burn(ctx context.Context, alias string, history map[string][]QuotaPoint, latest map[string]Quota, now time.Time) (Burn, error) {
+// machineWindow is a window of an account whose rate is split over the client machines,
+// by the tokens carried on the account since the window's last reset.
+type machineWindow struct {
+	account       int // the index of the account in the snapshot
+	alias, window string
+	rate          float64
+	since         time.Time
+}
+
+// burn computes the account's Burn from its quota history and latest readings. Its
+// ByMachine is empty: it returns the windows to split, for machineBursts.
+func (r *Reader) burn(alias string, history map[string][]QuotaPoint, latest map[string]Quota, now time.Time) (Burn, []machineWindow) {
 	var newest time.Time
 	for _, q := range latest {
 		if q.ObservedAt.After(newest) {
@@ -196,6 +206,7 @@ func (r *Reader) burn(ctx context.Context, alias string, history map[string][]Qu
 		}
 	}
 	out := Burn{ByMachine: []MachineBurn{}}
+	var pending []machineWindow
 	for _, w := range []struct {
 		name string
 		dst  *WindowBurn
@@ -209,57 +220,90 @@ func (r *Reader) burn(ctx context.Context, alias string, history map[string][]Qu
 		if est.RatePerHour == nil || *est.RatePerHour <= 0 {
 			continue
 		}
-		tokens, err := r.machineTokens(ctx, alias, used[0].At)
-		if err != nil {
-			return Burn{}, err
-		}
-		out.ByMachine = append(out.ByMachine, shares(w.name, *est.RatePerHour, tokens)...)
+		pending = append(pending, machineWindow{alias: alias, window: w.name, rate: *est.RatePerHour, since: used[0].At})
 	}
-	return out, nil
+	return out, pending
 }
 
-// machineTokens returns the tokens of the inference requests carried on alias since
-// since, by the client machine of their sessions; requests of no known session are left out.
-func (r *Reader) machineTokens(ctx context.Context, alias string, since time.Time) (map[string]int64, error) {
-	rows, err := r.store.db.QueryContext(ctx, `SELECT s.client_machine,
+// machineBursts returns the share of the rate by client machine of each window, in the
+// order of windows, from one scan of the traffic since the earliest start of the windows.
+func (r *Reader) machineBursts(ctx context.Context, windows []machineWindow) ([][]MachineBurn, error) {
+	if len(windows) == 0 {
+		return nil, nil
+	}
+	// The windows join the traffic rows, not the other way round, so that the rows are
+	// read once: a window's own start is a condition of the join.
+	var values []string
+	var args []any
+	earliest := windows[0].since.UnixMilli()
+	for _, w := range windows {
+		values = append(values, "(?, ?, ?)")
+		args = append(args, w.alias, w.window, w.since.UnixMilli())
+		earliest = min(earliest, w.since.UnixMilli())
+	}
+	args = append(args, earliest)
+	rows, err := r.store.db.QueryContext(ctx, `WITH w(alias, window, since) AS (VALUES `+strings.Join(values, ", ")+`)
+		SELECT w.alias, w.window, s.client_machine,
 			SUM(COALESCE(t.input_tokens, 0) + COALESCE(t.output_tokens, 0) + COALESCE(t.cache_read_tokens, 0) + COALESCE(t.cache_creation_tokens, 0))
-		FROM traffic t JOIN sessions s ON s.id = t.session_id
-		WHERE t.alias = ? AND t.kind = 'inference' AND t.ts >= ? GROUP BY s.client_machine`, alias, since.UnixMilli())
+		FROM traffic t CROSS JOIN w ON w.alias = t.alias AND t.ts >= w.since
+		JOIN sessions s ON s.id = t.session_id
+		WHERE t.kind = 'inference' AND t.ts >= ? GROUP BY w.alias, w.window, s.client_machine`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read machine tokens: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
-	out := map[string]int64{}
+	type key struct{ alias, window string }
+	tokens := map[key]map[string]int64{}
 	for rows.Next() {
+		var k key
 		var machine string
-		var tokens int64
-		if err := rows.Scan(&machine, &tokens); err != nil {
+		var n int64
+		if err := rows.Scan(&k.alias, &k.window, &machine, &n); err != nil {
 			return nil, fmt.Errorf("read machine tokens: %v", err)
 		}
-		out[machine] = tokens
+		if tokens[k] == nil {
+			tokens[k] = map[string]int64{}
+		}
+		tokens[k][machine] = n
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read machine tokens: %v", err)
 	}
+	out := make([][]MachineBurn, len(windows))
+	for i, w := range windows {
+		out[i] = shares(w.window, w.rate, tokens[key{w.alias, w.window}])
+	}
 	return out, nil
 }
 
-// totals returns the account's Totals at now.
-func (r *Reader) totals(ctx context.Context, alias string, now time.Time) (Totals, error) {
+// totals returns the Totals at now of every account that has inference traffic in the
+// last 7 days, by alias, in one scan of that range.
+func (r *Reader) totals(ctx context.Context, now time.Time) (map[string]Totals, error) {
 	day, week := now.Add(-dashboardHours*time.Hour).UnixMilli(), now.Add(-dashboardDays*24*time.Hour).UnixMilli()
-	var out Totals
-	d, w := &out.Day, &out.Week
-	err := r.store.db.QueryRowContext(ctx, `SELECT
+	rows, err := r.store.db.QueryContext(ctx, `SELECT alias,
 			COALESCE(SUM(ts >= ?1), 0), COALESCE(SUM(CASE WHEN ts >= ?1 THEN COALESCE(input_tokens, 0) END), 0),
 			COALESCE(SUM(CASE WHEN ts >= ?1 THEN COALESCE(output_tokens, 0) END), 0),
 			COALESCE(SUM(CASE WHEN ts >= ?1 THEN COALESCE(cache_read_tokens, 0) END), 0),
 			COALESCE(SUM(CASE WHEN ts >= ?1 THEN COALESCE(cache_creation_tokens, 0) END), 0),
 			COUNT(*), COALESCE(SUM(COALESCE(input_tokens, 0)), 0), COALESCE(SUM(COALESCE(output_tokens, 0)), 0),
 			COALESCE(SUM(COALESCE(cache_read_tokens, 0)), 0), COALESCE(SUM(COALESCE(cache_creation_tokens, 0)), 0)
-		FROM traffic WHERE alias = ?2 AND kind = 'inference' AND ts >= ?3`, day, alias, week).
-		Scan(&d.Requests, &d.Input, &d.Output, &d.CacheRead, &d.CacheCreation, &w.Requests, &w.Input, &w.Output, &w.CacheRead, &w.CacheCreation)
-	if err != nil && err != sql.ErrNoRows {
-		return Totals{}, fmt.Errorf("read totals: %v", err)
+		FROM traffic WHERE alias IS NOT NULL AND kind = 'inference' AND ts >= ?2 GROUP BY alias`, day, week)
+	if err != nil {
+		return nil, fmt.Errorf("read totals: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]Totals{}
+	for rows.Next() {
+		var alias string
+		var t Totals
+		d, w := &t.Day, &t.Week
+		if err := rows.Scan(&alias, &d.Requests, &d.Input, &d.Output, &d.CacheRead, &d.CacheCreation, &w.Requests, &w.Input, &w.Output, &w.CacheRead, &w.CacheCreation); err != nil {
+			return nil, fmt.Errorf("read totals: %v", err)
+		}
+		out[alias] = t
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read totals: %v", err)
 	}
 	return out, nil
 }

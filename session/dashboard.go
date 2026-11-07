@@ -269,12 +269,30 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 	if err := db.QueryRowContext(ctx, "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()").Scan(&out.DBBytes); err != nil {
 		return Snapshot{}, fmt.Errorf("database size: %v", err)
 	}
+	totals, err := r.totals(ctx, status.At)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	var pending []machineWindow
 	for _, a := range status.Accounts {
-		view, err := r.account(ctx, a, now)
+		view, windows, err := r.account(ctx, a, now)
 		if err != nil {
 			return Snapshot{}, err
 		}
+		view.Totals = totals[a.Alias]
+		for _, w := range windows {
+			w.account = len(out.Accounts)
+			pending = append(pending, w)
+		}
 		out.Accounts = append(out.Accounts, view)
+	}
+	bursts, err := r.machineBursts(ctx, pending)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	for i, b := range bursts {
+		by := &out.Accounts[pending[i].account].Burn.ByMachine
+		*by = append(*by, b...)
 	}
 	if out.Machines, err = r.machines(ctx); err != nil {
 		return Snapshot{}, err
@@ -648,20 +666,17 @@ func percentile(sorted []int64, p int) int64 {
 	return sorted[(p*len(sorted)+99)/100-1]
 }
 
-// account returns a's view: its next plan change after now and its quota history.
-func (r *Reader) account(ctx context.Context, a AccountStatus, now int64) (AccountView, error) {
+// account returns a's view without its totals and its burn by machine: its next plan
+// change after now and its quota history. It also returns the windows whose rate is
+// still to be split over the machines.
+func (r *Reader) account(ctx context.Context, a AccountStatus, now int64) (AccountView, []machineWindow, error) {
 	view := AccountView{AccountStatus: a}
 	var err error
 	if view.QuotaHistory, err = r.store.QuotaHistory(ctx, a.Alias); err != nil {
-		return AccountView{}, err
+		return AccountView{}, nil, err
 	}
-	at := fromMillis(now)
-	if view.Burn, err = r.burn(ctx, a.Alias, view.QuotaHistory, a.Quota, at); err != nil {
-		return AccountView{}, err
-	}
-	if view.Totals, err = r.totals(ctx, a.Alias, at); err != nil {
-		return AccountView{}, err
-	}
+	var windows []machineWindow
+	view.Burn, windows = r.burn(a.Alias, view.QuotaHistory, a.Quota, fromMillis(now))
 	var next PlanStatus
 	var from int64
 	err = r.store.db.QueryRowContext(ctx, "SELECT plan, effective_from FROM plan_schedule WHERE alias = ? AND effective_from > ? ORDER BY effective_from LIMIT 1", a.Alias, now).Scan(&next.Name, &from)
@@ -670,9 +685,9 @@ func (r *Reader) account(ctx context.Context, a AccountStatus, now int64) (Accou
 		next.From = fromMillis(from)
 		view.NextPlan = &next
 	case err != sql.ErrNoRows:
-		return AccountView{}, fmt.Errorf("read next plan: %v", err)
+		return AccountView{}, nil, fmt.Errorf("read next plan: %v", err)
 	}
-	return view, nil
+	return view, windows, nil
 }
 
 // machines returns the registered machines with their live sessions and latest request.
