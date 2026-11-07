@@ -39,9 +39,9 @@ func nextID() string {
 }
 
 // request asks for a task of the page for alias and fails the test when it is refused.
-func request(t *testing.T, store *Store, alias, kind string) SetupRow {
+func request(t *testing.T, store *Store, alias string) SetupRow {
 	t.Helper()
-	row, _, err := store.RequestSetup(context.Background(), alias, "login_and_token", kind, nil, nextID())
+	row, _, err := store.RequestSetup(context.Background(), alias, "login_and_token", nil, nextID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,40 +53,61 @@ func request(t *testing.T, store *Store, alias, kind string) SetupRow {
 func TestSetupRequestRefusals(t *testing.T) {
 	ctx := context.Background()
 	store, _ := setupStore(t)
-	first := request(t, store, setupAlias, SetupKindPage)
+	first := request(t, store, setupAlias)
 	rev := int64(1)
 	stale := int64(7)
-	if _, _, err := store.RequestSetup(ctx, setupAlias, "token_only", SetupKindPage, &rev, nextID()); !errors.Is(err, ErrSetupOpen) {
+	if _, _, err := store.RequestSetup(ctx, setupAlias, "login_and_token", &rev, nextID()); !errors.Is(err, ErrSetupOpen) {
 		t.Fatalf("a second request while one is requested: %v", err)
 	}
-	if _, _, err := store.RequestSetup(ctx, "sample-b", "token_only", SetupKindPage, &stale, nextID()); !errors.Is(err, ErrRevConflict) {
+	if _, _, err := store.RequestSetup(ctx, "sample-b", "login_and_token", &stale, nextID()); !errors.Is(err, ErrRevConflict) {
 		t.Fatalf("stale rev: %v", err)
 	}
-	if _, _, err := store.RequestSetup(ctx, "nobody", "token_only", SetupKindPage, nil, nextID()); !errors.Is(err, ErrAccountNotFound) {
+	if _, _, err := store.RequestSetup(ctx, "nobody", "login_and_token", nil, nextID()); !errors.Is(err, ErrAccountNotFound) {
 		t.Fatalf("unknown account: %v", err)
 	}
-	if _, err := store.UpdateAccount(ctx, "sample-b", 1, AuditEntry{}, func(row *AccountRow) error { row.Status = "retired"; return nil }); err != nil {
+	// An account is eligible when it is testing or active and not direct; each other
+	// status and a direct exit is refused with its own error.
+	for _, test := range []struct {
+		status string
+		direct bool
+		want   error
+	}{{"retired", false, ErrSetupStatus}, {"paused", false, ErrSetupStatus}, {"suspended", false, ErrSetupStatus}, {"active", true, ErrSetupDirect}, {"testing", true, ErrSetupDirect}, {"retired", true, ErrSetupStatus}} {
+		row, err := store.Account(ctx, "sample-b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.UpdateAccount(ctx, "sample-b", row.Rev, AuditEntry{}, func(r *AccountRow) error { r.Status, r.Direct = test.status, test.direct; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.RequestSetup(ctx, "sample-b", "login_and_token", nil, nextID()); !errors.Is(err, test.want) {
+			t.Fatalf("%s direct=%v: %v, want %v", test.status, test.direct, err, test.want)
+		}
+	}
+	// Control arm: a testing account and an active one with a proxy are taken.
+	row, _ := store.Account(ctx, "sample-b")
+	if _, err := store.UpdateAccount(ctx, "sample-b", row.Rev, AuditEntry{}, func(r *AccountRow) error { r.Status, r.Direct = "active", false; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.RequestSetup(ctx, "sample-b", "token_only", SetupKindPage, nil, nextID()); !errors.Is(err, ErrSetupRetired) {
-		t.Fatalf("retired account: %v", err)
+	for _, alias := range []string{"sample-b", "sample-c"} {
+		if _, _, err := store.RequestSetup(ctx, alias, "login_and_token", nil, nextID()); err != nil {
+			t.Fatalf("%s: %v", alias, err)
+		}
 	}
 	rows, err := store.SetupRows(ctx)
-	if err != nil || len(rows) != 1 || rows[setupAlias].RequestID != first.RequestID || rows[setupAlias].State != SetupRequested {
+	if err != nil || rows[setupAlias].RequestID != first.RequestID {
 		t.Fatalf("refused requests changed the rows: %+v %v", rows, err)
 	}
 }
 
-// TestSetupQueueOrder: one task runs at a time, the page's tasks go before renewals and
-// each kind in the order requested.
+// TestSetupQueueOrder: one task runs at a time, in the order requested.
 func TestSetupQueueOrder(t *testing.T) {
 	ctx := context.Background()
 	store, c := setupStore(t)
-	request(t, store, "sample-a", SetupKindRenewal)
+	request(t, store, "sample-a")
 	c.Advance(time.Second)
-	request(t, store, "sample-b", SetupKindPage)
+	request(t, store, "sample-b")
 	c.Advance(time.Second)
-	request(t, store, "sample-c", SetupKindPage)
+	request(t, store, "sample-c")
 	var order []string
 	for range 3 {
 		task, err := store.NextSetup(ctx)
@@ -101,7 +122,7 @@ func TestSetupQueueOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if fmt.Sprint(order) != "[sample-b sample-c sample-a]" {
+	if fmt.Sprint(order) != "[sample-a sample-b sample-c]" {
 		t.Fatalf("order = %v", order)
 	}
 	if task, err := store.NextSetup(ctx); err != nil || task != nil {
@@ -116,7 +137,7 @@ func TestSetupReports(t *testing.T) {
 	ctx := context.Background()
 	store, _ := setupStore(t)
 	task := func() *SetupTask {
-		request(t, store, setupAlias, SetupKindPage)
+		request(t, store, setupAlias)
 		got, err := store.NextSetup(ctx)
 		if err != nil || got == nil {
 			t.Fatal(err)
@@ -161,12 +182,12 @@ func TestSetupReports(t *testing.T) {
 		t.Fatalf("a second finish: %v", err)
 	}
 	// A closed task blocks no new one.
-	request(t, store, setupAlias, SetupKindPage)
+	request(t, store, setupAlias)
 }
 
 // TestSetupTimeouts: a running task fails after 30 minutes without a report or 60 minutes
 // after it was handed out, a claimed one 5 minutes after the claim, a requested one waits
-// as long as it takes and ends only when its account is retired; each just before its
+// as long as it takes and ends only when its account cannot have a setup any more; each just before its
 // time still stands.
 func TestSetupTimeouts(t *testing.T) {
 	ctx := context.Background()
@@ -178,7 +199,7 @@ func TestSetupTimeouts(t *testing.T) {
 		return rows[alias]
 	}
 	running := func(store *Store, c *clock) *SetupTask {
-		request(t, store, setupAlias, SetupKindPage)
+		request(t, store, setupAlias)
 		task, err := store.NextSetup(ctx)
 		if err != nil || task == nil {
 			t.Fatal(err)
@@ -245,24 +266,43 @@ func TestSetupTimeouts(t *testing.T) {
 			t.Fatalf("a step after the timeout: %v", err)
 		}
 	})
-	t.Run("requested waits, and ends when the account is retired", func(t *testing.T) {
-		store, c := setupStore(t)
-		request(t, store, setupAlias, SetupKindPage)
-		c.Advance(30 * 24 * time.Hour)
-		_ = store.ExpireSetups(ctx)
-		if got := state(store, setupAlias); got.State != SetupRequested {
-			t.Fatalf("after a month = %s", got.State)
-		}
-		if _, err := store.UpdateAccount(ctx, setupAlias, 1, AuditEntry{}, func(row *AccountRow) error { row.Status = "retired"; return nil }); err != nil {
-			t.Fatal(err)
-		}
-		if task, err := store.NextSetup(ctx); err != nil || task != nil {
-			t.Fatalf("a retired account's task was handed out: %v %v", task, err)
-		}
-		if got := state(store, setupAlias); got.State != SetupFailed || got.Reason != "account_retired" {
-			t.Fatalf("retired = %+v", got)
-		}
-	})
+	for _, test := range []struct {
+		name   string
+		apply  func(row *AccountRow)
+		reason string
+	}{
+		{"retired", func(row *AccountRow) { row.Status = "retired" }, "account_status"},
+		{"paused", func(row *AccountRow) { row.Status = "paused" }, "account_status"},
+		{"direct", func(row *AccountRow) { row.Direct = true }, "direct_account"},
+		{"active", func(row *AccountRow) { row.Status = "active" }, ""},
+	} {
+		t.Run("requested waits, and ends when the account is "+test.name, func(t *testing.T) {
+			store, c := setupStore(t)
+			request(t, store, setupAlias)
+			c.Advance(30 * 24 * time.Hour)
+			_ = store.ExpireSetups(ctx)
+			if got := state(store, setupAlias); got.State != SetupRequested {
+				t.Fatalf("after a month = %s", got.State)
+			}
+			if _, err := store.UpdateAccount(ctx, setupAlias, 1, AuditEntry{}, func(row *AccountRow) error { test.apply(row); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			task, err := store.NextSetup(ctx)
+			if test.reason == "" {
+				// Control arm: an account that stays eligible gets its task.
+				if err != nil || task == nil {
+					t.Fatalf("an eligible account's task was not handed out: %v %v", task, err)
+				}
+				return
+			}
+			if err != nil || task != nil {
+				t.Fatalf("an ineligible account's task was handed out: %v %v", task, err)
+			}
+			if got := state(store, setupAlias); got.State != SetupFailed || got.Reason != test.reason {
+				t.Fatalf("task = %+v, want failed with %s", got, test.reason)
+			}
+		})
+	}
 	t.Run("a claimed task at start is interrupted, an unclaimed one is not", func(t *testing.T) {
 		store, c := setupStore(t)
 		task := running(store, c)
@@ -281,112 +321,41 @@ func TestSetupTimeouts(t *testing.T) {
 	})
 }
 
-// TestSetupRenewals: a renewal is queued for an active or paused account whose token is
-// due within 30 days and that has no open task and no renewal that failed in the last 24
-// hours, and for no other; /health lists the accounts due within 7 days.
-func TestSetupRenewals(t *testing.T) {
+// TestSetupTokenDate: the gateway notes when it wrote a token, which stays through later
+// tasks; an account the gateway wrote none for has none.
+func TestSetupTokenDate(t *testing.T) {
 	ctx := context.Background()
 	store, c := setupStore(t)
-	// sample-a was set 340 days ago (due in 25 days), sample-b 300 days ago (due in 65),
-	// sample-c, which is testing, 400 days ago.
-	for alias, age := range map[string]time.Duration{"sample-a": 340 * 24 * time.Hour, "sample-b": 300 * 24 * time.Hour, "sample-c": 400 * 24 * time.Hour} {
-		if err := store.SetTokenEstimate(ctx, alias, c.Now().Add(-age)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	queued, err := store.QueueRenewals(ctx, nextID)
-	if err != nil || fmt.Sprint(queued) != "[sample-a]" {
-		t.Fatalf("queued = %v %v", queued, err)
-	}
-	if again, err := store.QueueRenewals(ctx, nextID); err != nil || len(again) != 0 {
-		t.Fatalf("a second sweep queued %v %v", again, err)
-	}
 	rows, _ := store.SetupRows(ctx)
-	if got := rows["sample-a"]; got.State != SetupRequested || got.Action != "token_only" || got.Kind != SetupKindRenewal || got.TokenSetAt.IsZero() {
-		t.Fatalf("renewal row = %+v", got)
+	if got := rows[setupAlias]; !got.TokenSetAt.IsZero() {
+		t.Fatalf("a date before any write: %+v", got)
 	}
-	due, err := store.TokensDue(ctx, 7*24*time.Hour)
-	if err != nil || len(due) != 0 {
-		t.Fatalf("due in 7 days: %v %v", due, err)
-	}
-	// The renewal fails: no new one for 24 hours, and then one.
+	request(t, store, setupAlias)
 	task, _ := store.NextSetup(ctx)
-	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupFailed, "lock", "account_busy"); err != nil {
+	if _, err := store.ReportSetup(ctx, setupAlias, task.RequestID, runA, SetupRunning, "lock", ""); err != nil {
 		t.Fatal(err)
 	}
-	c.Advance(24*time.Hour - time.Second)
-	if q, _ := store.QueueRenewals(ctx, nextID); len(q) != 0 {
-		t.Fatalf("a renewal queued 23:59:59 after a failure: %v", q)
+	if err := store.NoteTokenWritten(ctx, setupAlias, task.RequestID); !errors.Is(err, ErrSetupNoOpenTask) {
+		t.Fatalf("a write noted for a task no handover claimed: %v", err)
 	}
-	c.Advance(time.Second)
-	if q, _ := store.QueueRenewals(ctx, nextID); fmt.Sprint(q) != "[sample-a]" {
-		t.Fatalf("no renewal 24 hours after a failure: %v", q)
-	}
-	// A renewal that stopped for a person holds the next one back for 24 hours too; a
-	// request of the button is not held back by it.
-	task, _ = store.NextSetup(ctx)
-	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupNeedsHuman, "lock", "captcha_challenge"); err != nil {
+	if _, err := store.ClaimHandover(ctx, setupAlias, task.RequestID, runA); err != nil {
 		t.Fatal(err)
 	}
-	if q, _ := store.QueueRenewals(ctx, nextID); len(q) != 0 {
-		t.Fatalf("a renewal queued right after needs_human: %v", q)
-	}
-	c.Advance(24*time.Hour - time.Second)
-	if q, _ := store.QueueRenewals(ctx, nextID); len(q) != 0 {
-		t.Fatalf("a renewal queued 23:59:59 after needs_human: %v", q)
-	}
-	c.Advance(time.Second)
-	if q, _ := store.QueueRenewals(ctx, nextID); fmt.Sprint(q) != "[sample-a]" {
-		t.Fatalf("no renewal 24 hours after needs_human: %v", q)
-	}
-	task, _ = store.NextSetup(ctx)
-	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupNeedsHuman, "lock", "captcha_challenge"); err != nil {
+	c.Advance(time.Minute)
+	if err := store.NoteTokenWritten(ctx, setupAlias, task.RequestID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.RequestSetup(ctx, "sample-a", "token_only", SetupKindPage, nil, nextID()); err != nil {
-		t.Fatalf("the button after needs_human: %v", err)
-	}
-	if task, _ = store.NextSetup(ctx); task == nil {
-		t.Fatal("the button's task was not handed out")
-	}
-	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupFailed, "lock", "account_busy"); err != nil {
+	written := c.Now()
+	if _, err := store.FinishSetup(ctx, setupAlias, task.RequestID, SetupDone, "complete", "complete"); err != nil {
 		t.Fatal(err)
 	}
 	c.Advance(24 * time.Hour)
-	if q, _ := store.QueueRenewals(ctx, nextID); fmt.Sprint(q) != "[sample-a]" {
-		t.Fatalf("no renewal after the button's task failed 24 hours ago: %v", q)
-	}
-	task, _ = store.NextSetup(ctx)
-	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupFailed, "lock", "account_busy"); err != nil {
-		t.Fatal(err)
-	}
-	// 20 days later sample-a is overdue, sample-b is due in 45.
-	c.Advance(20 * 24 * time.Hour)
-	due, _ = store.TokensDue(ctx, 7*24*time.Hour)
-	if len(due) != 1 || due[0].Alias != "sample-a" {
-		t.Fatalf("due = %v", due)
-	}
-	// A token written now is not due.
-	request(t, store, "sample-a", SetupKindPage)
-	task, _ = store.NextSetup(ctx)
-	if _, err := store.ReportSetup(ctx, "sample-a", task.RequestID, runA, SetupRunning, "lock", ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ClaimHandover(ctx, "sample-a", task.RequestID, runA); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.NoteTokenWritten(ctx, "sample-a", task.RequestID); err != nil {
-		t.Fatal(err)
-	}
-	if due, _ := store.TokensDue(ctx, 7*24*time.Hour); len(due) != 0 {
-		t.Fatalf("a token written now is due: %v", due)
-	}
-	// An estimate does not replace the time of a token the gateway wrote.
-	if err := store.SetTokenEstimate(ctx, "sample-a", c.Now().Add(-400*24*time.Hour)); err != nil {
-		t.Fatal(err)
-	}
+	request(t, store, setupAlias)
 	rows, _ = store.SetupRows(ctx)
-	if got := rows["sample-a"]; got.TokenSetEstimated || !got.TokenSetAt.Equal(c.Now()) {
-		t.Fatalf("estimate replaced the written time: %+v", got)
+	if got := rows[setupAlias]; !got.TokenSetAt.Equal(written) || got.State != SetupRequested {
+		t.Fatalf("after a new request: %+v", got)
+	}
+	if got := rows["sample-b"]; !got.TokenSetAt.IsZero() {
+		t.Fatalf("another account has a date: %+v", got)
 	}
 }

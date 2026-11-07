@@ -19,7 +19,19 @@ var (
 	ErrTargetAmbiguous = errors.New("a name matches more than one vault, item or field, or an archived item")
 	// ErrWriteFailed: the store refused the read or the write, or could not be reached.
 	ErrWriteFailed = errors.New("the secret store failed")
+	// ErrExpiresMissing: the item has no expires field, or it is empty.
+	ErrExpiresMissing = errors.New("the item has no expiry date")
+	// ErrExpiresUnreadable: the expires field holds something that is not a date.
+	ErrExpiresUnreadable = errors.New("the expiry date is not readable")
 )
+
+// ExpiresField is the name, as ID or title, of the expiry field that an API Credential
+// item carries; Write sets it together with the token and Expires reads it. The value is
+// a date written as YYYY-MM-DD.
+const ExpiresField = "expires"
+
+// expiresLayout is the layout Write gives the date; Expires also reads RFC 3339.
+const expiresLayout = "2006-01-02"
 
 // Vault is a vault the secret store lets the credential see.
 type Vault struct{ ID, Title string }
@@ -33,30 +45,34 @@ type ItemInfo struct {
 // Field is a field of an item, named by its ID and its title.
 type Field struct{ ID, Title string }
 
-// Item is an item with the names of its fields, never their values.
+// Item is an item with the names of its fields, and the values only of those fields that
+// are named ExpiresField, in the order of Fields; no other value is read.
 type Item struct {
 	ID, Title string
 	Fields    []Field
-	UpdatedAt time.Time
+	Expires   []string
 }
 
 // Store is the part of a secret store that Write uses. It is the secret store's write
-// path, so an implementation touches exactly what a method names: SetField changes the
-// value of one existing field of one item and nothing else, and Create makes one item
-// with one concealed field and nothing else. Neither deletes anything.
+// path, so an implementation touches exactly what a method names: SetFields changes the
+// value of one existing field of one item and the expiry field of that item (adding that
+// one field when the item has none) and nothing else, and Create makes one item with one
+// concealed field and the expiry field and nothing else. Neither deletes anything.
 type Store interface {
 	// Vaults lists the vaults the credential can see.
 	Vaults(ctx context.Context) ([]Vault, error)
 	// Items lists the items of a vault, archived ones included.
 	Items(ctx context.Context, vaultID string) ([]ItemInfo, error)
-	// Item returns an item's field names and its update time.
+	// Item returns an item's field names and the values of its expiry fields.
 	Item(ctx context.Context, vaultID, itemID string) (Item, error)
-	// SetField sets the value of the one field of the item that has this ID and title;
-	// it fails when there is not exactly one.
-	SetField(ctx context.Context, vaultID, itemID string, field Field, value string) error
+	// SetFields sets the value of the one field of the item that has this ID and title,
+	// and the date in its one expiry field, which it adds as a date field when the item
+	// has none; it fails when either is not exactly one, or more than one expiry field
+	// is there.
+	SetFields(ctx context.Context, vaultID, itemID string, field Field, value, expires string) error
 	// Create makes an item with this title in the vault, holding one concealed field
-	// with this title and value.
-	Create(ctx context.Context, vaultID, title, fieldTitle, value string) error
+	// with this title and value and an expiry field with this date.
+	Create(ctx context.Context, vaultID, title, fieldTitle, value, expires string) error
 }
 
 // target is where a reference points, found in the store.
@@ -77,7 +93,7 @@ func parseWriteReference(reference string) (vault, item, field string, err error
 		return "", "", "", ErrTargetRefused
 	}
 	parts := strings.Split(rest, "/")
-	if len(parts) != 3 {
+	if len(parts) != 3 || strings.EqualFold(parts[2], ExpiresField) {
 		return "", "", "", ErrTargetRefused
 	}
 	return parts[0], parts[1], parts[2], nil
@@ -158,24 +174,27 @@ func field(item Item, fieldName string) (Field, error) {
 	return Field{}, ErrTargetAmbiguous
 }
 
-// Write puts value at the op:// reference. When the item exists it sets the one field
-// the reference names; it adds no field. When the item does not exist and mayCreate is
-// set, it creates the item, titled as the reference names it, with that one field.
-// Otherwise it writes nothing: it refuses, before any write, a reference with a section
-// part, a missing or non-unique vault, an archived item or more than one item with the
-// name, an existing item without the field or with it twice, and a missing item when
-// mayCreate is not set. It reports whether it created the item. The errors are the
-// package's four and never hold the value.
-func Write(ctx context.Context, store Store, reference, value string, mayCreate bool) (created bool, err error) {
+// Write puts value at the op:// reference and sets the item's expiry date to expires.
+// When the item exists it sets the one field the reference names and its expiry field,
+// which it adds when the item has none; it adds no other field. When the item does not
+// exist and mayCreate is set, it creates the item, titled as the reference names it,
+// with that one field and the expiry field. Otherwise it writes nothing: it refuses,
+// before any write, a reference with a section part or one that names the expiry field,
+// a missing or non-unique vault, an archived item or more than one item with the name,
+// an existing item without the field or with it twice or with two expiry fields, and a
+// missing item when mayCreate is not set. It reports whether it created the item. The
+// errors are the package's own and never hold the value.
+func Write(ctx context.Context, store Store, reference, value string, expires time.Time, mayCreate bool) (created bool, err error) {
 	found, err := locate(ctx, store, reference)
 	if err != nil {
 		return false, err
 	}
+	date := expires.UTC().Format(expiresLayout)
 	if found.absent {
 		if !mayCreate {
 			return false, ErrTargetMissing
 		}
-		if err := store.Create(ctx, found.vault.ID, found.itemName, found.fieldName, value); err != nil {
+		if err := store.Create(ctx, found.vault.ID, found.itemName, found.fieldName, value, date); err != nil {
 			return false, ErrWriteFailed
 		}
 		return true, nil
@@ -188,15 +207,20 @@ func Write(ctx context.Context, store Store, reference, value string, mayCreate 
 	if err != nil {
 		return false, err
 	}
-	if err := store.SetField(ctx, found.vault.ID, found.item.ID, f, value); err != nil {
+	if len(item.Expires) > 1 {
+		return false, ErrTargetAmbiguous
+	}
+	if err := store.SetFields(ctx, found.vault.ID, found.item.ID, f, value, date); err != nil {
 		return false, ErrWriteFailed
 	}
 	return false, nil
 }
 
-// Updated returns when the item the reference names was last changed, for a reference
-// whose vault and item are unique and whose item has the field. It reads no value.
-func Updated(ctx context.Context, store Store, reference string) (time.Time, error) {
+// Expires returns the expiry date of the item the reference names, for a reference whose
+// vault and item are unique and whose item has the field the reference names. It reads
+// no token. It fails with ErrExpiresMissing when the item has no expiry field or an
+// empty one, and with ErrExpiresUnreadable when the field holds no date.
+func Expires(ctx context.Context, store Store, reference string) (time.Time, error) {
 	found, err := locate(ctx, store, reference)
 	if err != nil {
 		return time.Time{}, err
@@ -211,5 +235,21 @@ func Updated(ctx context.Context, store Store, reference string) (time.Time, err
 	if _, err := field(item, found.fieldName); err != nil {
 		return time.Time{}, err
 	}
-	return item.UpdatedAt, nil
+	switch len(item.Expires) {
+	case 0:
+		return time.Time{}, ErrExpiresMissing
+	case 1:
+	default:
+		return time.Time{}, ErrTargetAmbiguous
+	}
+	text := strings.TrimSpace(item.Expires[0])
+	if text == "" {
+		return time.Time{}, ErrExpiresMissing
+	}
+	for _, layout := range []string{expiresLayout, time.RFC3339} {
+		if at, err := time.Parse(layout, text); err == nil {
+			return at.UTC(), nil
+		}
+	}
+	return time.Time{}, ErrExpiresUnreadable
 }
