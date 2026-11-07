@@ -198,18 +198,10 @@ func TestAccountRouteRefusesNonPublicLiterals(t *testing.T) {
 
 // directHarness starts a forward proxy for one account behind exit with github.com:443
 // and down.example.test:443 listed. Names resolve through addresses; 192.0.2.10:443
-// reaches an echoing origin, any other public address a closed port. dialed collects
+// reaches an echoing origin, and dialing any other public address fails. dialed collects
 // every address the proxy dials.
 func directHarness(t *testing.T, exit *fakeExit, addresses map[string][]netip.Addr) (*harness, *forwardProxy, *[]string) {
 	origin := startFakeOrigin(t)
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	down := closed.Addr().String()
-	if err := closed.Close(); err != nil {
-		t.Fatal(err)
-	}
 	h := newHarness(t)
 	h.addWithExit("sample-test", "synthetic-token-value", &url.URL{Scheme: "http", Host: exit.listener.Addr().String()})
 	h.token, h.sessionID = h.issue()
@@ -227,7 +219,7 @@ func directHarness(t *testing.T, exit *fakeExit, addresses map[string][]netip.Ad
 			target = origin
 		case exit.listener.Addr().String():
 		default:
-			target = down
+			return nil, errors.New("connection refused")
 		}
 		return dial(ctx, network, target)
 	}
