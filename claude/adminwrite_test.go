@@ -739,4 +739,13 @@ func TestDashboardRecord(t *testing.T) {
 	if status, answer, _ := off.serve(t, r); status != 501 || answer["error"] != "account_write_unavailable" {
 		t.Fatalf("without dashboard_write: %d %v", status, answer)
 	}
+	// A gateway with no account writer answers 501 too.
+	none := HostGuard([]string{writeHost}, NewDashboard(h.egress, DashboardConfig{Provider: "codex", Store: h.store}).Handler())
+	rec := httptest.NewRecorder()
+	r = httptest.NewRequest("GET", "/accounts/sample-a/record", nil)
+	r.Host = writeHost
+	none.ServeHTTP(rec, r)
+	if rec.Code != 501 {
+		t.Fatalf("without a writer: %d %s", rec.Code, rec.Body.String())
+	}
 }
