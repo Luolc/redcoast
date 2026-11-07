@@ -137,7 +137,6 @@ CODEX_INVENTORY = (
   f"installation_id: {ACCOUNT_INSTALLATION}\n"
 ) + proxy_yaml(CODEX_EXIT)
 CLAUDE_INVENTORY = (
-  f"id: {CLAUDE_ALIAS}\n"
   f"email: {CLAUDE_ALIAS}@example.test\n"
   "status: active\n"
   "access: gateway\n"

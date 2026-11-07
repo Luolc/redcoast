@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -90,7 +92,6 @@ type claudeFields struct {
 func rowDocument(row session.AccountRow) (inventoryFile, []byte, error) {
 	var file inventoryFile
 	file.Email, file.ReceiverEmail, file.Access, file.Status = row.Email, row.ReceiverEmail, row.Access, row.Status
-	file.Proxy.Provider, file.Proxy.Type = row.ProxyProvider, row.ProxyType
 	file.Proxy.Direct, file.Proxy.Host, file.Proxy.Port = row.Direct, row.ProxyHost, row.ProxyPort
 	file.Proxy.ExpectedIP, file.Proxy.UsernameRef, file.Proxy.PasswordRef = row.ExpectedIP, row.UsernameRef, row.PasswordRef
 	fields := claudeFields{DeviceID: row.DeviceID, AccountUUID: row.AccountUUID}
@@ -306,11 +307,29 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(temp.Name(), path)
 }
 
+// yamlKeys returns the yaml keys of the struct type t.
+func yamlKeys(t reflect.Type) map[string]bool {
+	keys := map[string]bool{}
+	for i := range t.NumField() {
+		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("yaml"), ","); name != "" {
+			keys[name] = true
+		}
+	}
+	return keys
+}
+
 // inventoryKeys and proxyKeys are the keys of an account file, and of its proxy block, that
-// a column of the accounts table holds.
+// a column of the accounts table holds: the ones the file types above decode.
 var (
-	inventoryKeys = map[string]bool{"email": true, "receiver_email": true, "access": true, "status": true, "oauth_token": true, "device_id": true, "account_uuid": true, "proxy": true}
-	proxyKeys     = map[string]bool{"provider": true, "type": true, "direct": true, "host": true, "port": true, "expected_egress_ip": true, "username_ref": true, "password_ref": true}
+	inventoryKeys = func() map[string]bool {
+		keys := yamlKeys(reflect.TypeFor[inventoryFile]())
+		maps.Copy(keys, yamlKeys(reflect.TypeFor[claudeFields]()))
+		return keys
+	}()
+	proxyKeys = func() map[string]bool {
+		proxy, _ := reflect.TypeFor[inventoryFile]().FieldByName("Proxy")
+		return yamlKeys(proxy.Type)
+	}()
 )
 
 // unknownKeys returns the keys of the account document data that no column of the accounts

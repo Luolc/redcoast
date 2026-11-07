@@ -40,8 +40,7 @@ TOKEN_REF = "op://example-vault/example-token/credential"
 USERNAME_REF = "op://example-vault/example-proxy/username"
 PASSWORD_REF = "op://example-vault/example-proxy/password"
 
-INVENTORY = f"""id: {ALIAS}
-email: {ALIAS}@example.test
+INVENTORY = f"""email: {ALIAS}@example.test
 status: active
 access: gateway
 oauth_token: {TOKEN_REF}

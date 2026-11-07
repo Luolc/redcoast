@@ -24,7 +24,8 @@ const maxInventoryFile = 64 << 10
 var accountStatuses = map[string]bool{"active": true, "paused": true, "suspended": true, "retired": true, "testing": true}
 
 // inventoryFile is the part of one <inventory>/<alias>.yaml the gateway consumes.
-// The other keys belong to other tools and are not validated here; the accounts table keeps them as they are (see splitExtra).
+// A start from the directory ignores the other keys, which may belong to other tools;
+// the import into the accounts table refuses them (see unknownKeys).
 type inventoryFile struct {
 	Email         string `yaml:"email"`
 	ReceiverEmail string `yaml:"receiver_email"`
