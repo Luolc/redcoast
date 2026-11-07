@@ -135,6 +135,26 @@ def test_unknown_stderr_passes_the_known_startup_lines_only():
   assert hi_gateway.unknown_stderr(persistence, aliases) is False
 
 
+IMPORT = (
+  b"2000/01/01 00:00:33 accounts: imported 3 from the inventory directory;"
+  b" the accounts table is the source from now on and the directory's account"
+  b" files are ignored\n"
+)
+
+
+def test_unknown_stderr_passes_the_import_line_of_a_first_start():
+  assert hi_gateway.unknown_stderr(IMPORT + KNOWN, ["example-a"]) is False
+
+
+def test_unknown_stderr_flags_a_line_that_only_looks_like_the_import_line():
+  for variant in (
+    IMPORT.replace(b"imported 3", b"imported many"),
+    IMPORT.replace(b"are ignored", b"are ignored, see /tmp/x"),
+    IMPORT.replace(b"accounts: imported 3", b"accounts: imported 3 example-a"),
+  ):
+    assert hi_gateway.unknown_stderr(variant + KNOWN, ["example-a"]) is True
+
+
 def test_unknown_stderr_flags_any_other_line():
   extra = (
     KNOWN + b"2000/01/01 00:00:35 capture directory must exist with mode 0700\n"

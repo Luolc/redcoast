@@ -351,7 +351,7 @@ func TestBucketURL(t *testing.T) {
 
 // TestProviderCommand checks that a provider and a known command lead every command line.
 func TestProviderCommand(t *testing.T) {
-	for _, arguments := range [][]string{{"claude", "serve", "--config", "x"}, {"claude", "plan"}, {"claude", "thresholds"}, {"claude", "machine", "list"}, {"codex", "serve"}, {"codex", "status"}} {
+	for _, arguments := range [][]string{{"claude", "serve", "--config", "x"}, {"claude", "plan"}, {"claude", "thresholds"}, {"claude", "inventory", "export"}, {"claude", "machine", "list"}, {"codex", "serve"}, {"codex", "status"}} {
 		if provider, command, err := providerCommand(arguments); err != nil || provider != arguments[0] || !slices.Equal(command, arguments[1:]) {
 			t.Errorf("%q: got %s %q %v", arguments, provider, command, err)
 		}

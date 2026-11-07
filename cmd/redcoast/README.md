@@ -73,6 +73,14 @@ hosts:
 
 Subscription plans live in the database, not the inventory. Every served account needs a plan in effect, set with `redcoast claude plan` (see `redcoast claude plan` without arguments for its usage).
 
+#### The Claude accounts are kept in the database
+
+The Claude gateway reads the directory once. At its first start with an `accounts` table that was never imported, it reads every `<alias>.yaml` (the accounts it does not serve too), refuses the directory as above when it does not load, and otherwise writes all the accounts and a marker (the `accounts_imported` row of `settings`) in one transaction. From then on the table is the source of the account set, at start and on every reload, and the account files in `inventory` are ignored, so editing one has no effect; `direct-hosts.yaml` is still read from that directory. The table holds the consumed keys of the file as they are (`email`, `access`, `status`, `oauth_token`, `device_id`, `account_uuid` and the `proxy` block), each credential only as its reference, plus a revision number and the times. The Codex gateway keeps reading its directory.
+
+`redcoast claude inventory export --session-db <path> <dir>` writes the table back as `<alias>.yaml` files of this format into `<dir>` (created when missing; a file of the same name is replaced, other files stay), so the accounts can be archived elsewhere. It reads the database through a read-only connection and can run beside the gateway. Keys the gateway does not consume (for example `receiver_email` or `proxy.provider`) are not stored and so not exported.
+
+`/dashboard.json` gives each account's table row as `config` (references as strings, `rev`), and lists the rows of accounts the gateway does not serve under `unserved_accounts`.
+
 ## Run under systemd
 
 An example unit, `/etc/systemd/system/redcoast.service`, for a service user `redcoast`:
@@ -120,7 +128,8 @@ Every command below talks to the running gateway over `--admin-socket` (the `adm
 | --- | --- |
 | `redcoast claude status` | accounts, pauses, quota readings, sessions |
 | `redcoast claude sessions [--since] [--until] [--cwd-prefix] [--machine] [--state ended\|all]` | the session list |
-| `redcoast claude reload` | re-read the inventory; all or nothing |
+| `redcoast claude reload` | re-read the accounts (the table; the Codex gateway's directory); all or nothing |
+| `redcoast claude inventory export --session-db <path> <dir>` | write the accounts table as inventory files into `<dir>` |
 | `redcoast claude handoff` | start the program at the service's path with the listeners inherited; the old process drains for up to 30 minutes, and keeps serving if the new one fails |
 | `redcoast claude pause <alias> [--reason] [--until]`, `resume <alias>` | take an account out of selection, or put it back (also after an exit IP mismatch) |
 | `redcoast claude refresh <alias>` | read the account's quota again: one request through its exit (`/v1/messages`, one output token of the small model), its readings saved; a pause after an upstream 429 ends when they are under the hard threshold; an account paused for any other reason is refused (409) and nothing is sent. A non-2xx `upstream_status` with no readings means the upstream refused the request itself, for example a retired model |

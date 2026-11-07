@@ -69,6 +69,9 @@ type dashboardView struct {
 	Health   health             `json:"health"`
 	Gateway  gatewayView        `json:"gateway"`
 	Accounts []dashboardAccount `json:"accounts"`
+	// Unserved are the accounts of the accounts table that the gateway does not serve
+	// (testing, paused, suspended, retired, or not on the gateway path); always a list.
+	Unserved []accountConfig `json:"unserved_accounts"`
 	session.Snapshot
 }
 
@@ -103,6 +106,43 @@ type dashboardAccount struct {
 	Egress      EgressResult `json:"egress_check,omitzero"`
 	InFlight    int          `json:"in_flight"`
 	Concurrency int          `json:"concurrency"`
+	// Config is the account's row of the accounts table; absent for a provider without one.
+	Config *accountConfig `json:"config,omitempty"`
+}
+
+// accountConfig is one row of the accounts table as the dashboard shows it. The
+// references are the strings themselves; no credential value is read to build it.
+type accountConfig struct {
+	Alias       string      `json:"alias"`
+	Email       string      `json:"email"`
+	Access      string      `json:"access"`
+	Status      string      `json:"status"`
+	TokenRef    string      `json:"token_ref"`
+	Proxy       proxyConfig `json:"proxy"`
+	DeviceID    string      `json:"device_id"`
+	AccountUUID string      `json:"account_uuid"`
+	Rev         int64       `json:"rev"`
+	CreatedAt   time.Time   `json:"created_at"`
+	UpdatedAt   time.Time   `json:"updated_at"`
+}
+
+// proxyConfig is the exit of an accountConfig.
+type proxyConfig struct {
+	Direct      bool   `json:"direct"`
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	ExpectedIP  string `json:"expected_egress_ip"`
+	UsernameRef string `json:"username_ref"`
+	PasswordRef string `json:"password_ref"`
+}
+
+// configOf returns row as the dashboard shows it.
+func configOf(row session.AccountRow) accountConfig {
+	return accountConfig{
+		Alias: row.Alias, Email: row.Email, Access: row.Access, Status: row.Status, TokenRef: row.TokenRef,
+		Proxy:    proxyConfig{Direct: row.Direct, Host: row.ProxyHost, Port: row.ProxyPort, ExpectedIP: row.ExpectedIP, UsernameRef: row.UsernameRef, PasswordRef: row.PasswordRef},
+		DeviceID: row.DeviceID, AccountUUID: row.AccountUUID, Rev: row.Rev, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+	}
 }
 
 // Handler returns the dashboard's routes, compressed with gzip for a request that
@@ -174,17 +214,34 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 	if err != nil {
 		return dashboardView{}, err
 	}
-	view := dashboardView{Snapshot: snap, Accounts: []dashboardAccount{}}
+	rows, _, err := d.cfg.Reader.Accounts(r.Context())
+	if err != nil {
+		return dashboardView{}, err
+	}
+	configs := make(map[string]accountConfig, len(rows))
+	for _, row := range rows {
+		configs[row.Alias] = configOf(row)
+	}
+	view := dashboardView{Snapshot: snap, Accounts: []dashboardAccount{}, Unserved: []accountConfig{}}
 	statuses := make([]session.AccountStatus, len(snap.Accounts))
 	for i, a := range snap.Accounts {
 		statuses[i] = a.AccountStatus
 		account := dashboardAccount{AccountView: a}
+		if config, ok := configs[a.Alias]; ok {
+			account.Config = &config
+			delete(configs, a.Alias)
+		}
 		if live := set.lookup(a.Alias); live != nil {
 			account.Email, account.ExpectedIP = live.email, live.expectedIP.String()
 			account.Egress = d.egress.lastCheck(live)
 			account.InFlight, account.Concurrency = len(live.slots), cap(live.slots)
 		}
 		view.Accounts = append(view.Accounts, account)
+	}
+	for _, row := range rows {
+		if config, ok := configs[row.Alias]; ok {
+			view.Unserved = append(view.Unserved, config)
+		}
 	}
 	view.Health = d.egress.judge(statuses, nil)
 	view.Gateway = gatewayView{
