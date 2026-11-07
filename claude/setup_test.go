@@ -1023,3 +1023,28 @@ func TestSetupDatesATokenSetByHand(t *testing.T) {
 		t.Fatalf("a hand-set token was not dated: %+v", got)
 	}
 }
+
+// TestSetupTaskEndedAfterTheWrite: a task that the store ended after the token was
+// written (a restart during the reload, or the handover's 5 minutes) is not answered with
+// success; the answer says the token is in the secret store.
+func TestSetupTaskEndedAfterTheWrite(t *testing.T) {
+	h := newSetupHarness(t, true)
+	id := h.running(t, "sample-a")
+	reload := h.writer.cfg.Reload
+	h.writer.cfg.Reload = func(ctx context.Context) (Reload, error) {
+		if n, err := h.store.InterruptSetups(t.Context()); err != nil || n != 1 {
+			t.Fatalf("interrupt: n=%d err=%v", n, err)
+		}
+		return reload(ctx)
+	}
+	status, answer, body := h.token(t, "sample-a", id, setupRun, setupToken)
+	if status != 409 || answer["error"] != "no_open_task" || answer["written"] != true {
+		t.Fatalf("%d %s", status, body)
+	}
+	if h.secrets.sets != 1 || h.secrets.creates != 0 {
+		t.Fatalf("sets=%d creates=%d", h.secrets.sets, h.secrets.creates)
+	}
+	if got := h.setupState(t, "sample-a"); got.State != "failed" || got.Reason != "interrupted" {
+		t.Fatalf("task = %+v", got)
+	}
+}
