@@ -2,8 +2,10 @@ package claude
 
 import (
 	"compress/gzip"
+	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"net/http"
@@ -516,5 +518,113 @@ func TestQuotaRefreshEndpoint(t *testing.T) {
 	}
 	if NewQuotaRefresh(&Entrypoint{router: &router{provider: Provider{}}}) != nil {
 		t.Fatal("NewQuotaRefresh returned a refresh for a provider without a Probe")
+	}
+}
+
+// snapshotCounter wraps d's snapshot computation with a count and gives d a clock the
+// test moves.
+func snapshotCounter(d *Dashboard) (calls *int, clock *time.Time) {
+	calls, clock = new(int), new(time.Time)
+	*clock = time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return *clock }
+	compute := d.snapshot
+	d.snapshot = func(ctx context.Context, aliases []string) (session.Snapshot, error) {
+		*calls++
+		return compute(ctx, aliases)
+	}
+	return calls, clock
+}
+
+// dashboardAliases returns the aliases that /dashboard.json shows.
+func dashboardAliases(t *testing.T, d *Dashboard) []string {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
+	var view struct {
+		Accounts []struct{ Alias string }
+	}
+	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &view) != nil {
+		t.Fatalf("dashboard answered %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var aliases []string
+	for _, a := range view.Accounts {
+		aliases = append(aliases, a.Alias)
+	}
+	return aliases
+}
+
+// TestDashboardSnapshotCache computes the snapshot once for the requests within its
+// TTL and again after it, and shows a new account set at once, as after a write that
+// reloads.
+func TestDashboardSnapshotCache(t *testing.T) {
+	h := newHarness(t, "sample-a")
+	reader, err := session.OpenReadOnly(h.path, session.Config{Now: func() time.Time { return h.clock }}, DefaultLimits.MaxTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	d := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path})
+	calls, clock := snapshotCounter(d)
+
+	for range 3 {
+		if got := dashboardAliases(t, d); !slices.Equal(got, []string{"sample-a"}) {
+			t.Fatalf("accounts = %v", got)
+		}
+	}
+	if *calls != 1 {
+		t.Fatalf("snapshot computed %d times for 3 requests within the TTL, want 1", *calls)
+	}
+
+	// A reload swaps in a new set; the next request shows it without waiting for the TTL.
+	h.add("sample-b", "sk-ant-oat01-synthetic-sample-b-token")
+	next := &AccountSet{byAlias: maps.Clone(h.accounts.set.Load().byAlias), provider: Claude}
+	h.accounts.set.Store(next)
+	if got := dashboardAliases(t, d); !slices.Equal(got, []string{"sample-a", "sample-b"}) {
+		t.Fatalf("accounts after the reload = %v", got)
+	}
+	if *calls != 2 {
+		t.Fatalf("snapshot computed %d times after the reload, want 2", *calls)
+	}
+
+	*clock = clock.Add(snapshotTTL - time.Millisecond)
+	dashboardAliases(t, d)
+	if *calls != 2 {
+		t.Fatalf("snapshot computed %d times just inside the TTL, want 2", *calls)
+	}
+	*clock = clock.Add(time.Millisecond)
+	dashboardAliases(t, d)
+	if *calls != 3 {
+		t.Fatalf("snapshot computed %d times at the TTL, want 3", *calls)
+	}
+}
+
+// TestDashboardSnapshotCacheKeepsNoError does not keep a failed computation: the next
+// request computes again.
+func TestDashboardSnapshotCacheKeepsNoError(t *testing.T) {
+	h := newHarness(t, "sample-a")
+	reader, err := session.OpenReadOnly(h.path, session.Config{Now: func() time.Time { return h.clock }}, DefaultLimits.MaxTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	d := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path})
+	calls, _ := snapshotCounter(d)
+	compute := d.snapshot
+	fail := true
+	d.snapshot = func(ctx context.Context, aliases []string) (session.Snapshot, error) {
+		if fail {
+			*calls++
+			return session.Snapshot{}, errors.New("synthetic failure")
+		}
+		return compute(ctx, aliases)
+	}
+	recorder := httptest.NewRecorder()
+	d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("failed computation answered %d", recorder.Code)
+	}
+	fail = false
+	if got := dashboardAliases(t, d); !slices.Equal(got, []string{"sample-a"}) {
+		t.Fatalf("accounts after the failure = %v", got)
 	}
 }

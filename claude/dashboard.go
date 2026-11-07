@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Luolc/redcoast/backup"
@@ -59,11 +60,58 @@ type DashboardLink struct {
 type Dashboard struct {
 	egress *Egress
 	cfg    DashboardConfig
+
+	// Test hooks: now is the clock of the snapshot cache, snapshot the computation it
+	// caches.
+	now      func() time.Time
+	snapshot func(context.Context, []string) (session.Snapshot, error)
+	cache    snapshotCache
+}
+
+// snapshotTTL is how long a computed snapshot answers further requests. Computing it
+// reads the whole store and takes seconds on a large one, while the page and the monitor
+// poll every few seconds; 3 s keeps the answer fresh enough for both and lets requests
+// that arrive together share one computation. Nothing else the dashboard shows is cached.
+const snapshotTTL = 3 * time.Second
+
+// snapshotCache holds the last snapshot. mu is held while one is computed, so that
+// requests arriving meanwhile wait for it instead of computing their own. The snapshot
+// is only read after it is stored.
+type snapshotCache struct {
+	mu   sync.Mutex
+	set  *AccountSet // the set whose candidates the snapshot was computed for
+	at   time.Time
+	snap session.Snapshot
+	ok   bool
 }
 
 // NewDashboard returns the dashboard over the egress checks' accounts.
 func NewDashboard(egress *Egress, cfg DashboardConfig) *Dashboard {
-	return &Dashboard{egress: egress, cfg: cfg}
+	d := &Dashboard{egress: egress, cfg: cfg, now: time.Now}
+	if cfg.Reader != nil {
+		d.snapshot = cfg.Reader.Snapshot
+	}
+	return d
+}
+
+// cachedSnapshot returns the snapshot for set's candidates, at most snapshotTTL old. A
+// different set, as after a reload, misses, so an account that a write added, removed or
+// changed shows at once. A failed computation is not kept.
+func (d *Dashboard) cachedSnapshot(ctx context.Context, set *AccountSet) (session.Snapshot, error) {
+	c := &d.cache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if now := d.now(); c.ok && c.set == set && now.Sub(c.at) >= 0 && now.Sub(c.at) < snapshotTTL {
+		return c.snap, nil
+	}
+	c.ok = false
+	started := d.now()
+	snap, err := d.snapshot(ctx, set.Candidates())
+	if err != nil {
+		return session.Snapshot{}, err
+	}
+	c.set, c.at, c.snap, c.ok = set, started, snap, true
+	return snap, nil
 }
 
 // dashboardView is the JSON answer. Its Accounts hides the embedded snapshot's, which
@@ -238,7 +286,7 @@ func (d *Dashboard) RunQuotaRefresh(ctx context.Context) error {
 // view reads everything the dashboard shows.
 func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 	set := d.egress.accounts.set.Load()
-	snap, err := d.cfg.Reader.Snapshot(r.Context(), set.Candidates())
+	snap, err := d.cachedSnapshot(r.Context(), set)
 	if err != nil {
 		return dashboardView{}, err
 	}
