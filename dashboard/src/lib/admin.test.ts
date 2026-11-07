@@ -9,6 +9,7 @@ import {
   findManaged,
   managedAccounts,
   patchBody,
+  saveEdit,
   validAlias,
   validDevice,
   validIp,
@@ -115,4 +116,51 @@ it("holds the draft to the gateway's shapes", () => {
       draftErrors({ ...was, host: " ", port: "x", ip: "1.2", uuid: "u" }),
     ),
   ).toEqual(["host", "port", "ip", "uuid"]);
+});
+
+it("checks no proxy field of a direct account", () => {
+  const m = findManaged(data, "sample-ab");
+  if (m?.config === undefined) throw new Error("no sample-ab");
+  const direct = {
+    ...m,
+    config: {
+      ...m.config,
+      proxy: {
+        direct: true,
+        host: "",
+        port: 0,
+        expected_egress_ip: "",
+        username_ref: "",
+        password_ref: "",
+      },
+    },
+  };
+  const draft = draftOf(direct, options);
+  expect(Object.keys(draftErrors(draft))).toEqual(["host", "port", "ip"]);
+  expect(draftErrors(draft, true)).toEqual({});
+  expect(draftErrors({ ...draft, uuid: "u" }, true)).toEqual({
+    uuid: "Not a UUID",
+  });
+});
+
+it("saves against the revision the form was opened on", async () => {
+  const m = findManaged(data, "sample-ab");
+  if (m === undefined) throw new Error("no sample-ab");
+  const was = draftOf(m, options);
+  let sent: { url: string; init: RequestInit } | undefined;
+  const post: typeof fetch = (url, init) => {
+    sent = { url: typeof url === "string" ? url : "", init: init ?? {} };
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  };
+  // The account has moved on since: the edit still names revision 4.
+  await saveEdit(
+    "sample-ab",
+    { rev: 4, was },
+    { ...was, port: "9000" },
+    options,
+    post,
+  );
+  expect(sent?.url).toBe("./accounts/sample-ab");
+  expect(sent?.init.method).toBe("PATCH");
+  expect(sent?.init.body).toBe('{"rev":4,"proxy":{"port":9000}}');
 });

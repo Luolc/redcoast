@@ -6,14 +6,14 @@ import {
   draftErrors,
   draftOf,
   findManaged,
-  patchBody,
+  saveEdit,
   planOf,
   statusOf,
   writeOffReason,
   type Draft,
   type Managed,
 } from "../lib/admin";
-import { accountPath, writeAccount, type Refusal } from "../lib/adminApi";
+import type { Refusal } from "../lib/adminApi";
 import { formatCount, formatPercent, formatTokens } from "../lib/format";
 import { accountHref, goTo, routeHref } from "../lib/route";
 import { byMachine, windowSpan } from "../lib/stats";
@@ -161,18 +161,13 @@ function EditForm({
     setD({ ...d, [k]: v });
   };
   const diff = changesOf(base.was, d);
-  const err = draftErrors(d);
+  const err = draftErrors(d, config.proxy.direct);
   const back = () => {
     goTo({ view: "account", arg: m.alias });
   };
   const save = () => {
     setBusy(true);
-    void writeAccount(
-      "account-update",
-      "PATCH",
-      accountPath(m.alias),
-      patchBody(base.rev, diff, options),
-    ).then((r) => {
+    void saveEdit(m.alias, base, d, options).then((r) => {
       setBusy(false);
       if (r.ok) {
         reload();

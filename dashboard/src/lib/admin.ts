@@ -1,6 +1,7 @@
 // Account management: which accounts the Manage pages list, whether the page
 // may write, and the edit of one account as a draft, its validation and the
 // request body it makes.
+import { accountPath, writeAccount, type Outcome } from "./adminApi";
 import type {
   Account,
   AccountConfig,
@@ -166,11 +167,17 @@ const DRAFT_LABELS: Record<keyof Draft, string> = {
   login: "Proxy login",
 };
 
-export function draftErrors(d: Draft): Partial<Record<keyof Draft, string>> {
+/** What is wrong with the draft; a direct account has no proxy fields to check. */
+export function draftErrors(
+  d: Draft,
+  direct = false,
+): Partial<Record<keyof Draft, string>> {
   const e: Partial<Record<keyof Draft, string>> = {};
-  if (d.host.trim() === "") e.host = "Required";
-  if (!validPort(d.port)) e.port = "A port from 1 to 65535";
-  if (!validIp(d.ip)) e.ip = "An IPv4 address, like 192.0.2.10";
+  if (!direct) {
+    if (d.host.trim() === "") e.host = "Required";
+    if (!validPort(d.port)) e.port = "A port from 1 to 65535";
+    if (!validIp(d.ip)) e.ip = "An IPv4 address, like 192.0.2.10";
+  }
   if (d.plan !== "" && !validPlan(d.plan))
     e.plan = "Lowercase letters, digits, . - and _, up to 32";
   if (d.uuid !== "" && !validUuid(d.uuid)) e.uuid = "Not a UUID";
@@ -194,6 +201,26 @@ export function changesOf(was: Draft, d: Draft): Change[] {
     from: was[k],
     to: d[k],
   }));
+}
+
+/**
+ * Saves the draft as an edit made against the revision and values the form
+ * was opened on, not against a later reading of the page.
+ */
+export function saveEdit(
+  alias: string,
+  base: { rev: number; was: Draft },
+  draft: Draft,
+  options: ProxyRefOption[],
+  post?: typeof fetch,
+): Promise<Outcome> {
+  return writeAccount(
+    "account-update",
+    "PATCH",
+    accountPath(alias),
+    patchBody(base.rev, changesOf(base.was, draft), options),
+    post,
+  );
 }
 
 /** The body of the PATCH that makes the changes: the revision and the fields changed. */

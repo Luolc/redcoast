@@ -4,7 +4,7 @@ import { sampleDashboard } from "../../fixtures/sample.ts";
 import { Page } from "../App";
 import type { Route } from "../lib/route";
 import type { Dashboard } from "../lib/types";
-import { RefusalCallout } from "./AdminUi";
+import { Confirm, RefusalCallout } from "./AdminUi";
 
 const now = new Date("2026-10-07T12:20:00Z");
 const data = sampleDashboard(now);
@@ -48,6 +48,13 @@ it("hides editing and adding, and says why, when writes are off", () => {
   expect(form).not.toContain("Save");
   expect(text(form)).toContain("Credentials");
   const add = html({ view: "add", arg: "1" }, off);
+  // Nor does adding open from its address when no token reference can be named.
+  const noTemplate = html(
+    { view: "add", arg: "1" },
+    { ...data, write: { enabled: true, can_create: false } },
+  );
+  expect(noTemplate).not.toContain("Save as testing");
+  expect(text(noTemplate)).toContain("Adding accounts is off here.");
   expect(text(add)).toContain("Adding accounts is off here.");
   expect(add).not.toContain("Save as testing");
 });
@@ -167,4 +174,18 @@ it("has no field that takes a credential", () => {
   expect(html({ view: "account", arg: "sample-ab/edit" })).toContain(
     "claude-oauth-token-sample-ab",
   );
+});
+
+it("offers only the first click of a confirmed act", () => {
+  const out = renderToStaticMarkup(
+    <Confirm
+      label="Activate"
+      yes="Yes, activate"
+      question="Sure?"
+      onYes={noop}
+    />,
+  );
+  expect(out).toContain("Activate");
+  expect(out).not.toContain("Yes, activate");
+  expect(out).not.toContain("Sure?");
 });
