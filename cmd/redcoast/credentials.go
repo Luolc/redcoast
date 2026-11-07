@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"strings"
 
 	"github.com/1password/onepassword-sdk-go"
 
@@ -29,8 +30,9 @@ func onePasswordResolver(ctx context.Context, token string) (claude.Resolver, er
 }
 
 // onePasswordItems is the write path of the official SDK as credential.Store: it lists
-// vaults and items, reads an item's field names, sets one field of an item and creates
-// one item with one concealed field, and calls nothing else of the Items API.
+// vaults and items, reads an item's field names and its expiry date, sets one field of an
+// item and the date of its expiry field and creates one item with one concealed field and
+// an expiry date, and calls nothing else of the Items API.
 type onePasswordItems struct{ client *onepassword.Client }
 
 // onePasswordSecretStore returns the secret store over the official SDK with the service
@@ -76,23 +78,33 @@ func (s onePasswordItems) Item(ctx context.Context, vaultID, itemID string) (cre
 	if err != nil {
 		return credential.Item{}, err
 	}
-	out := credential.Item{ID: item.ID, Title: item.Title, UpdatedAt: item.UpdatedAt}
+	out := credential.Item{ID: item.ID, Title: item.Title}
 	for _, f := range item.Fields {
 		out.Fields = append(out.Fields, credential.Field{ID: f.ID, Title: f.Title})
+		if isExpires(f) {
+			out.Expires = append(out.Expires, f.Value)
+		}
 	}
 	return out, nil
 }
 
-// SetField reads the item again and sets the value of its one field with this ID and
-// title, so a field that changed since the caller looked is not written blindly; the
-// rest of the item is put back as it was read.
-func (s onePasswordItems) SetField(ctx context.Context, vaultID, itemID string, field credential.Field, value string) error {
+// isExpires reports whether f is an expiry field: its title is the expiry field's name,
+// ignoring case.
+func isExpires(f onepassword.ItemField) bool {
+	return strings.EqualFold(f.Title, credential.ExpiresField)
+}
+
+// SetFields reads the item again and sets the value of its one field with this ID and
+// title and the date of its one expiry field, if it has one, so a field that changed
+// since the caller looked is not written blindly; the rest of the item is put back as it
+// was read, and no field is added.
+func (s onePasswordItems) SetFields(ctx context.Context, vaultID, itemID string, field credential.Field, value, expires string) error {
 	item, err := s.client.Items().Get(ctx, vaultID, itemID)
 	runtime.KeepAlive(s.client)
 	if err != nil {
 		return err
 	}
-	at := -1
+	at, due := -1, -1
 	for i, f := range item.Fields {
 		if f.ID == field.ID && f.Title == field.Title {
 			if at >= 0 {
@@ -100,20 +112,34 @@ func (s onePasswordItems) SetField(ctx context.Context, vaultID, itemID string, 
 			}
 			at = i
 		}
+		if isExpires(f) {
+			if due >= 0 {
+				return errors.New("expiry field not unique")
+			}
+			due = i
+		}
 	}
 	if at < 0 {
 		return errors.New("field not found")
 	}
 	item.Fields[at].Value = value
+	if due >= 0 {
+		item.Fields[due].Value = expires
+	}
 	_, err = s.client.Items().Put(ctx, item)
 	runtime.KeepAlive(s.client)
 	return err
 }
 
-func (s onePasswordItems) Create(ctx context.Context, vaultID, title, fieldTitle, value string) error {
+// expiryField is the field that holds an expiry date.
+func expiryField(date string) onepassword.ItemField {
+	return onepassword.ItemField{ID: credential.ExpiresField, Title: credential.ExpiresField, FieldType: onepassword.ItemFieldTypeDate, Value: date}
+}
+
+func (s onePasswordItems) Create(ctx context.Context, vaultID, title, fieldTitle, value, expires string) error {
 	_, err := s.client.Items().Create(ctx, onepassword.ItemCreateParams{
 		Category: onepassword.ItemCategoryAPICredentials, VaultID: vaultID, Title: title,
-		Fields: []onepassword.ItemField{{ID: fieldTitle, Title: fieldTitle, FieldType: onepassword.ItemFieldTypeConcealed, Value: value}},
+		Fields: []onepassword.ItemField{{ID: fieldTitle, Title: fieldTitle, FieldType: onepassword.ItemFieldTypeConcealed, Value: value}, expiryField(expires)},
 	})
 	runtime.KeepAlive(s.client)
 	return err

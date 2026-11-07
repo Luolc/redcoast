@@ -123,7 +123,8 @@ func main() {
 	}
 	offerAccountActions(admin, gateway, entrypoint)
 	writer := accountWriter(cfg, store, accounts, egress, entrypoint, resolve, reload)
-	setup := offerSetup(ctx, admin, egress, writer)
+	admin.Writer = writer
+	setup := offerSetup(ctx, admin, writer)
 	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started, writer)
 	if err != nil {
 		log.Fatal(err)
@@ -175,10 +176,10 @@ func main() {
 	}
 }
 
-// offerSetup gives the management interface the setup commands and /health the tokens
-// that are due when setup is on, and ends the handovers that were under way when the
-// previous process stopped. It returns the setup, nil when it is off.
-func offerSetup(ctx context.Context, admin *claude.Admin, egress *claude.Egress, writer *claude.AccountWriter) *claude.Setup {
+// offerSetup gives the management interface the setup commands when setup is on, and
+// ends the handovers that were under way when the previous process stopped. It returns the
+// setup, nil when it is off.
+func offerSetup(ctx context.Context, admin *claude.Admin, writer *claude.AccountWriter) *claude.Setup {
 	setup := writer.Setup()
 	if setup == nil {
 		return nil
@@ -187,14 +188,6 @@ func offerSetup(ctx context.Context, admin *claude.Admin, egress *claude.Egress,
 		log.Fatal(err)
 	}
 	admin.Setup = setup
-	problems := egress.Problems
-	egress.Problems = func() []string {
-		var all []string
-		if problems != nil {
-			all = problems()
-		}
-		return append(all, setup.Problems()...)
-	}
 	return setup
 }
 
@@ -328,7 +321,7 @@ func accountWriter(cfg config, store *session.Store, accounts *claude.Accounts, 
 			return newResolver(ctx, cfg)
 		},
 		AllowFrom: cfg.writeAllowFrom, TokenRefTemplate: cfg.tokenRefTemplate,
-		SetupEnabled: cfg.setupEnabled,
+		SetupEnabled: cfg.setupEnabled, AdminWrite: cfg.adminWrite,
 		SetupSecrets: func(ctx context.Context) (credential.Store, error) { return newSecretStore(ctx, cfg) },
 	})
 }

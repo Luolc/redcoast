@@ -18,39 +18,44 @@ const (
 	SetupFailed     = "failed"
 )
 
-// The kinds of a task, in the order the queue serves them: a task the page asked for
-// before a renewal the gateway queued itself.
-const (
-	SetupKindPage    = "page"
-	SetupKindRenewal = "renewal"
-)
-
-// Timeouts of a running task, and the life of a setup token as the gateway estimates it.
+// Timeouts of a running task.
 const (
 	SetupReportTimeout   = 30 * time.Minute
 	SetupRunTimeout      = 60 * time.Minute
 	SetupHandoverTimeout = 5 * time.Minute
-	SetupTokenLife       = 365 * 24 * time.Hour
-	SetupRenewWithin     = 30 * 24 * time.Hour
-	SetupRenewRetry      = 24 * time.Hour
-	// SetupWriteSkew is how much later than the gateway's own write a secret store item may
-	// be dated without having been changed by hand.
-	SetupWriteSkew = 2 * time.Minute
 )
+
+// SetupTokenYears is how many calendar years after a write the gateway dates the token's
+// expiry in the secret store item.
+const SetupTokenYears = 1
 
 // Reasons the store itself gives for a task it ends.
 const (
 	SetupReasonTimeout     = "timeout"
-	SetupReasonRetired     = "account_retired"
+	SetupReasonStatus      = "account_status"
+	SetupReasonDirect      = "direct_account"
 	SetupReasonInterrupted = "interrupted"
+)
+
+// The wait for a person at a captcha page: a login program may ask for it once per task
+// and for at most SetupMaxWait from the report.
+const (
+	SetupStepCaptcha = "awaiting_captcha"
+	SetupMaxWait     = 20 * time.Minute
 )
 
 // Errors of the setup tasks.
 var (
-	ErrSetupOpen        = errors.New("the account has a requested or running task")
-	ErrSetupRetired     = errors.New("the account is retired")
-	ErrSetupNoOpenTask  = errors.New("no running task for the account")
-	ErrSetupIDsMismatch = errors.New("request_id or run_id does not match the task")
+	ErrSetupSourceMismatch = errors.New("the task came from another source")
+	ErrSetupTaskNotFound   = errors.New("no such task")
+	ErrSetupNotSlack       = errors.New("the task was not requested from Slack")
+	ErrSetupNotRequested   = errors.New("the task is not waiting to be handed out")
+	ErrSetupWaitUntil      = errors.New("wait_until is not allowed")
+	ErrSetupOpen           = errors.New("the account has a requested or running task")
+	ErrSetupStatus         = errors.New("the account is neither testing nor active")
+	ErrSetupDirect         = errors.New("the account has a direct exit")
+	ErrSetupNoOpenTask     = errors.New("no running task for the account")
+	ErrSetupIDsMismatch    = errors.New("request_id or run_id does not match the task")
 )
 
 // schemaV11 adds the setup tasks: one row per account holding its latest task and the
@@ -64,16 +69,36 @@ CREATE TABLE account_setup (
 	step TEXT NOT NULL,
 	reason TEXT NOT NULL,
 	action TEXT NOT NULL,
-	kind TEXT NOT NULL,
 	requested_at INTEGER,
 	started_at INTEGER,
 	reported_at INTEGER,
 	claimed_at INTEGER,
 	updated_at INTEGER,
-	token_set_at INTEGER,
-	token_set_estimated INTEGER NOT NULL
+	token_set_at INTEGER
 ) STRICT;
 `
+
+// schemaV12 records where each audited write and each setup task came from, and the
+// wait a login program asked for at a captcha page. The columns only add to a row; the
+// rows already there are the dashboard's.
+const schemaV12 = `
+ALTER TABLE account_audit ADD COLUMN source_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_audit ADD COLUMN source_thread TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_audit ADD COLUMN source_ts TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_setup ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'dashboard';
+ALTER TABLE account_setup ADD COLUMN source_thread TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_setup ADD COLUMN source_ts TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_setup ADD COLUMN wait_until INTEGER;
+ALTER TABLE account_setup ADD COLUMN wait_until_set INTEGER NOT NULL DEFAULT 0;
+`
+
+// migrateToV12 adds the source and wait columns.
+func migrateToV12(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, schemaV12); err != nil {
+		return fmt.Errorf("session store migration v12: %v", err)
+	}
+	return nil
+}
 
 // migrateToV11 creates the setup table.
 func migrateToV11(ctx context.Context, tx *sql.Tx) error {
@@ -93,7 +118,6 @@ type SetupRow struct {
 	Step      string
 	Reason    string
 	Action    string
-	Kind      string
 
 	RequestedAt time.Time
 	StartedAt   time.Time // when a login machine took it
@@ -101,18 +125,17 @@ type SetupRow struct {
 	ClaimedAt   time.Time // when its handover began
 	UpdatedAt   time.Time
 
-	// TokenSetAt is when the token was set: written by the gateway, or estimated from the
-	// secret store when TokenSetEstimated; zero when not known.
-	TokenSetAt        time.Time
-	TokenSetEstimated bool
-}
+	// TokenSetAt is when the gateway wrote the token; zero for a token it did not write.
+	TokenSetAt time.Time
 
-// TokenDueAt is a year after TokenSetAt, zero when that is not known.
-func (r SetupRow) TokenDueAt() time.Time {
-	if r.TokenSetAt.IsZero() {
-		return time.Time{}
-	}
-	return r.TokenSetAt.Add(SetupTokenLife)
+	// Source is where the request came from: the dashboard (Kind SourceDashboard, no
+	// thread) or a Slack message.
+	Source Source
+	// WaitUntil is when a login program said it would be done waiting for a person at a
+	// captcha page, zero when it is not waiting; WaitUntilSet stays true once a task has
+	// set it, since a task sets it once.
+	WaitUntil    time.Time
+	WaitUntilSet bool
 }
 
 // SetupTask is a task handed to a login machine with the account it is for.
@@ -121,19 +144,21 @@ type SetupTask struct {
 	Account AccountRow
 }
 
-const setupColumns = `alias, state, request_id, run_id, step, reason, action, kind, requested_at, started_at, reported_at, claimed_at, updated_at, token_set_at, token_set_estimated`
+// setupColumns are the columns of a SetupRow.
+const setupColumns = `alias, state, request_id, run_id, step, reason, action, requested_at, started_at, reported_at, claimed_at, updated_at, token_set_at, source_kind, source_thread, source_ts, wait_until, wait_until_set`
 
 func scanSetup(r scanner) (SetupRow, error) {
 	var row SetupRow
-	var requested, started, reported, claimed, updated, tokenSet sql.NullInt64
-	if err := r.Scan(&row.Alias, &row.State, &row.RequestID, &row.RunID, &row.Step, &row.Reason, &row.Action, &row.Kind,
-		&requested, &started, &reported, &claimed, &updated, &tokenSet, &row.TokenSetEstimated); err != nil {
+	var requested, started, reported, claimed, updated, tokenSet, wait sql.NullInt64
+	if err := r.Scan(&row.Alias, &row.State, &row.RequestID, &row.RunID, &row.Step, &row.Reason, &row.Action,
+		&requested, &started, &reported, &claimed, &updated, &tokenSet,
+		&row.Source.Kind, &row.Source.Thread, &row.Source.TS, &wait, &row.WaitUntilSet); err != nil {
 		return SetupRow{}, err
 	}
 	for _, t := range []struct {
 		from sql.NullInt64
 		to   *time.Time
-	}{{requested, &row.RequestedAt}, {started, &row.StartedAt}, {reported, &row.ReportedAt}, {claimed, &row.ClaimedAt}, {updated, &row.UpdatedAt}, {tokenSet, &row.TokenSetAt}} {
+	}{{requested, &row.RequestedAt}, {started, &row.StartedAt}, {reported, &row.ReportedAt}, {claimed, &row.ClaimedAt}, {updated, &row.UpdatedAt}, {tokenSet, &row.TokenSetAt}, {wait, &row.WaitUntil}} {
 		if t.from.Valid {
 			*t.to = fromMillis(t.from.Int64)
 		}
@@ -155,10 +180,10 @@ func setupRow(ctx context.Context, tx *sql.Tx, alias string) (SetupRow, error) {
 
 // putSetup writes row, replacing the account's.
 func putSetup(ctx context.Context, tx *sql.Tx, row SetupRow) error {
-	_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO account_setup (`+setupColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		row.Alias, row.State, row.RequestID, row.RunID, row.Step, row.Reason, row.Action, row.Kind,
+	_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO account_setup (`+setupColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.Alias, row.State, row.RequestID, row.RunID, row.Step, row.Reason, row.Action,
 		nullableTime(row.RequestedAt), nullableTime(row.StartedAt), nullableTime(row.ReportedAt), nullableTime(row.ClaimedAt), nullableTime(row.UpdatedAt),
-		nullableTime(row.TokenSetAt), row.TokenSetEstimated)
+		nullableTime(row.TokenSetAt), row.Source.Kind, row.Source.Thread, row.Source.TS, nullableTime(row.WaitUntil), row.WaitUntilSet)
 	if err != nil {
 		return fmt.Errorf("write setup: %v", err)
 	}
@@ -191,33 +216,53 @@ func readSetups(ctx context.Context, tx *sql.Tx, query string) ([]SetupRow, erro
 	return rows, nil
 }
 
+// ineligible returns why an account cannot have a setup, as the fixed code a task ends
+// with, or "" when it can: a setup is for an account that is testing or active and has a
+// proxy exit, not the gateway's own address.
+func ineligible(status string, direct bool) string {
+	switch {
+	case status != "testing" && status != "active":
+		return SetupReasonStatus
+	case direct:
+		return SetupReasonDirect
+	}
+	return ""
+}
+
 // expiry says how a requested or running task ends at now: the state and reason, or
-// empty strings when it stands. A requested task ends only with a retired account.
-func (r SetupRow) expiry(now time.Time, retired bool) (state, reason string) {
+// empty strings when it stands. A requested task also ends with an account that cannot
+// have a setup any more, ineligible being the code for it.
+func (r SetupRow) expiry(now time.Time, ineligible string) (state, reason string) {
 	switch {
 	case r.State == SetupRunning && !r.ClaimedAt.IsZero() && !now.Before(r.ClaimedAt.Add(SetupHandoverTimeout)):
 		return SetupFailed, SetupReasonTimeout
 	case r.State == SetupRunning && r.ClaimedAt.IsZero() && (!now.Before(r.ReportedAt.Add(SetupReportTimeout)) || !now.Before(r.StartedAt.Add(SetupRunTimeout))):
 		return SetupFailed, SetupReasonTimeout
-	case r.State == SetupRequested && retired:
-		return SetupFailed, SetupReasonRetired
+	case (r.State == SetupRequested || r.State == SetupRunning && r.ClaimedAt.IsZero()) && ineligible != "":
+		return SetupFailed, ineligible
 	}
 	return "", ""
 }
 
 // expireSetups ends, inside tx, a running task that has outlived its time and a
-// requested task whose account is retired.
+// requested or running task, not yet claimed by a handover, whose account cannot have a
+// setup any more.
 func expireSetups(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	rows, err := readSetups(ctx, tx, "SELECT "+setupColumns+" FROM account_setup WHERE state IN ('requested', 'running')")
 	if err != nil {
 		return err
 	}
 	for _, row := range rows {
+		why := ""
 		var status string
-		if err := tx.QueryRowContext(ctx, "SELECT status FROM accounts WHERE alias = ?", row.Alias).Scan(&status); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		var direct bool
+		switch err := tx.QueryRowContext(ctx, "SELECT status, proxy_direct FROM accounts WHERE alias = ?", row.Alias).Scan(&status, &direct); {
+		case err == nil:
+			why = ineligible(status, direct)
+		case !errors.Is(err, sql.ErrNoRows):
 			return fmt.Errorf("read account: %v", err)
 		}
-		state, reason := row.expiry(now, status == "retired")
+		state, reason := row.expiry(now, why)
 		if state == "" {
 			continue
 		}
@@ -252,10 +297,10 @@ func (s *Store) InterruptSetups(ctx context.Context) (int, error) {
 }
 
 // RequestSetup records a task for account alias as requested. With a rev the account
-// must be at it. It fails with ErrAccountNotFound, ErrRevConflict, ErrSetupRetired
-// (checked first of the three conflicts after the rev) and ErrSetupOpen. It returns the
-// new row and the state the account's setup was in before.
-func (s *Store) RequestSetup(ctx context.Context, alias, action, kind string, rev *int64, requestID string) (SetupRow, string, error) {
+// must be at it. It fails with ErrAccountNotFound, ErrRevConflict, ErrSetupStatus and
+// ErrSetupDirect (an account that cannot have a setup) and ErrSetupOpen, in that order.
+// It returns the new row and the state the account's setup was in before.
+func (s *Store) RequestSetup(ctx context.Context, alias, action string, rev *int64, requestID string, source Source) (SetupRow, string, error) {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
@@ -272,8 +317,11 @@ func (s *Store) RequestSetup(ctx context.Context, alias, action, kind string, re
 		if rev != nil && account.Rev != *rev {
 			return ErrRevConflict
 		}
-		if account.Status == "retired" {
-			return ErrSetupRetired
+		switch ineligible(account.Status, account.Direct) {
+		case SetupReasonStatus:
+			return ErrSetupStatus
+		case SetupReasonDirect:
+			return ErrSetupDirect
 		}
 		row, err := setupRow(ctx, tx, alias)
 		if err != nil {
@@ -283,18 +331,33 @@ func (s *Store) RequestSetup(ctx context.Context, alias, action, kind string, re
 			return ErrSetupOpen
 		}
 		before = row.State
-		out = SetupRow{Alias: alias, State: SetupRequested, RequestID: requestID, Action: action, Kind: kind,
-			RequestedAt: now, UpdatedAt: now, TokenSetAt: row.TokenSetAt, TokenSetEstimated: row.TokenSetEstimated}
+		if source.Kind == "" {
+			source.Kind = SourceDashboard
+		}
+		out = SetupRow{Alias: alias, State: SetupRequested, RequestID: requestID, Action: action,
+			RequestedAt: now, UpdatedAt: now, TokenSetAt: row.TokenSetAt, Source: source}
 		return putSetup(ctx, tx, out)
 	})
 	return out, before, err
 }
 
-// NextSetup hands the next requested task out, or returns nil: the page's tasks come
-// before the renewals, each kind in the order requested, and none is handed out while
-// another is running. The task becomes running with no step, and the time is when the
-// run's timeouts start.
+// NextSetup hands the next requested task that the dashboard asked for out, or returns
+// nil: they go in the order requested, and none is handed out while another is running.
+// A task requested from Slack is never handed out here. The task becomes running with no
+// step, and the time is when the run's timeouts start.
 func (s *Store) NextSetup(ctx context.Context) (*SetupTask, error) {
+	return s.nextSetup(ctx, "")
+}
+
+// NextSetupByID hands out the task with this request ID, which must be the latest task
+// of its account, requested from Slack and waiting; nil when it is but another task is
+// running. It fails with ErrSetupTaskNotFound, ErrSetupNotSlack and
+// ErrSetupNotRequested, in that order.
+func (s *Store) NextSetupByID(ctx context.Context, requestID string) (*SetupTask, error) {
+	return s.nextSetup(ctx, requestID)
+}
+
+func (s *Store) nextSetup(ctx context.Context, requestID string) (*SetupTask, error) {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
@@ -303,6 +366,10 @@ func (s *Store) NextSetup(ctx context.Context) (*SetupTask, error) {
 	var out *SetupTask
 	err := s.transact(ctx, func(tx *sql.Tx) error {
 		now := fromMillis(s.now())
+		row, err := pickSetup(ctx, tx, requestID)
+		if err != nil || row == nil {
+			return err
+		}
 		var running int
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM account_setup WHERE state = 'running'").Scan(&running); err != nil {
 			return fmt.Errorf("read setup: %v", err)
@@ -310,26 +377,47 @@ func (s *Store) NextSetup(ctx context.Context) (*SetupTask, error) {
 		if running > 0 {
 			return nil
 		}
-		row, err := scanSetup(tx.QueryRowContext(ctx, `SELECT `+setupColumns+` FROM account_setup WHERE state = 'requested'
-			ORDER BY CASE kind WHEN 'page' THEN 0 ELSE 1 END, requested_at, alias LIMIT 1`))
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read setup: %v", err)
-		}
 		account, err := accountRow(ctx, tx, row.Alias)
 		if err != nil {
 			return err
 		}
 		row.State, row.StartedAt, row.ReportedAt, row.UpdatedAt = SetupRunning, now, now, now
-		if err := putSetup(ctx, tx, row); err != nil {
+		if err := putSetup(ctx, tx, *row); err != nil {
 			return err
 		}
-		out = &SetupTask{SetupRow: row, Account: account}
+		out = &SetupTask{SetupRow: *row, Account: account}
 		return nil
 	})
 	return out, err
+}
+
+// pickSetup selects the task nextSetup would hand out: the oldest requested task the
+// dashboard asked for, or, with a request ID, that task if it is the account's latest,
+// from Slack and requested. A nil row with a nil error is no task to hand out.
+func pickSetup(ctx context.Context, tx *sql.Tx, requestID string) (*SetupRow, error) {
+	if requestID == "" {
+		row, err := scanSetup(tx.QueryRowContext(ctx, `SELECT `+setupColumns+` FROM account_setup WHERE state = 'requested' AND source_kind = ?
+			ORDER BY requested_at, alias LIMIT 1`, SourceDashboard))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read setup: %v", err)
+		}
+		return &row, nil
+	}
+	row, err := scanSetup(tx.QueryRowContext(ctx, `SELECT `+setupColumns+` FROM account_setup WHERE request_id = ?`, requestID))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, ErrSetupTaskNotFound
+	case err != nil:
+		return nil, fmt.Errorf("read setup: %v", err)
+	case row.Source.Kind != SourceSlack:
+		return nil, ErrSetupNotSlack
+	case row.State != SetupRequested:
+		return nil, ErrSetupNotRequested
+	}
+	return &row, nil
 }
 
 // runningUnclaimed reads the row of alias inside tx and checks it is a running task
@@ -351,8 +439,12 @@ func runningTask(ctx context.Context, tx *sql.Tx, alias, requestID string) (Setu
 
 // ReportSetup records one step a login machine reports for the running task: the first
 // report sets the run ID, which every later one carries. A task that a handover
-// claimed takes no report.
-func (s *Store) ReportSetup(ctx context.Context, alias, requestID, runID, state, step, reason string) (SetupRow, error) {
+// claimed takes no report, and neither does one that came from another source than
+// sourceKind (ErrSetupSourceMismatch, after the IDs are checked). A wait until is
+// allowed only with the running state and the step SetupStepCaptcha, once per task, and
+// within SetupMaxWait after now (ErrSetupWaitUntil, nothing written); a report with a
+// different state or step clears it, and one without it leaves it.
+func (s *Store) ReportSetup(ctx context.Context, alias, requestID, runID, sourceKind, state, step, reason string, waitUntil *time.Time) (SetupRow, error) {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
@@ -371,6 +463,18 @@ func (s *Store) ReportSetup(ctx context.Context, alias, requestID, runID, state,
 		if row.RunID != "" && row.RunID != runID {
 			return ErrSetupIDsMismatch
 		}
+		if row.Source.Kind != sourceKind {
+			return ErrSetupSourceMismatch
+		}
+		switch {
+		case waitUntil != nil:
+			if state != SetupRunning || step != SetupStepCaptcha || row.WaitUntilSet || !waitUntil.After(now) || waitUntil.After(now.Add(SetupMaxWait)) {
+				return ErrSetupWaitUntil
+			}
+			row.WaitUntil, row.WaitUntilSet = waitUntil.UTC(), true
+		case state != SetupRunning || step != SetupStepCaptcha:
+			row.WaitUntil = time.Time{}
+		}
 		row.RunID, row.Step, row.Reason, row.State = runID, step, reason, state
 		row.ReportedAt, row.UpdatedAt = now, now
 		out = row
@@ -381,14 +485,17 @@ func (s *Store) ReportSetup(ctx context.Context, alias, requestID, runID, state,
 
 // CheckHandover says whether a handover for these IDs would be taken now, without
 // claiming it.
-func (s *Store) CheckHandover(ctx context.Context, alias, requestID, runID string) error {
+func (s *Store) CheckHandover(ctx context.Context, alias, requestID, runID, sourceKind string) error {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
 		return err
 	}
 	return s.transact(ctx, func(tx *sql.Tx) error {
-		_, err := handoverTask(ctx, tx, alias, requestID, runID)
+		row, err := handoverTask(ctx, tx, alias, requestID, runID)
+		if err == nil && row.Source.Kind != sourceKind {
+			err = ErrSetupSourceMismatch
+		}
 		return err
 	})
 }
@@ -412,7 +519,7 @@ func handoverTask(ctx context.Context, tx *sql.Tx, alias, requestID, runID strin
 // ClaimHandover claims the task for a handover, at most once: from then on the task
 // takes no other handover and no report, and the handover's own time limit applies. It
 // returns the task with its account.
-func (s *Store) ClaimHandover(ctx context.Context, alias, requestID, runID string) (SetupTask, error) {
+func (s *Store) ClaimHandover(ctx context.Context, alias, requestID, runID, sourceKind string) (SetupTask, error) {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
@@ -424,6 +531,9 @@ func (s *Store) ClaimHandover(ctx context.Context, alias, requestID, runID strin
 		row, err := handoverTask(ctx, tx, alias, requestID, runID)
 		if err != nil {
 			return err
+		}
+		if row.Source.Kind != sourceKind {
+			return ErrSetupSourceMismatch
 		}
 		account, err := accountRow(ctx, tx, alias)
 		if err != nil {
@@ -468,7 +578,7 @@ func (s *Store) NoteTokenWritten(ctx context.Context, alias, requestID string) e
 			return err
 		}
 		now := fromMillis(s.now())
-		row.TokenSetAt, row.TokenSetEstimated, row.UpdatedAt = now, false, now
+		row.TokenSetAt, row.UpdatedAt = now, now
 		return putSetup(ctx, tx, row)
 	})
 }
@@ -511,121 +621,4 @@ func (s *Store) SetupRows(ctx context.Context) (map[string]SetupRow, error) {
 // SetupRows returns the setup table through the read-only connection.
 func (r *Reader) SetupRows(ctx context.Context) (map[string]SetupRow, error) {
 	return r.store.SetupRows(ctx)
-}
-
-// SetTokenEstimate records when a token that the gateway did not write was set, as the
-// secret store dates its item. It changes nothing for a token the gateway wrote, unless
-// the item was changed by hand after.
-func (s *Store) SetTokenEstimate(ctx context.Context, alias string, at time.Time) error {
-	return s.transact(ctx, func(tx *sql.Tx) error {
-		row, err := setupRow(ctx, tx, alias)
-		if err != nil {
-			return err
-		}
-		// A token the gateway wrote is dated by the write; an item changed later than the
-		// write explains was changed by hand, and dates the token it holds.
-		if !row.TokenSetAt.IsZero() && !row.TokenSetEstimated && !at.After(row.TokenSetAt.Add(SetupWriteSkew)) {
-			return nil
-		}
-		if row.TokenSetAt.Equal(at) && row.TokenSetEstimated {
-			return nil
-		}
-		row.TokenSetAt, row.TokenSetEstimated = at, true
-		return putSetup(ctx, tx, row)
-	})
-}
-
-// servable reports whether alias is an account in the table that is active or paused,
-// the accounts whose token is renewed.
-func servable(ctx context.Context, tx *sql.Tx, alias string) (bool, error) {
-	var status string
-	err := tx.QueryRowContext(ctx, "SELECT status FROM accounts WHERE alias = ?", alias).Scan(&status)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
-	case err != nil:
-		return false, fmt.Errorf("read account: %v", err)
-	}
-	return status == "active" || status == "paused", nil
-}
-
-// renewalDue says whether a renewal should be queued for the account of row at now:
-// its token is due within SetupRenewWithin, it has no open task, and it has no renewal
-// that failed in the last SetupRenewRetry.
-func (r SetupRow) renewalDue(now time.Time) bool {
-	switch {
-	case r.TokenDueAt().After(now.Add(SetupRenewWithin)):
-		return false
-	case r.State == SetupRequested || r.State == SetupRunning:
-		return false
-	case (r.State == SetupFailed || r.State == SetupNeedsHuman) && r.Kind == SetupKindRenewal && now.Sub(r.UpdatedAt) < SetupRenewRetry:
-		return false
-	}
-	return true
-}
-
-// QueueRenewals queues a token_only renewal for each active or paused account whose
-// token is due within SetupRenewWithin and that has no requested or running task and no
-// renewal that failed in the last SetupRenewRetry. newID makes the request IDs. It
-// returns the aliases it queued.
-func (s *Store) QueueRenewals(ctx context.Context, newID func() string) ([]string, error) {
-	if err := s.ExpireSetups(ctx); err != nil {
-		return nil, err
-	}
-	var queued []string
-	err := s.transact(ctx, func(tx *sql.Tx) error {
-		now := fromMillis(s.now())
-		rows, err := readSetups(ctx, tx, "SELECT "+setupColumns+" FROM account_setup WHERE token_set_at IS NOT NULL ORDER BY alias")
-		if err != nil {
-			return err
-		}
-		for _, row := range rows {
-			if !row.renewalDue(now) {
-				continue
-			}
-			if ok, err := servable(ctx, tx, row.Alias); err != nil {
-				return err
-			} else if !ok {
-				continue
-			}
-			renewal := SetupRow{Alias: row.Alias, State: SetupRequested, RequestID: newID(), Action: "token_only", Kind: SetupKindRenewal,
-				RequestedAt: now, UpdatedAt: now, TokenSetAt: row.TokenSetAt, TokenSetEstimated: row.TokenSetEstimated}
-			if err := putSetup(ctx, tx, renewal); err != nil {
-				return err
-			}
-			queued = append(queued, row.Alias)
-		}
-		return nil
-	})
-	return queued, err
-}
-
-// TokenDue is an account whose token is due within a time and has no newer one.
-type TokenDue struct {
-	Alias string
-	At    time.Time
-}
-
-// TokensDue lists the active or paused accounts whose token is due within the span
-// from now, the overdue ones included, by alias.
-func (s *Store) TokensDue(ctx context.Context, within time.Duration) ([]TokenDue, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.alias, s.token_set_at FROM account_setup s JOIN accounts a ON a.alias = s.alias
-		WHERE s.token_set_at IS NOT NULL AND a.status IN ('active', 'paused') ORDER BY s.alias`)
-	if err != nil {
-		return nil, fmt.Errorf("read setup: %v", err)
-	}
-	defer func() { _ = rows.Close() }()
-	limit := fromMillis(s.now()).Add(within)
-	var due []TokenDue
-	for rows.Next() {
-		var alias string
-		var set int64
-		if err := rows.Scan(&alias, &set); err != nil {
-			return nil, fmt.Errorf("read setup: %v", err)
-		}
-		if at := fromMillis(set).Add(SetupTokenLife); !at.After(limit) {
-			due = append(due, TokenDue{alias, at})
-		}
-	}
-	return due, rows.Err()
 }

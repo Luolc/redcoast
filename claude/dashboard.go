@@ -329,7 +329,7 @@ func (d *Dashboard) setupView(ctx context.Context, view *dashboardView) (*setupG
 		if c := view.Accounts[i].Config; c != nil {
 			shown = append(shown, c)
 		}
-		view.Accounts[i].Setup = blockOf(states[view.Accounts[i].Alias])
+		view.Accounts[i].Setup = setup.block(view.Accounts[i].Alias, states[view.Accounts[i].Alias])
 	}
 	return setup.decorate(states, shown), nil
 }
@@ -501,5 +501,7 @@ func (d *Dashboard) writeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /accounts", route(w, actionCreate, w.create))
 	mux.HandleFunc("PATCH /accounts/{alias}", route(w, actionUpdate, w.update))
 	mux.HandleFunc("POST /accounts/{alias}/verify", route(w, actionVerify, w.verify))
-	mux.HandleFunc("POST /accounts/{alias}/activate", route(w, actionActivate, w.activate))
+	mux.HandleFunc("POST /accounts/{alias}/activate", route(w, actionActivate, func(r *http.Request, alias string, body *revBody, entry session.AuditEntry) (any, error) {
+		return w.activate(r, alias, body, entry, false)
+	}))
 }

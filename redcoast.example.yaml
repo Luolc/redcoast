@@ -67,6 +67,11 @@ dashboard_write:
 # the vault the template names. Off, the setup routes answer 501.
 setup:
   enabled: false
+# Account commands on the management socket (account create, show, verify, activate and
+# setup request, for an agent acting on a message). Needs dashboard_write.token_ref_template.
+# Off, the writing ones answer 501. The Codex gateway refuses this key.
+admin_write:
+  enabled: false
 capture_dir: ""
 
 egress_interval: 15m

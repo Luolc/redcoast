@@ -72,6 +72,9 @@ type AccountWriterConfig struct {
 	TokenRefTemplate string
 	// SetupEnabled turns the setup routes on; off, they answer 501.
 	SetupEnabled bool
+	// AdminWrite turns the account commands of the management socket that write on; off,
+	// they answer 501 account_write_unavailable.
+	AdminWrite bool
 	// SetupSecrets opens the secret store that a setup handover writes the token to, with
 	// the credential the gateway reads its references with. It is called when a
 	// handover writes and when tokens are dated, and the store is not kept.
@@ -98,7 +101,7 @@ type AccountWriter struct {
 func NewAccountWriter(cfg AccountWriterConfig) *AccountWriter {
 	w := &AccountWriter{cfg: cfg, now: time.Now}
 	if cfg.SetupEnabled {
-		w.setup = &Setup{w: w}
+		w.setup = &Setup{w: w, expiries: map[string]tokenExpiry{}, reread: make(chan struct{}, 1)}
 	}
 	return w
 }
@@ -109,13 +112,20 @@ type writeError struct {
 	status       int
 	message      string
 	field, check string
+	// code is the fixed code the management socket answers with in place of message; the
+	// dashboard answers with message.
+	code string
 }
 
 func (e writeError) Error() string { return e.message }
 
 // fieldProblem is a 400 about field.
 func fieldProblem(field, message string) error {
-	return writeError{status: http.StatusBadRequest, message: message, field: field}
+	code := codeFieldInvalid
+	if message == "missing" {
+		code = codeFieldMissing
+	}
+	return writeError{status: http.StatusBadRequest, message: message, field: field, code: code}
 }
 
 // peer returns the TCP peer address of r, never read from a header.
@@ -179,11 +189,11 @@ func route[B any](w *AccountWriter, action string, handle func(r *http.Request, 
 		}
 		data, err := io.ReadAll(http.MaxBytesReader(rw, r.Body, maxWriteBody))
 		if err != nil {
-			refuse(writeError{status: http.StatusRequestEntityTooLarge, message: "request body larger than 8 KiB"})
+			refuse(writeError{status: http.StatusRequestEntityTooLarge, message: "request body larger than 8 KiB", code: errorBadRequest})
 			return
 		}
 		if err := decodeStrict(data, &body); err != nil {
-			refuse(writeError{status: http.StatusBadRequest, message: "request body is not a JSON object with known, unrepeated keys"})
+			refuse(writeError{status: http.StatusBadRequest, message: "request body is not a JSON object with known, unrepeated keys", code: errorBadRequest})
 			return
 		}
 		alias := r.PathValue("alias")
@@ -473,10 +483,10 @@ func (w *AccountWriter) dryLoad(ctx context.Context, row session.AccountRow) err
 	}
 	resolve, err := w.cfg.Resolve(ctx)
 	if err != nil {
-		return writeError{status: http.StatusBadGateway, message: "the credential resolver is not available"}
+		return writeError{status: http.StatusBadGateway, message: "the credential resolver is not available", code: codeResolverUnavailable}
 	}
 	if _, err := loadAccount(ctx, entry, resolve, w.cfg.Accounts.set.Load().concurrency); err != nil {
-		return writeError{status: http.StatusUnprocessableEntity, message: "a reference cannot be resolved", field: firstField(err)}
+		return writeError{status: http.StatusUnprocessableEntity, message: "a reference cannot be resolved", field: firstField(err), code: codeReferenceUnresolved}
 	}
 	return nil
 }
@@ -507,9 +517,10 @@ func (w *AccountWriter) afterWrite(ctx context.Context, before, after session.Ac
 	if reloadNeeded(before, after) {
 		report, err := w.cfg.Reload(ctx)
 		if err != nil {
-			return writeResponse{}, writeError{status: http.StatusBadGateway, message: "the account was saved but the reload failed; the served set is unchanged until a reload succeeds"}
+			return writeResponse{}, writeError{status: http.StatusBadGateway, message: "the account was saved but the reload failed; the served set is unchanged until a reload succeeds", code: reasonReloadFailed}
 		}
 		answer.Reload = &report
+		w.Setup().RereadExpiries()
 	}
 	return answer, nil
 }

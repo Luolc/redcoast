@@ -47,6 +47,31 @@ var writeValues = []string{"synthetic-user-1", "synthetic-password-1", "sk-ant-o
 // writeHarness is a gateway with one served account, a fake exit that tunnels to the
 // echo service and answers the quota probe itself, and the dashboard's write routes
 // over them behind the Host guard.
+// logBuffer is the log sink of the tests; server goroutines write to it while the
+// test reads, so every access takes the lock.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *logBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
 type writeHarness struct {
 	*harness
 	echo    *echoService
@@ -54,7 +79,7 @@ type writeHarness struct {
 	writer  *AccountWriter
 	egress  *Egress
 	handler http.Handler
-	logs    *bytes.Buffer
+	logs    *logBuffer
 	cfg     AccountWriterConfig
 
 	mu          sync.Mutex
@@ -73,7 +98,7 @@ const (
 // serves sample-a on the pro plan and lets writes from 192.0.2.0/24 through.
 func newWriteHarness(t *testing.T, allow ...netip.Prefix) *writeHarness {
 	t.Helper()
-	w := &writeHarness{harness: newHarness(t), echo: newEchoService(t, "192.0.2.1"), probeStatus: http.StatusOK, logs: &bytes.Buffer{}}
+	w := &writeHarness{harness: newHarness(t), echo: newEchoService(t, "192.0.2.1"), probeStatus: http.StatusOK, logs: &logBuffer{}}
 	log.SetOutput(w.logs)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	w.exit = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {

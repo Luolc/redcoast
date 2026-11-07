@@ -45,7 +45,7 @@ func skipped(reason string) checkResult { return checkResult{Result: "skipped", 
 // time (409 otherwise), and the probe takes the lock of the quota rounds.
 func (w *AccountWriter) runChecks(ctx context.Context, row session.AccountRow) (session.Verification, verifyReport, error) {
 	if row.Access != "gateway" {
-		return session.Verification{}, verifyReport{}, writeError{status: http.StatusConflict, message: "the account is not on the gateway path", check: "access"}
+		return session.Verification{}, verifyReport{}, writeError{status: http.StatusConflict, message: "the account is not on the gateway path", check: "access", code: codeNotReady}
 	}
 	ctx, cancel := context.WithTimeout(ctx, verifyTimeout)
 	defer cancel()
@@ -58,7 +58,7 @@ func (w *AccountWriter) runChecks(ctx context.Context, row session.AccountRow) (
 	var tokenOK, egressOK, probeOK bool
 	file, data, err := rowDocument(row)
 	if err != nil {
-		return v, report, writeError{status: http.StatusInternalServerError, message: "the account cannot be described"}
+		return v, report, writeError{status: http.StatusInternalServerError, message: "the account cannot be described", code: codeDescribeFailed}
 	}
 	entry, err := servedAccount(row.Alias, file, data, Claude)
 	if err != nil {
@@ -71,7 +71,7 @@ func (w *AccountWriter) runChecks(ctx context.Context, row session.AccountRow) (
 	}
 	resolve, err := w.cfg.Resolve(ctx)
 	if err != nil {
-		return v, report, writeError{status: http.StatusBadGateway, message: "the credential resolver is not available"}
+		return v, report, writeError{status: http.StatusBadGateway, message: "the credential resolver is not available", code: codeResolverUnavailable}
 	}
 	candidate, tokenResult, exitResult := w.candidate(ctx, entry, resolve)
 	set(&tokenOK, &report.TokenOK, tokenResult)
