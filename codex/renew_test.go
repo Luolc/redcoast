@@ -664,8 +664,13 @@ func TestDashboardShowsCodexState(t *testing.T) {
 		t.Helper()
 		// Each read has a dashboard of its own, whose snapshot is not an earlier one.
 		dashboard := claude.NewDashboard(egress, claude.DashboardConfig{Reader: reader, Store: g.store, DBPath: filepath.Join(g.dir, "codex.sqlite")})
+		ctx, stop := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { defer close(done); _ = dashboard.RunSnapshot(ctx) }()
 		res := httptest.NewRecorder()
 		dashboard.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
+		stop()
+		<-done
 		var v view
 		if err := json.Unmarshal(res.Body.Bytes(), &v); err != nil || len(v.Accounts) != 1 {
 			t.Fatalf("dashboard %s: %v", res.Body, err)

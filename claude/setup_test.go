@@ -358,7 +358,7 @@ func TestSetupOff(t *testing.T) {
 		t.Fatalf("setup rows while off: %v", rows)
 	}
 	// No write path at all.
-	d := NewDashboard(h.egress, DashboardConfig{Provider: "codex", Reader: nil, Store: h.store})
+	d := newTestDashboard(t, h.egress, DashboardConfig{Provider: "codex", Reader: nil, Store: h.store})
 	recorder := httptest.NewRecorder()
 	d.Handler().ServeHTTP(recorder, request("POST", "/accounts/sample-a/setup", `{}`))
 	if recorder.Code != 501 {

@@ -165,7 +165,7 @@ func (w *writeHarness) build() {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	d := NewDashboard(w.egress, DashboardConfig{Provider: "claude", Reader: reader, Store: w.store, DBPath: w.path, Started: w.clock, Write: w.writer})
+	d := newTestDashboard(t, w.egress, DashboardConfig{Provider: "claude", Reader: reader, Store: w.store, DBPath: w.path, Started: w.clock, Write: w.writer})
 	w.handler = HostGuard([]string{writeHost}, d.Handler())
 }
 
@@ -843,7 +843,7 @@ func TestDashboardWriteBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	codex := HostGuard([]string{writeHost}, NewDashboard(w.egress, DashboardConfig{Provider: "codex", Reader: reader, Store: w.store, DBPath: w.path, Started: w.clock}).Handler())
+	codex := HostGuard([]string{writeHost}, newTestDashboard(t, w.egress, DashboardConfig{Provider: "codex", Reader: reader, Store: w.store, DBPath: w.path, Started: w.clock}).Handler())
 	for _, r := range []*http.Request{
 		request("POST", "/accounts", w.newBody()), request("PATCH", "/accounts/sample-a", `{}`),
 		request("POST", "/accounts/sample-a/verify", `{}`), request("POST", "/accounts/sample-a/activate", `{}`),
