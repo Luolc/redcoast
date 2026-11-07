@@ -80,7 +80,7 @@ interface QuotaPoint {
 
 // An account's estimate for one quota window from its readings since the last
 // reset. The numbers are null, with a reason, when the readings do not allow one.
-interface WindowBurn {
+export interface WindowBurn {
   rate_per_hour: number | null; // utilization per hour; 1 is the whole quota
   exhausts_at: string | null;
   resets_at: string | null;
@@ -124,6 +124,55 @@ interface Plan {
   effective_to: string | null; // null when open-ended
 }
 
+// The proxy block of an account's row in the accounts table. The references
+// are names in the secret manager, never values.
+interface ProxyConfig {
+  direct: boolean;
+  host: string;
+  port: number;
+  expected_egress_ip: string;
+  username_ref: string;
+  password_ref: string;
+}
+
+// The last run of the three checks: null while not run, voided by a change of
+// exit or reference.
+export interface Verification {
+  token_ok: boolean | null;
+  egress_ok: boolean | null;
+  probe_ok: boolean | null;
+  at?: string | undefined;
+}
+
+// One row of the accounts table, as the gateway holds it.
+export interface AccountConfig {
+  alias: string;
+  email: string;
+  access: string; // direct or gateway
+  status: string; // testing, active, paused, suspended or retired
+  token_ref: string;
+  proxy: ProxyConfig;
+  device_id: string; // empty until set
+  account_uuid: string;
+  verify: Verification;
+  rev: number; // the version an edit is made against
+  created_at: string;
+  updated_at: string;
+}
+
+// A proxy login that accounts already use; a write can only choose among these.
+export interface ProxyRefOption {
+  username_ref: string;
+  password_ref: string;
+}
+
+// Whether this request's source may write accounts; reason says why not.
+interface WriteState {
+  enabled: boolean;
+  reason?: string | undefined;
+  can_create: boolean; // a new account can be created
+}
+
 export interface Account {
   alias: string;
   email: string;
@@ -145,6 +194,8 @@ export interface Account {
   next_plan: Plan | null;
   in_flight: number;
   concurrency: number;
+  // The account's row; absent from a gateway without an accounts table.
+  config?: AccountConfig | undefined;
 }
 
 interface Machine {
@@ -293,6 +344,12 @@ export interface Dashboard {
   gateway: Gateway;
   db_bytes: number;
   accounts: Account[];
+  // Rows of the accounts table that the gateway does not serve; absent from a
+  // gateway older than the table.
+  unserved_accounts?: AccountConfig[] | undefined;
+  accounts_editable?: boolean | undefined;
+  write?: WriteState | undefined;
+  proxy_ref_options?: ProxyRefOption[] | undefined;
   machines: Machine[];
   sessions: LiveSession[];
   idle_sessions: number;
@@ -331,6 +388,33 @@ const isWindowTotals = object<WindowTotals>({
   output: isNumber,
   cache_read: isNumber,
   cache_creation: isNumber,
+});
+
+const isAccountConfig: Guard<AccountConfig> = object<AccountConfig>({
+  alias: isString,
+  email: isString,
+  access: isString,
+  status: isString,
+  token_ref: isString,
+  proxy: object<ProxyConfig>({
+    direct: isBoolean,
+    host: isString,
+    port: isNumber,
+    expected_egress_ip: isString,
+    username_ref: isString,
+    password_ref: isString,
+  }),
+  device_id: isString,
+  account_uuid: isString,
+  verify: object<Verification>({
+    token_ok: nullable(isBoolean),
+    egress_ok: nullable(isBoolean),
+    probe_ok: nullable(isBoolean),
+    at: optional(isString),
+  }),
+  rev: isNumber,
+  created_at: isString,
+  updated_at: isString,
 });
 
 const latency = {
@@ -440,7 +524,25 @@ const isDashboard: Guard<Dashboard> = object<Dashboard>({
       next_plan: nullable(isPlan),
       in_flight: isNumber,
       concurrency: isNumber,
+      config: optional(isAccountConfig),
     }),
+  ),
+  unserved_accounts: optional(arrayOf(isAccountConfig)),
+  accounts_editable: optional(isBoolean),
+  write: optional(
+    object<WriteState>({
+      enabled: isBoolean,
+      reason: optional(isString),
+      can_create: isBoolean,
+    }),
+  ),
+  proxy_ref_options: optional(
+    arrayOf(
+      object<ProxyRefOption>({
+        username_ref: isString,
+        password_ref: isString,
+      }),
+    ),
   ),
   machines: arrayOf(
     object<Machine>({
