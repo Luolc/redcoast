@@ -491,7 +491,17 @@ func (d *Dashboard) writeRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /accounts/{alias}/verify", unsupported)
 		mux.HandleFunc("POST /accounts/{alias}/activate", unsupported)
 		mux.HandleFunc("POST /accounts/{alias}/setup", setupUnavailable)
+		mux.HandleFunc("GET /accounts/{alias}/record", unsupported)
 		return
+	}
+	// The record is read where writes are configured, and by the same guards as
+	// /dashboard.json, since it changes nothing.
+	if len(w.cfg.AllowFrom) == 0 {
+		mux.HandleFunc("GET /accounts/{alias}/record", func(rw http.ResponseWriter, _ *http.Request) {
+			adminRefuse(rw, writeError{status: http.StatusNotImplemented, code: codeWriteUnavailable})
+		})
+	} else {
+		mux.HandleFunc("GET /accounts/{alias}/record", func(rw http.ResponseWriter, r *http.Request) { serveRecord(rw, r, w) })
 	}
 	if w.setup == nil {
 		mux.HandleFunc("POST /accounts/{alias}/setup", setupUnavailable)

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -632,5 +633,110 @@ func TestAgentOverTheSocket(t *testing.T) {
 	}
 	if status, answer := send("POST", "/accounts", map[string]any{"alias": "x"}); status != 400 || answer["error"] != "source_missing" {
 		t.Fatalf("a write with no source: %d %v", status, answer)
+	}
+}
+
+// reportRows returns the audit rows of the reports of alias, oldest first.
+func (h *setupHarness) reportRows(t *testing.T, alias string) []session.AuditRow {
+	t.Helper()
+	rows, _, err := h.store.AccountAuditLast(t.Context(), alias, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []session.AuditRow
+	for _, row := range rows {
+		if row.Action == actionSetupReport {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// TestSetupReportIsAudited: each accepted report writes one audit row of codes and a
+// time, with the task's source; a refused report writes none.
+func TestSetupReportIsAudited(t *testing.T) {
+	h := newSetupHarness(t, true)
+	h.agent(t, "POST", "/accounts", h.agentCreateBody("sample-new"))
+	_, answer, _ := h.agent(t, "POST", "/accounts/sample-new/setup/request", map[string]any{"rev": h.revOf(t, "sample-new"), "source": slackSource()})
+	id := answer["setup"].(map[string]any)["request_id"].(string)
+	if status, _, body := h.adminDo(t, "POST", "/setup/next?request_id="+id, "", ""); status != 200 {
+		t.Fatalf("next by ID: %d %s", status, body)
+	}
+	wait := h.clock.Add(15 * time.Minute).UTC().Format(time.RFC3339)
+	if status, _, body := h.reportAs(t, "slack", "sample-new", id, setupRun, "running", "awaiting_captcha", nil, wait); status != 200 {
+		t.Fatalf("captcha report: %d %s", status, body)
+	}
+	// Refused: a free-text reason, and a wrong request ID.
+	h.reportAs(t, "slack", "sample-new", id, setupRun, "failed", "lock", setupToken, nil)
+	h.reportAs(t, "slack", "sample-new", strings.Repeat("c", 32), setupRun, "running", "lock", nil, nil)
+	if status, _, body := h.reportAs(t, "slack", "sample-new", id, setupRun, "needs_human", "email_page", "captcha_challenge", nil); status != 200 {
+		t.Fatalf("needs_human report: %d %s", status, body)
+	}
+	rows := h.reportRows(t, "sample-new")
+	if len(rows) != 2 {
+		t.Fatalf("%d report rows, want 2 (refused reports write none)", len(rows))
+	}
+	first, second := rows[0], rows[1]
+	if first.Source != (session.Source{Kind: "slack", Thread: slackThread, TS: slackTS}) || first.Changes["state"].New != "running" ||
+		first.Changes["step"].New != "awaiting_captcha" || first.Changes["wait_until"].New != wait || len(first.Changes) != 3 {
+		t.Fatalf("first row: %+v", first)
+	}
+	if second.Changes["state"].New != "needs_human" || second.Changes["reason"].New != "captcha_challenge" || len(second.Changes) != 3 {
+		t.Fatalf("second row: %+v", second)
+	}
+	// A dashboard task's report carries no source.
+	h.running(t, "sample-a")
+	if rows := h.reportRows(t, "sample-a"); len(rows) != 1 || rows[0].Source.Kind != "" {
+		t.Fatalf("dashboard task rows: %+v", rows)
+	}
+}
+
+// TestDashboardRecord: GET /accounts/{alias}/record answers what `account show` does,
+// behind the guards of the dashboard, with no credential in it, and 501 where writes
+// are not configured.
+func TestDashboardRecord(t *testing.T) {
+	h := newSetupHarness(t, true)
+	h.agent(t, "POST", "/accounts", h.agentCreateBody("sample-new"))
+	_, answer, _ := h.agent(t, "POST", "/accounts/sample-new/setup/request", map[string]any{"rev": h.revOf(t, "sample-new"), "source": slackSource()})
+	id := answer["setup"].(map[string]any)["request_id"].(string)
+	h.adminDo(t, "POST", "/setup/next?request_id="+id, "", "")
+	h.reportAs(t, "slack", "sample-new", id, setupRun, "running", "lock", nil, nil)
+	get := func(alias, host string) (int, map[string]any, string) {
+		r := httptest.NewRequest("GET", "/accounts/"+alias+"/record", nil)
+		r.RemoteAddr, r.Host = "192.0.2.50:4000", host
+		return h.serve(t, r)
+	}
+	status, record, body := get("sample-new", writeHost)
+	if status != 200 {
+		t.Fatalf("record: %d %s", status, body)
+	}
+	shown := h.show(t, "sample-new")
+	for _, key := range []string{"account", "served", "setup", "created", "history", "history_truncated"} {
+		if !reflect.DeepEqual(record[key], shown[key]) {
+			t.Fatalf("%s differs from account show: %v vs %v", key, record[key], shown[key])
+		}
+	}
+	for _, value := range append([]string{setupToken, oldToken}, writeValues...) {
+		if strings.Contains(body, value) {
+			t.Fatalf("the record holds %q", value)
+		}
+	}
+	if status, answer, _ := get("sample-new", "other.example.test"); status == 200 || answer["history"] != nil {
+		t.Fatalf("a request for another host got %d", status)
+	}
+	if status, answer, _ := get("Sample%20A", writeHost); status != 400 || answer["error"] != "field_invalid" {
+		t.Fatalf("bad alias: %d %v", status, answer)
+	}
+	if status, answer, _ := get("nobody", writeHost); status != 404 || answer["error"] != "unknown_account" {
+		t.Fatalf("unknown: %d %v", status, answer)
+	}
+	// With no source allowed to write, the route is 501.
+	off := newSetupHarness(t, true)
+	off.cfg.AllowFrom = nil
+	off.build()
+	r := httptest.NewRequest("GET", "/accounts/sample-a/record", nil)
+	r.RemoteAddr, r.Host = "192.0.2.50:4000", writeHost
+	if status, answer, _ := off.serve(t, r); status != 501 || answer["error"] != "account_write_unavailable" {
+		t.Fatalf("without dashboard_write: %d %v", status, answer)
 	}
 }

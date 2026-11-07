@@ -441,6 +441,7 @@ func (s *Setup) Report(ctx context.Context, alias string, body reportBody) (*set
 		return nil, err
 	}
 	log.Printf("setup alias=%s request_id=%s state=%s step=%s reason=%s", alias, body.RequestID, body.State, body.Step, reason)
+	s.auditReport(ctx, alias, row, body.State, body.Step, reason, wait)
 	return s.block(alias, row), nil
 }
 
@@ -532,6 +533,29 @@ func (s *Setup) audit(ctx context.Context, task session.SetupTask, outcome strin
 	}
 	if err := s.w.cfg.Store.RecordAudit(ctx, task.Alias, entry, map[string]session.FieldChange{"setup": {Old: session.SetupRunning, New: outcome}}); err != nil {
 		log.Printf("setup alias=%s: the outcome was not audited", task.Alias)
+	}
+}
+
+// actionSetupReport is the audit action of an accepted report. Its changes hold only
+// codes and a time: the state, the step, the reason and the captcha deadline.
+const actionSetupReport = "account-setup-report"
+
+// auditReport writes one audit row for an accepted report, with the task's source as
+// audit does.
+func (s *Setup) auditReport(ctx context.Context, alias string, row session.SetupRow, state, step, reason string, wait *time.Time) {
+	entry := session.AuditEntry{SourceIP: adminSourceIP, Action: actionSetupReport}
+	if row.Source.Kind == session.SourceSlack {
+		entry.Source = row.Source
+	}
+	changes := map[string]session.FieldChange{"state": {New: state}, "step": {New: step}}
+	if reason != "" {
+		changes["reason"] = session.FieldChange{New: reason}
+	}
+	if wait != nil {
+		changes["wait_until"] = session.FieldChange{New: wait.UTC().Format(time.RFC3339)}
+	}
+	if err := s.w.cfg.Store.RecordAudit(ctx, alias, entry, changes); err != nil {
+		log.Printf("setup alias=%s: the report was not audited", alias)
 	}
 }
 
