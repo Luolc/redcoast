@@ -229,11 +229,39 @@ const SETUP_REFUSALS: Record<string, string> = {
   account_status: "Setup is only for accounts that are testing or active.",
   direct_account: "Setup is not offered for an account with a direct exit.",
   setup_unavailable: "Setup is off on this gateway.",
+  store_unavailable: "The gateway's store did not answer; try again shortly.",
 };
 
 /** A refused setup request as a sentence; unknown codes stay as they are. */
 export function setupRefusalWording(code: string): string {
   return SETUP_REFUSALS[code] ?? code;
+}
+
+const AUDIT_ACTIONS: Record<string, string> = {
+  "account-create": "Account created",
+  "account-update": "Settings changed",
+  "account-verify": "Checked",
+  "account-activate": "Activation tried",
+  "account-setup": "Setup requested",
+  "account-setup-report": "Setup step",
+  "account-setup-token": "Token handover",
+};
+
+/** What an audit action code means, as a phrase. */
+export function auditActionWording(action: string): string {
+  return AUDIT_ACTIONS[action] ?? action;
+}
+
+const RECORD_ERRORS: Record<string, string> = {
+  account_write_unavailable:
+    "This gateway keeps no record page: account writes are not on.",
+  unknown_account: "The gateway has no such account.",
+  store_unavailable: "The gateway's store did not answer; try again shortly.",
+};
+
+/** Why the record could not be read, as a sentence; unknown codes stay as they are. */
+export function recordErrorWording(code: string): string {
+  return RECORD_ERRORS[code] ?? code;
 }
 
 /** What the gateway found of the token's expiry when it last read the item. */

@@ -31,6 +31,7 @@ import {
 } from "./AdminUi";
 import { QuotaCurve } from "./charts";
 import { SetupPanel, TokenDates } from "./Setup";
+import { Timeline } from "./Timeline";
 import {
   Ago,
   Empty,
@@ -607,6 +608,18 @@ export function AccountDetail({
           note="The gateway queues the login for a login machine; the page never sees the token"
         >
           <SetupPanel data={data} m={m} now={now} reload={reload} />
+        </Section>
+      ) : null}
+      {writable ? (
+        <Section
+          title="Record"
+          note="Where the account came from and what was done to it; a source is a record, not an approval"
+        >
+          <Timeline
+            alias={m.alias}
+            stamp={`${String(m.config?.rev ?? 0)} ${m.config?.setup?.updated_at ?? ""}`}
+            now={now}
+          />
         </Section>
       ) : null}
       <Section

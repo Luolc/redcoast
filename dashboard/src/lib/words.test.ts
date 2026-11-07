@@ -1,5 +1,7 @@
 import { expect, it } from "vitest";
 import {
+  auditActionWording,
+  recordErrorWording,
   resultWording,
   setupReasonWording,
   setupRefusalWording,
@@ -42,4 +44,14 @@ it("words what was read of a token's expiry", () => {
   expect(tokenExpiryWording("no_field")).toContain("no expiry field");
   expect(tokenExpiryWording("unreadable")).toContain("could not be read");
   expect(tokenExpiryWording("other")).toBe("other");
+});
+
+it("words the audit actions, the record's errors and a store that is down", () => {
+  expect(auditActionWording("account-setup-report")).toBe("Setup step");
+  expect(auditActionWording("account-new-kind")).toBe("account-new-kind");
+  expect(recordErrorWording("account_write_unavailable")).toContain(
+    "account writes are not on",
+  );
+  expect(recordErrorWording("other_code")).toBe("other_code");
+  expect(setupRefusalWording("store_unavailable")).toContain("store");
 });
