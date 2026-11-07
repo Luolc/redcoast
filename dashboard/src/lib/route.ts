@@ -7,13 +7,17 @@ export type View =
   | "client"
   | "sessions"
   | "accounts"
+  | "manage"
+  | "account"
+  | "add"
   | "exits"
   | "monitor";
 
 export interface Route {
   view: View;
   // A client machine for sessions; `<machine>/<program>` for client; a
-  // section for monitor.
+  // section for monitor; an alias, then `/edit` when editing, for account;
+  // the step, then `/<alias>` from step 2, for add.
   arg?: string | undefined;
 }
 
@@ -23,6 +27,9 @@ const VIEWS = new Set<string>([
   "client",
   "sessions",
   "accounts",
+  "manage",
+  "account",
+  "add",
   "exits",
   "monitor",
 ]);
@@ -49,6 +56,16 @@ export function routeHref(r: Route): string {
     : `#/${r.view}/${encodeURIComponent(r.arg)}`;
 }
 
+/** Opens the route in this window. */
+export function goTo(r: Route): void {
+  location.hash = routeHref(r);
+}
+
+/** The link to an account's page, or to its edit form. */
+export function accountHref(alias: string, edit = false): string {
+  return routeHref({ view: "account", arg: edit ? `${alias}/edit` : alias });
+}
+
 /**
  * The link to another provider's dashboard at url, opened on the same
  * fragment; null unless url is an absolute http or https URL, so that no
@@ -72,6 +89,9 @@ export const VIEW_NAMES: Record<View, string> = {
   client: "Client",
   sessions: "Sessions",
   accounts: "Accounts",
+  manage: "Manage",
+  account: "Account",
+  add: "Add account",
   exits: "Exits",
   monitor: "Monitor",
 };

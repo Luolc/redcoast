@@ -1,8 +1,11 @@
 import type { ReactNode } from "react";
+import { AccountDetail } from "./components/AccountDetail";
 import { Accounts } from "./components/Accounts";
+import { AddAccount } from "./components/AddAccount";
 import { Client } from "./components/Client";
 import { Clients } from "./components/Clients";
 import { Exits } from "./components/Exits";
+import { ManageAccounts } from "./components/ManageAccounts";
 import { Monitor } from "./components/Monitor";
 import { Overview } from "./components/Overview";
 import { Sessions } from "./components/Sessions";
@@ -47,6 +50,16 @@ export function Page({
       return <Sessions data={data} now={now} machine={route.arg} />;
     case "accounts":
       return <Accounts data={data} now={now} reload={reload} />;
+    case "manage":
+      return <ManageAccounts data={data} now={now} />;
+    case "account":
+      return (
+        <AccountDetail data={data} now={now} arg={route.arg} reload={reload} />
+      );
+    case "add":
+      return (
+        <AddAccount data={data} now={now} arg={route.arg} reload={reload} />
+      );
     case "exits":
       return <Exits data={data} now={now} />;
     case "monitor":
@@ -73,6 +86,13 @@ function crumbs(data: Dashboard | null, route: Route): ReactNode[] {
       c === null
         ? VIEW_NAMES.client
         : `${c.machine} · ${c.client === "" ? "unknown program" : c.client}`,
+    );
+  } else if (route.view === "account" || route.view === "add") {
+    trail.push(<a href={routeHref({ view: "manage" })}>Manage</a>);
+    trail.push(
+      route.view === "add"
+        ? VIEW_NAMES.add
+        : ((route.arg ?? "").split("/")[0] ?? ""),
     );
   } else trail.push(VIEW_NAMES[route.view]);
   return trail;

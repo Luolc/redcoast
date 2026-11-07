@@ -5,8 +5,8 @@ import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { sampleDashboard } from "./fixtures/sample.ts";
 
-// `pnpm dev` only: made-up data at ./dashboard.json, and a quota refresh
-// that only answers, so the build never carries them.
+// `pnpm dev` only: made-up data at ./dashboard.json, and account writes and
+// a quota refresh that only answer, so the build never carries them.
 function sample(): Plugin {
   return {
     name: "sample-data",
@@ -15,6 +15,30 @@ function sample(): Plugin {
       server.middlewares.use("/dashboard.json", (_req, res) => {
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify(sampleDashboard(new Date())));
+      });
+      // Account writes only answer, so the page's flow can be tried: an edit of
+      // sample-ac is refused as a revision conflict, and an activation as a
+      // failed exit check; every other write is accepted and changes nothing.
+      server.middlewares.use("/accounts", (req, res) => {
+        const url = req.url ?? "";
+        res.setHeader("Content-Type", "application/json");
+        if (req.method === "PATCH" && url.startsWith("/sample-ac")) {
+          res.statusCode = 409;
+          res.end(
+            JSON.stringify({
+              error: "the account changed since it was read",
+              field: "rev",
+            }),
+          );
+        } else if (req.method === "POST" && url.endsWith("/activate")) {
+          res.statusCode = 409;
+          res.end(
+            JSON.stringify({
+              error: "egress_ok did not pass: the exit reads another address",
+              check: "egress_ok",
+            }),
+          );
+        } else res.end("{}");
       });
       server.middlewares.use("/quota/refresh", (req, res) => {
         res.statusCode = req.method === "POST" ? 202 : 405;

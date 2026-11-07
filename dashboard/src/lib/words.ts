@@ -1,6 +1,6 @@
 // The gateway's codes written as a sentence. The page shows the code beside
 // the sentence, so a code missing here still reads as itself.
-import type { Tone } from "./stats";
+import type { State, Tone } from "./stats";
 
 export interface Wording {
   text: string;
@@ -78,4 +78,70 @@ export function providerName(provider: string | undefined): string {
  */
 export function cacheApart(provider: string | undefined): boolean {
   return provider !== "codex";
+}
+
+const ACCOUNT_STATUS: Record<string, State> = {
+  testing: { tone: "info", word: "Testing" },
+  active: { tone: "ok", word: "Active" },
+  paused: { tone: "warn", word: "Paused" },
+  suspended: { tone: "bad", word: "Suspended" },
+  retired: { tone: "off", word: "Retired" },
+};
+
+/** An account's status as the accounts table keeps it. */
+export function accountStatusWording(status: string): State {
+  return ACCOUNT_STATUS[status] ?? { tone: "warn", word: status };
+}
+
+/** One of the three checks: null while it has not been run since the last change. */
+export function checkWording(ok: boolean | null): State {
+  if (ok === null) return { tone: "off", word: "Not verified" };
+  return ok ? { tone: "ok", word: "Passed" } : { tone: "bad", word: "Failed" };
+}
+
+export const CHECK_NAMES = {
+  token_ok: "Token reference resolves",
+  egress_ok: "Exit reads the expected IP",
+  probe_ok: "Quota probe answers",
+} as const;
+
+// What a refused activation or edit names: a check, a condition of activating,
+// or a field of the request.
+const REFUSED: Record<string, string> = {
+  ...CHECK_NAMES,
+  status: "Status",
+  access: "Access path",
+  plan: "Plan",
+  exit: "Exit IP",
+  rev: "Revision",
+  alias: "Alias",
+  email: "Email",
+  device_id: "Device ID",
+  account_uuid: "Account UUID",
+  token_ref: "Token reference",
+  "proxy.host": "Proxy host",
+  "proxy.port": "Proxy port",
+  "proxy.expected_egress_ip": "Expected egress IP",
+  "proxy.username_ref": "Proxy login",
+  "proxy.password_ref": "Proxy login",
+};
+
+/** The name of the check or field a refusal concerns; the code itself if unknown. */
+export function refusedName(code: string): string {
+  return REFUSED[code] ?? code;
+}
+
+const BURN_REASONS: Record<string, string> = {
+  no_reading: "no reading in this window",
+  too_few_points: "too few readings since the last reset",
+  span_too_short: "the readings span too short a time",
+  window_not_given: "the upstream does not give this window",
+  reset_passed: "the window has reset and has no reading since",
+  flat: "use has not risen since the last reset",
+};
+
+/** Why a window has no estimate, as a phrase. */
+export function burnReason(reason: string | undefined): string {
+  if (reason === undefined) return "too few readings";
+  return BURN_REASONS[reason] ?? reason;
 }

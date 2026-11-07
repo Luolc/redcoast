@@ -1,6 +1,6 @@
 // Made-up data in the shape of GET /dashboard.json, for `pnpm dev` and the
 // tests. Times are relative to now so ages and countdowns look live.
-import type { Dashboard } from "../src/lib/types.ts";
+import type { AccountConfig, Dashboard } from "../src/lib/types.ts";
 
 export function sampleDashboard(now: Date): Dashboard {
   const at = (minutes: number) =>
@@ -12,6 +12,38 @@ export function sampleDashboard(now: Date): Dashboard {
     return d.toISOString();
   };
   const counted = traffic(now);
+  // A row of the accounts table; references are made-up names.
+  const config = (
+    alias: string,
+    n: number,
+    status: string,
+    verified: boolean,
+    port = 8443,
+  ): AccountConfig => ({
+    alias,
+    email: `${alias.slice(-2)}@example.test`,
+    access: "gateway",
+    status,
+    token_ref: `op://sample-vault/claude-oauth-token-${alias}/credential`,
+    proxy: {
+      direct: false,
+      host: "proxy-1.example.test",
+      port,
+      expected_egress_ip: `192.0.2.${String(n)}`,
+      username_ref: "op://sample-vault/sample-proxy/username",
+      password_ref: "op://sample-vault/sample-proxy/password",
+    },
+    device_id: verified ? "abcdef0123456789".repeat(4) : "",
+    account_uuid: verified
+      ? `${String(n).repeat(8)}-1111-4222-8333-${String(n).repeat(12)}`
+      : "",
+    verify: verified
+      ? { token_ok: true, egress_ok: true, probe_ok: true, at: at(-90) }
+      : { token_ok: null, egress_ok: null, probe_ok: null },
+    rev: 3 + n,
+    created_at: at(-40 * 24 * 60),
+    updated_at: at(-2 * 24 * 60),
+  });
   return {
     at: at(0),
     soft: 0.9,
@@ -99,7 +131,7 @@ export function sampleDashboard(now: Date): Dashboard {
           by_machine: [
             {
               window: "5h",
-              machine: "sample-machine-a",
+              machine: "machine-a",
               share: 0.75,
               rate_per_hour: 0.06,
               estimate: true,
@@ -130,6 +162,7 @@ export function sampleDashboard(now: Date): Dashboard {
         next_plan: null,
         in_flight: 3,
         concurrency: 32,
+        config: config("sample-ab", 1, "active", true, 8443),
       },
       {
         alias: "sample-ac",
@@ -161,6 +194,7 @@ export function sampleDashboard(now: Date): Dashboard {
         },
         in_flight: 0,
         concurrency: 32,
+        config: config("sample-ac", 2, "paused", true, 8443),
       },
       {
         alias: "sample-ad",
@@ -193,6 +227,20 @@ export function sampleDashboard(now: Date): Dashboard {
         next_plan: null,
         in_flight: 1,
         concurrency: 8,
+        config: config("sample-ad", 3, "active", true, 8444),
+      },
+    ],
+    unserved_accounts: [config("sample-af", 5, "testing", false, 8446)],
+    accounts_editable: true,
+    write: { enabled: true, can_create: true },
+    proxy_ref_options: [
+      {
+        username_ref: "op://sample-vault/sample-proxy/username",
+        password_ref: "op://sample-vault/sample-proxy/password",
+      },
+      {
+        username_ref: "op://sample-vault/sample-proxy-b/username",
+        password_ref: "op://sample-vault/sample-proxy-b/password",
       },
     ],
     machines: [
