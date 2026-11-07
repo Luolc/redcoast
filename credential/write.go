@@ -37,7 +37,7 @@ func (e ExtraFieldsError) Error() string { return ErrUnexpectedFields.Error() }
 // Is makes errors.Is(err, ErrUnexpectedFields) hold.
 func (e ExtraFieldsError) Is(target error) bool { return target == ErrUnexpectedFields }
 
-// ExpiresField is the name, as ID or title, of the expiry field that an API Credential
+// ExpiresField is the title, ignoring case, of the expiry field that an API Credential
 // item carries; Write sets it together with the token and Expires reads it. The value is
 // a date written as YYYY-MM-DD.
 const ExpiresField = "expires"
@@ -230,6 +230,10 @@ func Write(ctx context.Context, store Store, reference, value string, expires ti
 	return false, nil
 }
 
+// isExpiryField reports whether f is an expiry field: its title is ExpiresField, ignoring
+// case. A field is not one by its ID.
+func isExpiryField(f Field) bool { return strings.EqualFold(f.Title, ExpiresField) }
+
 // checkCreated reads the item that Write created and reports ExtraFieldsError when it
 // has a field other than the token's one and one expiry field; the item is not touched.
 func checkCreated(ctx context.Context, store Store, reference string) error {
@@ -247,7 +251,7 @@ func checkCreated(ctx context.Context, store Store, reference string) error {
 		switch {
 		case named(found.fieldName, f.ID, f.Title) && tokens == 0:
 			tokens++
-		case named(ExpiresField, f.ID, f.Title) && expiries == 0:
+		case isExpiryField(f) && expiries == 0:
 			expiries++
 		default:
 			name := f.Title

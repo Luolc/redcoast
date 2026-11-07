@@ -139,6 +139,7 @@ func TestWriteChecksTheCreatedItem(t *testing.T) {
 		{"a second token field", []Field{{ID: "credential2", Title: "Credential"}}, []string{"Credential"}},
 		{"a second expiry field", []Field{{ID: "expires2", Title: "Expires"}}, []string{"Expires"}},
 		{"a field without a title", []Field{{ID: "x1"}}, []string{"x1"}},
+		{"a field with the ID of the expiry field only", []Field{{ID: ExpiresField, Title: "valid until"}}, []string{"valid until"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newFake()

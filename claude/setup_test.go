@@ -82,7 +82,7 @@ func (f *fakeSecrets) Item(_ context.Context, _, itemID string) (credential.Item
 			item := credential.Item{ID: it.info.ID, Title: it.info.Title}
 			for _, field := range it.fields {
 				item.Fields = append(item.Fields, credential.Field{ID: field.id, Title: field.title})
-				if field.id == credential.ExpiresField {
+				if strings.EqualFold(field.title, credential.ExpiresField) {
 					item.Expires = append(item.Expires, field.value)
 				}
 			}
@@ -117,7 +117,7 @@ func (f *fakeSecrets) SetFields(_ context.Context, _, itemID string, field crede
 // setExpires sets the expiry field of the item; an item without one gets none.
 func (it *secretItem) setExpires(date string) {
 	for i := range it.fields {
-		if it.fields[i].id == credential.ExpiresField {
+		if strings.EqualFold(it.fields[i].title, credential.ExpiresField) {
 			it.fields[i].value = date
 			return
 		}

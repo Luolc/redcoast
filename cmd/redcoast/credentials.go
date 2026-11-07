@@ -88,9 +88,10 @@ func (s onePasswordItems) Item(ctx context.Context, vaultID, itemID string) (cre
 	return out, nil
 }
 
-// isExpires reports whether f is an expiry field, by ID or title.
+// isExpires reports whether f is an expiry field: its title is the expiry field's name,
+// ignoring case.
 func isExpires(f onepassword.ItemField) bool {
-	return f.ID == credential.ExpiresField || strings.EqualFold(f.Title, credential.ExpiresField)
+	return strings.EqualFold(f.Title, credential.ExpiresField)
 }
 
 // SetFields reads the item again and sets the value of its one field with this ID and
