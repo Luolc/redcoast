@@ -50,6 +50,7 @@ type config struct {
 	writeAllowFrom     []netip.Prefix // peer addresses the dashboard accepts account writes from; empty for none
 	tokenRefTemplate   string         // the token reference of a new account, with {alias}; empty for none
 	setupEnabled       bool           // the setup routes and the commands of a login machine are on
+	adminWrite         bool           // the account commands of the management socket that write are on
 	retention          session.Retention
 	backup             *backupConfig // nil takes no backups
 	tls                *tls.Config   // every TCP listener's; nil serves plain HTTP
@@ -141,6 +142,10 @@ type fileConfig struct {
 	Setup *struct {
 		Enabled bool `yaml:"enabled"`
 	} `yaml:"setup"`
+	// AdminWrite is a pointer so that the Codex gateway can refuse the key itself.
+	AdminWrite *struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"admin_write"`
 }
 
 // maxConfigFile bounds the configuration file; a real one is about a kilobyte.
@@ -286,13 +291,14 @@ func parseConfig(provider string, data []byte) (config, error) {
 	links := checkDashboardLinks(report, provider, f.DashboardLinks)
 	allowFrom := checkDashboardWrite(report, provider, f.DashboardWrite.AllowFrom, f.DashboardWrite.TokenRefTemplate)
 	setupEnabled := checkSetup(report, provider, f, token)
+	adminWrite := checkAdminWrite(report, provider, f)
 	if len(errs) > 0 {
 		return config{}, errors.Join(errs...)
 	}
 	return config{provider: provider, codex: f.Codex, tls: serverTLS, serverName: serverName, warning: warning, listen: f.Listen.Reverse, forwardListen: f.Listen.Forward, socket: f.SessionSocket, sessionListen: f.Listen.Session, adminSocket: f.AdminSocket,
 		healthListen: f.Listen.Health, dashboardListen: f.Listen.Dashboard, dashboardDir: f.DashboardDir, dashboardLinks: links, hostNames: hostNames, egressInterval: f.EgressInterval, limits: limits,
 		accountConcurrency: f.Limits.AccountConcurrency, upstream: target, sessionDB: f.SessionDB, captureDir: f.CaptureDir, inventory: f.Inventory,
-		tokenRef: token, credentialsStdin: f.Credentials.StdinTestEntry, writeAllowFrom: allowFrom, tokenRefTemplate: f.DashboardWrite.TokenRefTemplate, setupEnabled: setupEnabled,
+		tokenRef: token, credentialsStdin: f.Credentials.StdinTestEntry, writeAllowFrom: allowFrom, tokenRefTemplate: f.DashboardWrite.TokenRefTemplate, setupEnabled: setupEnabled, adminWrite: adminWrite,
 		retention: session.Retention{Traffic: time.Duration(f.Retention.TrafficDays) * 24 * time.Hour, Sessions: time.Duration(f.Retention.SessionDays) * 24 * time.Hour},
 		backup:    f.Backup}, nil
 }
@@ -352,6 +358,24 @@ func checkSetup(report func(key, problem string), provider string, f fileConfig,
 	}
 	if enabled && f.DashboardWrite.TokenRefTemplate == "" {
 		report("setup.enabled", "needs dashboard_write.token_ref_template")
+	}
+	return enabled
+}
+
+// checkAdminWrite checks the admin_write section: only the Claude gateway takes it, and
+// on it needs the token reference template, since an account it creates has the token
+// reference the template gives. It returns whether the writing account commands of the
+// management socket are on.
+func checkAdminWrite(report func(key, problem string), provider string, f fileConfig) bool {
+	enabled := f.AdminWrite != nil && f.AdminWrite.Enabled
+	if provider != "claude" {
+		if f.AdminWrite != nil {
+			report("admin_write", "only the Claude gateway takes it")
+		}
+		return false
+	}
+	if enabled && f.DashboardWrite.TokenRefTemplate == "" {
+		report("admin_write.enabled", "needs dashboard_write.token_ref_template")
 	}
 	return enabled
 }

@@ -180,6 +180,7 @@ func newSetupHarness(t *testing.T, enabled bool) *setupHarness {
 		return writeResolve(ctx, reference)
 	}
 	h.cfg.SetupEnabled = enabled
+	h.cfg.AdminWrite = true
 	h.cfg.SetupSecrets = func(context.Context) (credential.Store, error) {
 		if h.secrets.failOpen {
 			return nil, errors.New("no client")
@@ -198,6 +199,7 @@ func newSetupHarness(t *testing.T, enabled bool) *setupHarness {
 	h.writer.now = func() time.Time { return h.clock }
 	admin := NewAdmin(h.accounts, h.store, nil)
 	admin.Setup = h.writer.Setup()
+	admin.Writer = h.writer
 	h.admin = admin.Handler()
 	return h
 }
@@ -238,13 +240,29 @@ func (h *setupHarness) next(t *testing.T) map[string]any {
 
 func (h *setupHarness) report(t *testing.T, alias, requestID, run, state, step string, reason any) (int, map[string]any, string) {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"request_id": requestID, "run_id": run, "state": state, "step": step, "reason": reason})
+	return h.reportAs(t, session.SourceDashboard, alias, requestID, run, state, step, reason, nil)
+}
+
+// reportAs is report with the source kind the caller claims and, when not nil, a wait.
+func (h *setupHarness) reportAs(t *testing.T, kind, alias, requestID, run, state, step string, reason, wait any) (int, map[string]any, string) {
+	t.Helper()
+	fields := map[string]any{"request_id": requestID, "run_id": run, "state": state, "step": step, "reason": reason, "source_kind": kind}
+	if wait != nil {
+		fields["wait_until"] = wait
+	}
+	body, _ := json.Marshal(fields)
 	return h.adminDo(t, "POST", "/accounts/"+alias+"/setup/report", "application/json", string(body))
 }
 
 func (h *setupHarness) token(t *testing.T, alias, requestID, run, token string) (int, map[string]any, string) {
 	t.Helper()
-	return h.adminDo(t, "POST", "/accounts/"+alias+"/setup/token?request_id="+requestID+"&run_id="+run, "text/plain", token)
+	return h.tokenAs(t, session.SourceDashboard, alias, requestID, run, token)
+}
+
+// tokenAs is token with the source kind the caller claims.
+func (h *setupHarness) tokenAs(t *testing.T, kind, alias, requestID, run, token string) (int, map[string]any, string) {
+	t.Helper()
+	return h.adminDo(t, "POST", "/accounts/"+alias+"/setup/token?request_id="+requestID+"&run_id="+run+"&source_kind="+kind, "text/plain", token)
 }
 
 // running takes the account through a request and a first report: it returns the request
@@ -985,24 +1003,24 @@ func TestSetupReports(t *testing.T) {
 		useRawBody   bool
 		rawContentTy string
 	}{
-		{name: "state done", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"done","step":"complete","reason":null}`, id, setupRun), status: 400, code: "state_invalid", alias: "sample-a"},
-		{name: "state unknown", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"requested","step":"lock","reason":null}`, id, setupRun), status: 400, code: "state_invalid", alias: "sample-a"},
-		{name: "step unknown", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"running","step":"free text about a page","reason":null}`, id, setupRun), status: 400, code: "step_invalid", alias: "sample-a"},
-		{name: "a gateway step", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"running","step":"write","reason":null}`, id, setupRun), status: 400, code: "step_invalid", alias: "sample-a"},
-		{name: "running with a reason", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"running","step":"lock","reason":"account_busy"}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
-		{name: "failed with free text", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"failed","step":"lock","reason":"%s"}`, id, setupRun, setupToken), status: 400, code: "reason_invalid", alias: "sample-a"},
-		{name: "failed with a gateway reason", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"failed","step":"lock","reason":"complete"}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
-		{name: "failed without a reason", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"failed","step":"lock","reason":null}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
-		{name: "needs_human with another reason", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"needs_human","step":"lock","reason":"account_busy"}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
-		{name: "failed with a human reason", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"failed","step":"email_page","reason":"captcha_challenge"}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
-		{name: "unknown key", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"running","step":"lock","reason":null,"token":"%s"}`, id, setupRun, setupToken), status: 400, code: "bad_request", alias: "sample-a"},
-		{name: "repeated key", body: fmt.Sprintf(`{"request_id":"%s","request_id":"%s","run_id":"%s","state":"running","step":"lock","reason":null}`, id, id, setupRun), status: 400, code: "bad_request", alias: "sample-a"},
-		{name: "run ID malformed", body: fmt.Sprintf(`{"request_id":"%s","run_id":"x","state":"running","step":"lock","reason":null}`, id), status: 400, code: "bad_request", alias: "sample-a"},
+		{name: "state done", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"done","step":"complete","reason":null}`, id, setupRun), status: 400, code: "state_invalid", alias: "sample-a"},
+		{name: "state unknown", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"requested","step":"lock","reason":null}`, id, setupRun), status: 400, code: "state_invalid", alias: "sample-a"},
+		{name: "step unknown", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"running","step":"free text about a page","reason":null}`, id, setupRun), status: 400, code: "step_invalid", alias: "sample-a"},
+		{name: "a gateway step", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"running","step":"write","reason":null}`, id, setupRun), status: 400, code: "step_invalid", alias: "sample-a"},
+		{name: "running with a reason", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"running","step":"lock","reason":"account_busy"}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
+		{name: "failed with free text", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"failed","step":"lock","reason":"%s"}`, id, setupRun, setupToken), status: 400, code: "reason_invalid", alias: "sample-a"},
+		{name: "failed with a gateway reason", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"failed","step":"lock","reason":"complete"}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
+		{name: "failed without a reason", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"failed","step":"lock","reason":null}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
+		{name: "needs_human with another reason", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"needs_human","step":"lock","reason":"account_busy"}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
+		{name: "failed with a human reason", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"failed","step":"email_page","reason":"captcha_challenge"}`, id, setupRun), status: 400, code: "reason_invalid", alias: "sample-a"},
+		{name: "unknown key", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"running","step":"lock","reason":null,"token":"%s"}`, id, setupRun, setupToken), status: 400, code: "bad_request", alias: "sample-a"},
+		{name: "repeated key", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","request_id":"%s","run_id":"%s","state":"running","step":"lock","reason":null}`, id, id, setupRun), status: 400, code: "bad_request", alias: "sample-a"},
+		{name: "run ID malformed", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"x","state":"running","step":"lock","reason":null}`, id), status: 400, code: "bad_request", alias: "sample-a"},
 		{name: "over 4 KiB", body: `{"request_id":"` + id + `","pad":"` + strings.Repeat("a", 4100) + `"}`, status: 400, code: "bad_request", alias: "sample-a"},
-		{name: "unknown account", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"running","step":"lock","reason":null}`, id, setupRun), status: 404, code: "unknown_account", alias: "nobody"},
-		{name: "another request ID", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"running","step":"lock","reason":null}`, other, setupRun), status: 409, code: "ids_mismatch", alias: "sample-a"},
-		{name: "another run ID", body: fmt.Sprintf(`{"request_id":"%s","run_id":"20261107T041325124Z","state":"running","step":"lock","reason":null}`, id), status: 409, code: "ids_mismatch", alias: "sample-a"},
-		{name: "account with no task", body: fmt.Sprintf(`{"request_id":"%s","run_id":"%s","state":"running","step":"lock","reason":null}`, id, setupRun), status: 409, code: "no_open_task", alias: "sample-spare"},
+		{name: "unknown account", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"running","step":"lock","reason":null}`, id, setupRun), status: 404, code: "unknown_account", alias: "nobody"},
+		{name: "another request ID", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"running","step":"lock","reason":null}`, other, setupRun), status: 409, code: "ids_mismatch", alias: "sample-a"},
+		{name: "another run ID", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"20261107T041325124Z","state":"running","step":"lock","reason":null}`, id), status: 409, code: "ids_mismatch", alias: "sample-a"},
+		{name: "account with no task", body: fmt.Sprintf(`{"request_id":"%s","source_kind":"dashboard","run_id":"%s","state":"running","step":"lock","reason":null}`, id, setupRun), status: 409, code: "no_open_task", alias: "sample-spare"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			before := h.setupState(t, "sample-a")
@@ -1194,7 +1212,7 @@ func TestSetupStart(t *testing.T) {
 	if got := h.setupState(t, "sample-a"); got.State != "running" {
 		t.Fatalf("an unclaimed task was ended: %+v", got)
 	}
-	if _, err := h.store.ClaimHandover(t.Context(), "sample-a", id, setupRun); err != nil {
+	if _, err := h.store.ClaimHandover(t.Context(), "sample-a", id, setupRun, session.SourceDashboard); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.writer.Setup().Start(t.Context()); err != nil {

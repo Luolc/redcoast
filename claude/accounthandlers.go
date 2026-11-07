@@ -44,7 +44,7 @@ type revBody struct {
 func (w *AccountWriter) accountRows(ctx context.Context) ([]session.AccountRow, error) {
 	rows, _, err := w.cfg.Store.Accounts(ctx)
 	if err != nil {
-		return nil, writeError{status: http.StatusInternalServerError, message: "session store unavailable"}
+		return nil, errStoreUnavailable
 	}
 	return rows, nil
 }
@@ -53,24 +53,24 @@ func (w *AccountWriter) accountRows(ctx context.Context) ([]session.AccountRow, 
 func storeError(err error) error {
 	switch {
 	case errors.Is(err, session.ErrAccountNotFound):
-		return writeError{status: http.StatusNotFound, message: "no such account"}
+		return writeError{status: http.StatusNotFound, message: "no such account", code: errorUnknownAccount}
 	case errors.Is(err, session.ErrRevConflict):
-		return writeError{status: http.StatusConflict, message: "the account changed since it was read", field: "rev"}
+		return writeError{status: http.StatusConflict, message: "the account changed since it was read", field: "rev", code: errorRevStale}
 	case errors.Is(err, session.ErrAccountExists):
-		return writeError{status: http.StatusConflict, message: "the account exists", field: "alias"}
+		return writeError{status: http.StatusConflict, message: "the account exists", field: "alias", code: codeAccountExists}
 	}
 	var we writeError
 	if errors.As(err, &we) {
 		return we
 	}
-	return writeError{status: http.StatusInternalServerError, message: "session store unavailable"}
+	return errStoreUnavailable
 }
 
 // create stores a new account as testing, with its plan, and serves nothing yet.
 func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entry session.AuditEntry) (any, error) {
 	ctx := r.Context()
 	if w.cfg.TokenRefTemplate == "" {
-		return nil, writeError{status: http.StatusConflict, message: "creating accounts needs dashboard_write.token_ref_template", field: "token_ref"}
+		return nil, writeError{status: http.StatusConflict, message: "creating accounts needs dashboard_write.token_ref_template", field: "token_ref", code: codeNoTokenTemplate}
 	}
 	for _, field := range []struct {
 		name string
@@ -108,7 +108,7 @@ func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entr
 		return nil, storeError(err)
 	}
 	if err := w.cfg.Store.SetPlanSchedule(ctx, session.PlanPeriod{Alias: row.Alias, Plan: *body.Plan, From: now, Source: "manual", Note: "set when the account was created on the dashboard"}); err != nil {
-		return nil, writeError{status: http.StatusInternalServerError, message: "the account was created but its plan was not set; set it with a plan edit or the plan command", field: "plan"}
+		return nil, writeError{status: http.StatusInternalServerError, message: "the account was created but its plan was not set; set it with a plan edit or the plan command", field: "plan", code: codePlanNotSet}
 	}
 	if err := w.cfg.Store.RecordAudit(ctx, row.Alias, entry, map[string]session.FieldChange{"plan": {Old: "", New: *body.Plan}}); err != nil {
 		log.Printf("account write alias=%s: the plan was not audited", row.Alias)
@@ -223,7 +223,7 @@ func (w *AccountWriter) setPlan(ctx context.Context, alias string, plan *string,
 		return "", nil
 	}
 	now := w.now()
-	failed := writeError{status: http.StatusInternalServerError, message: "the account was saved but its plan was not; set it with the plan command", field: "plan"}
+	failed := writeError{status: http.StatusInternalServerError, message: "the account was saved but its plan was not; set it with the plan command", field: "plan", code: codePlanNotSet}
 	current, err := w.currentPlan(ctx, alias, now)
 	if err != nil {
 		return "", failed
@@ -251,6 +251,25 @@ func (w *AccountWriter) setPlan(ctx context.Context, alias string, plan *string,
 		return "not refreshed", nil
 	}
 	return "refreshed", nil
+}
+
+// activatable checks the revision, the status and the path of an account that is to be
+// activated; with onlyTesting a status other than testing is refused.
+func activatable(account session.AccountRow, rev int64, onlyTesting bool) error {
+	notReady := func(check, message string) error {
+		return writeError{status: http.StatusConflict, message: message, check: check, code: codeNotReady}
+	}
+	switch {
+	case account.Rev != rev:
+		return storeError(session.ErrRevConflict)
+	case account.Status == "active":
+		return notReady("status", "the account is active already")
+	case onlyTesting && account.Status != "testing":
+		return notReady("status", "only a testing account is activated this way")
+	case account.Access != "gateway":
+		return notReady("access", "the account is not on the gateway path")
+	}
+	return nil
 }
 
 // verify runs the three checks on an account and stores their result. A body with a
@@ -281,7 +300,7 @@ func (w *AccountWriter) verify(r *http.Request, alias string, body *revBody, ent
 // effect and an exit no other served account has, and the three checks, run again now,
 // all pass; only then is the row stored as active and the set reloaded. Anything
 // else is a 409 that names what failed and changes nothing.
-func (w *AccountWriter) activate(r *http.Request, alias string, body *revBody, entry session.AuditEntry) (any, error) {
+func (w *AccountWriter) activate(r *http.Request, alias string, body *revBody, entry session.AuditEntry, onlyTesting bool) (any, error) {
 	ctx := r.Context()
 	if body.Rev == nil {
 		return nil, fieldProblem("rev", "missing")
@@ -291,15 +310,10 @@ func (w *AccountWriter) activate(r *http.Request, alias string, body *revBody, e
 		return nil, storeError(err)
 	}
 	notReady := func(check, message string) error {
-		return writeError{status: http.StatusConflict, message: message, check: check}
+		return writeError{status: http.StatusConflict, message: message, check: check, code: codeNotReady}
 	}
-	switch {
-	case before.Rev != *body.Rev:
-		return nil, storeError(session.ErrRevConflict)
-	case before.Status == "active":
-		return nil, notReady("status", "the account is active already")
-	case before.Access != "gateway":
-		return nil, notReady("access", "the account is not on the gateway path")
+	if err := activatable(before, *body.Rev, onlyTesting); err != nil {
+		return nil, err
 	}
 	if _, err := w.cfg.Store.QuotaUnit(ctx, alias, w.now()); err != nil {
 		return nil, notReady("plan", "the account has no plan in effect")

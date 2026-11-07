@@ -50,7 +50,7 @@ var (
 // reload) are not among them.
 var setupSteps = []string{
 	"lock", "browser", "egress", "cli", "email_page", "email_sent", "magic_link", "verification_code", "authorize", "callback", "cli_exit", "verify", "complete",
-	"token_cli", "token_authorize", "token_callback", "token_read", "handover",
+	"token_cli", "token_authorize", "token_callback", "token_read", "handover", session.SetupStepCaptcha,
 }
 
 // The steps the gateway records itself during a handover.
@@ -81,30 +81,35 @@ var humanReasons = []string{"captcha_challenge", "unknown_page", "email_rejected
 
 // The reasons the gateway gives itself.
 const (
-	reasonComplete          = "complete"
-	reasonTokenShape        = "token_shape_invalid"
-	reasonProbeRefused      = "probe_refused"
-	reasonProbeFailed       = "probe_failed"
-	reasonTargetNotAllowed  = "write_target_not_allowed"
-	reasonTargetMissing     = "write_target_missing"
-	reasonTargetAmbiguous   = "write_target_ambiguous"
-	reasonWriteFailed       = "write_failed"
-	reasonItemFields        = "created_item_has_other_fields"
-	reasonReadbackMismatch  = "readback_mismatch"
-	reasonReloadFailed      = "reload_failed"
-	errorSetupUnavailable   = "setup_unavailable"
-	errorBadRequest         = "bad_request"
-	errorUnknownAccount     = "unknown_account"
-	errorNoOpenTask         = "no_open_task"
-	errorIDsMismatch        = "ids_mismatch"
-	errorStateInvalid       = "state_invalid"
-	errorStepInvalid        = "step_invalid"
-	errorReasonInvalid      = "reason_invalid"
-	errorSetupOpen          = "setup_open"
-	errorRevStale           = "rev_stale"
-	errorAccountStatus      = "account_status"
-	errorDirectAccount      = "direct_account"
-	errorSetupStoreNotReady = "session store unavailable"
+	reasonComplete         = "complete"
+	reasonTokenShape       = "token_shape_invalid"
+	reasonProbeRefused     = "probe_refused"
+	reasonProbeFailed      = "probe_failed"
+	reasonTargetNotAllowed = "write_target_not_allowed"
+	reasonTargetMissing    = "write_target_missing"
+	reasonTargetAmbiguous  = "write_target_ambiguous"
+	reasonWriteFailed      = "write_failed"
+	reasonItemFields       = "created_item_has_other_fields"
+	reasonReadbackMismatch = "readback_mismatch"
+	reasonReloadFailed     = "reload_failed"
+	errorSetupUnavailable  = "setup_unavailable"
+	errorSourceMismatch    = "source_mismatch"
+	errorWaitUntilInvalid  = "wait_until_invalid"
+	errorTaskNotFound      = "task_not_found"
+	errorTaskNotSlack      = "task_not_slack"
+	errorTaskNotRequested  = "task_not_requested"
+	errorBadRequest        = "bad_request"
+	errorUnknownAccount    = "unknown_account"
+	errorNoOpenTask        = "no_open_task"
+	errorIDsMismatch       = "ids_mismatch"
+	errorStateInvalid      = "state_invalid"
+	errorStepInvalid       = "step_invalid"
+	errorReasonInvalid     = "reason_invalid"
+	errorSetupOpen         = "setup_open"
+	errorRevStale          = "rev_stale"
+	errorAccountStatus     = "account_status"
+	errorDirectAccount     = "direct_account"
+	errorStoreUnavailable  = "store_unavailable"
 )
 
 // setupError is a refusal with its status and fixed code; written says, for a handover,
@@ -159,9 +164,26 @@ type setupBlock struct {
 	Reason      *string     `json:"reason"`
 	UpdatedAt   *time.Time  `json:"updated_at"`
 	TokenSetAt  *time.Time  `json:"token_set_at"`
+	Source      taskSource  `json:"source"`
+	WaitUntil   *time.Time  `json:"wait_until"`
 	Action      *string     `json:"action"`
 	Identity    *string     `json:"identity"`
 	TokenExpiry tokenExpiry `json:"token_expiry"`
+}
+
+// taskSource is where a setup task was requested from: the dashboard, or a Slack message
+// with its thread key and ts. Only the Slack kind carries them.
+type taskSource struct {
+	Kind   string `json:"kind"`
+	Thread string `json:"thread,omitempty"`
+	TS     string `json:"ts,omitempty"`
+}
+
+func sourceOfRow(row session.SetupRow) taskSource {
+	if row.Source.Kind == "" {
+		return taskSource{Kind: session.SourceDashboard}
+	}
+	return taskSource{Kind: row.Source.Kind, Thread: row.Source.Thread, TS: row.Source.TS}
 }
 
 // The states of a token's expiry date as the gateway read it from the secret store item.
@@ -205,6 +227,7 @@ func blockOf(row session.SetupRow) *setupBlock {
 	}
 	return &setupBlock{State: state, RequestID: stringPointer(row.RequestID), RunID: stringPointer(row.RunID), Step: stringPointer(row.Step),
 		Reason: stringPointer(row.Reason), UpdatedAt: timePointer(row.UpdatedAt), TokenSetAt: timePointer(row.TokenSetAt),
+		Source: sourceOfRow(row), WaitUntil: timePointer(row.WaitUntil),
 		Action: stringPointer(row.Action), TokenExpiry: tokenExpiry{State: expiryUnavailable}}
 }
 
@@ -267,16 +290,16 @@ func (w *AccountWriter) setupRequest(r *http.Request, alias string, body *setupB
 	if body.Rev == nil {
 		return nil, fieldProblem("rev", "missing")
 	}
-	row, before, err := w.cfg.Store.RequestSetup(r.Context(), alias, *body.Action, body.Rev, newRequestID())
+	row, before, err := w.cfg.Store.RequestSetup(r.Context(), alias, *body.Action, body.Rev, newRequestID(), entry.Source)
 	switch {
 	case errors.Is(err, session.ErrRevConflict):
-		return nil, writeError{status: http.StatusConflict, message: errorRevStale, field: "rev"}
+		return nil, writeError{status: http.StatusConflict, message: errorRevStale, field: "rev", code: errorRevStale}
 	case errors.Is(err, session.ErrSetupOpen):
-		return nil, writeError{status: http.StatusConflict, message: errorSetupOpen}
+		return nil, writeError{status: http.StatusConflict, message: errorSetupOpen, code: errorSetupOpen}
 	case errors.Is(err, session.ErrSetupStatus):
-		return nil, writeError{status: http.StatusConflict, message: errorAccountStatus}
+		return nil, writeError{status: http.StatusConflict, message: errorAccountStatus, code: errorAccountStatus}
 	case errors.Is(err, session.ErrSetupDirect):
-		return nil, writeError{status: http.StatusConflict, message: errorDirectAccount}
+		return nil, writeError{status: http.StatusConflict, message: errorDirectAccount, code: errorDirectAccount}
 	case err != nil:
 		return nil, storeError(err)
 	}
@@ -295,6 +318,7 @@ type nextTask struct {
 	RequestID   string        `json:"request_id"`
 	RequestedAt time.Time     `json:"requested_at"`
 	Status      string        `json:"status"`
+	Source      taskSource    `json:"source"`
 	Email       string        `json:"email"`
 	DeviceID    string        `json:"device_id"`
 	Proxy       taskProxyView `json:"proxy"`
@@ -309,20 +333,44 @@ type taskProxyView struct {
 	Direct      bool   `json:"direct"`
 }
 
-// Next hands out the next task, or nil. It notes that a login machine asked.
+// Next hands out the next task that the dashboard asked for, or nil. It notes that a
+// login machine asked.
 func (s *Setup) Next(ctx context.Context) (*nextTask, error) {
 	now := s.w.now().UTC()
 	s.lastAsked.Store(&now)
 	task, err := s.w.cfg.Store.NextSetup(ctx)
+	return s.handedOut(task, err)
+}
+
+// NextByID hands out the task with this request ID, which must be a waiting one that
+// was requested from Slack; nil when another task runs and it has to wait.
+func (s *Setup) NextByID(ctx context.Context, requestID string) (*nextTask, error) {
+	if !requestIDShape.MatchString(requestID) {
+		return nil, setupError{status: http.StatusBadRequest, code: errorBadRequest}
+	}
+	task, err := s.w.cfg.Store.NextSetupByID(ctx, requestID)
+	switch {
+	case errors.Is(err, session.ErrSetupTaskNotFound):
+		return nil, setupError{status: http.StatusNotFound, code: errorTaskNotFound}
+	case errors.Is(err, session.ErrSetupNotSlack):
+		return nil, setupError{status: http.StatusConflict, code: errorTaskNotSlack}
+	case errors.Is(err, session.ErrSetupNotRequested):
+		return nil, setupError{status: http.StatusConflict, code: errorTaskNotRequested}
+	}
+	return s.handedOut(task, err)
+}
+
+// handedOut turns the store's answer to a request for a task into the task's view.
+func (s *Setup) handedOut(task *session.SetupTask, err error) (*nextTask, error) {
 	if err != nil {
-		return nil, setupError{status: http.StatusInternalServerError, code: errorSetupStoreNotReady}
+		return nil, setupError{status: http.StatusInternalServerError, code: errorStoreUnavailable}
 	}
 	if task == nil {
 		return nil, nil
 	}
 	a := task.Account
 	log.Printf("setup alias=%s request_id=%s result=handed_out action=%s", task.Alias, task.RequestID, task.Action)
-	return &nextTask{Alias: task.Alias, Action: task.Action, RequestID: task.RequestID, RequestedAt: task.RequestedAt, Status: a.Status, Email: a.Email, DeviceID: a.DeviceID,
+	return &nextTask{Alias: task.Alias, Action: task.Action, RequestID: task.RequestID, RequestedAt: task.RequestedAt, Status: a.Status, Source: sourceOfRow(task.SetupRow), Email: a.Email, DeviceID: a.DeviceID,
 		Proxy: taskProxyView{Host: a.ProxyHost, Port: a.ProxyPort, UsernameRef: a.UsernameRef, PasswordRef: a.PasswordRef, ExpectedIP: a.ExpectedIP, Direct: a.Direct}}, nil
 }
 
@@ -333,19 +381,29 @@ type reportBody struct {
 	State     string  `json:"state"`
 	Step      string  `json:"step"`
 	Reason    *string `json:"reason"`
+	// SourceKind is the kind of source the caller says the task has, dashboard or slack;
+	// a task from another one is refused.
+	SourceKind string `json:"source_kind"`
+	// WaitUntil is when the login program stops waiting for a person at a captcha page.
+	WaitUntil *string `json:"wait_until"`
+}
+
+// validSourceKind reports whether kind is one a task can have.
+func validSourceKind(kind string) bool {
+	return kind == session.SourceDashboard || kind == session.SourceSlack
 }
 
 // Report records one step of the running task. The state is running, needs_human or
 // failed; done is the gateway's alone.
 func (s *Setup) Report(ctx context.Context, alias string, body reportBody) (*setupBlock, error) {
-	if !requestIDShape.MatchString(body.RequestID) || !runIDShape.MatchString(body.RunID) {
+	if !requestIDShape.MatchString(body.RequestID) || !runIDShape.MatchString(body.RunID) || !validSourceKind(body.SourceKind) {
 		return nil, setupError{status: http.StatusBadRequest, code: errorBadRequest}
 	}
 	if _, err := s.w.cfg.Store.Account(ctx, alias); err != nil {
 		if errors.Is(err, session.ErrAccountNotFound) {
 			return nil, setupError{status: http.StatusNotFound, code: errorUnknownAccount}
 		}
-		return nil, setupError{status: http.StatusInternalServerError, code: errorSetupStoreNotReady}
+		return nil, setupError{status: http.StatusInternalServerError, code: errorStoreUnavailable}
 	}
 	reason := ""
 	if body.Reason != nil {
@@ -370,7 +428,15 @@ func (s *Setup) Report(ctx context.Context, alias string, body reportBody) (*set
 	if !slices.Contains(setupSteps, body.Step) {
 		return nil, setupError{status: http.StatusBadRequest, code: errorStepInvalid}
 	}
-	row, err := s.w.cfg.Store.ReportSetup(ctx, alias, body.RequestID, body.RunID, body.State, body.Step, reason)
+	var wait *time.Time
+	if body.WaitUntil != nil {
+		at, err := time.Parse(time.RFC3339, *body.WaitUntil)
+		if err != nil || body.State != session.SetupRunning || body.Step != session.SetupStepCaptcha {
+			return nil, setupError{status: http.StatusBadRequest, code: errorWaitUntilInvalid}
+		}
+		wait = &at
+	}
+	row, err := s.w.cfg.Store.ReportSetup(ctx, alias, body.RequestID, body.RunID, body.SourceKind, body.State, body.Step, reason, wait)
 	if err := taskError(err); err != nil {
 		return nil, err
 	}
@@ -389,8 +455,12 @@ func taskError(err error) error {
 		return setupError{status: http.StatusConflict, code: errorIDsMismatch}
 	case errors.Is(err, session.ErrAccountNotFound):
 		return setupError{status: http.StatusNotFound, code: errorUnknownAccount}
+	case errors.Is(err, session.ErrSetupSourceMismatch):
+		return setupError{status: http.StatusConflict, code: errorSourceMismatch}
+	case errors.Is(err, session.ErrSetupWaitUntil):
+		return setupError{status: http.StatusBadRequest, code: errorWaitUntilInvalid}
 	}
-	return setupError{status: http.StatusInternalServerError, code: errorSetupStoreNotReady}
+	return setupError{status: http.StatusInternalServerError, code: errorStoreUnavailable}
 }
 
 // handoverResult is the answer to a handover that succeeded.
@@ -409,20 +479,20 @@ type handoverResult struct {
 // reference, reads it back and reloads. Any failure ends the task as failed, drops the
 // token and says whether the secret store had it. The token is in no log line, audit
 // row, answer or table.
-func (s *Setup) Token(ctx context.Context, alias, requestID, runID string, token []byte) (*handoverResult, error) {
-	if !accountAlias.MatchString(alias) || !requestIDShape.MatchString(requestID) || !runIDShape.MatchString(runID) {
+func (s *Setup) Token(ctx context.Context, alias, requestID, runID, sourceKind string, token []byte) (*handoverResult, error) {
+	if !accountAlias.MatchString(alias) || !requestIDShape.MatchString(requestID) || !runIDShape.MatchString(runID) || !validSourceKind(sourceKind) {
 		return nil, setupError{status: http.StatusBadRequest, code: errorBadRequest}
 	}
 	if _, err := s.w.cfg.Store.Account(ctx, alias); err != nil {
 		return nil, taskError(err)
 	}
-	if err := taskError(s.w.cfg.Store.CheckHandover(ctx, alias, requestID, runID)); err != nil {
+	if err := taskError(s.w.cfg.Store.CheckHandover(ctx, alias, requestID, runID, sourceKind)); err != nil {
 		return nil, err
 	}
 	if len(token) > maxSetupToken || !setupTokenForm.Match(token) {
 		return nil, setupError{status: http.StatusUnprocessableEntity, code: reasonTokenShape}
 	}
-	task, err := s.w.cfg.Store.ClaimHandover(ctx, alias, requestID, runID)
+	task, err := s.w.cfg.Store.ClaimHandover(ctx, alias, requestID, runID, sourceKind)
 	if err := taskError(err); err != nil {
 		return nil, err
 	}
@@ -454,7 +524,12 @@ func (s *Setup) fail(ctx context.Context, task session.SetupTask, step, code str
 }
 
 func (s *Setup) audit(ctx context.Context, task session.SetupTask, outcome string) {
-	entry := session.AuditEntry{SourceIP: "admin-socket", Action: "account-setup-token"}
+	entry := session.AuditEntry{SourceIP: adminSourceIP, Action: "account-setup-token"}
+	// A task from Slack is audited with its message; a dashboard task, which has none,
+	// is audited as before.
+	if task.Source.Kind == session.SourceSlack {
+		entry.Source = task.Source
+	}
 	if err := s.w.cfg.Store.RecordAudit(ctx, task.Alias, entry, map[string]session.FieldChange{"setup": {Old: session.SetupRunning, New: outcome}}); err != nil {
 		log.Printf("setup alias=%s: the outcome was not audited", task.Alias)
 	}
