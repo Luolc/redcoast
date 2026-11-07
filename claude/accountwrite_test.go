@@ -256,6 +256,12 @@ func TestWriteRouteChecks(t *testing.T) {
 		{"repeated_nested_key", 400, func(*http.Request) *http.Request {
 			return request("POST", "/accounts", strings.Replace(w.newBody(), `"port":`+port, `"port":`+port+`,"port":`+port, 1))
 		}},
+		{"repeated_key_other_case", 400, func(*http.Request) *http.Request {
+			return request("POST", "/accounts", strings.Replace(w.newBody(), `"plan":"pro"`, `"plan":"pro","PLAN":"pro"`, 1))
+		}},
+		{"repeated_nested_key_other_case", 400, func(*http.Request) *http.Request {
+			return request("POST", "/accounts", strings.Replace(w.newBody(), `"port":`+port, `"port":`+port+`,"PORT":`+port, 1))
+		}},
 		{"content_after_the_object", 400, func(*http.Request) *http.Request { return request("POST", "/accounts", w.newBody()+w.newBody()) }},
 		{"not_an_object", 400, func(*http.Request) *http.Request { return request("POST", "/accounts", `["x"]`) }},
 		{"value_where_an_email_goes", 400, func(*http.Request) *http.Request {
@@ -263,6 +269,7 @@ func TestWriteRouteChecks(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			w.logs.Reset()
 			before := w.state(t)
 			status, _, body := w.serve(t, test.alter(request("POST", "/accounts", w.newBody())))
 			if status != test.status {
@@ -273,6 +280,14 @@ func TestWriteRouteChecks(t *testing.T) {
 			}
 			if strings.Contains(body, "PASTED") || strings.Contains(w.logs.String(), "PASTED") {
 				t.Fatalf("the pasted value is in the answer or the log: %s", body)
+			}
+			// A refusal of a listed source is logged by the write path; one of another source
+			// is not, and the Host guard's own refusals are not either.
+			logged := strings.Contains(w.logs.String(), "account write refused ip=")
+			notLogged := strings.HasPrefix(test.name, "source_") || strings.HasPrefix(test.name, "forwarded_") || strings.HasPrefix(test.name, "host_") ||
+				test.name == "origin_foreign" || test.name == "origin_null" || test.name == "origin_twice"
+			if notLogged == logged {
+				t.Fatalf("logged = %v for a refusal of the %s case: %q", logged, test.name, w.logs.String())
 			}
 		})
 	}
@@ -363,6 +378,15 @@ func TestCreateAccount(t *testing.T) {
 				t.Fatal("a refused create wrote")
 			}
 		})
+	}
+	// A template whose result is no reference for some alias is refused for that alias.
+	w.writer.cfg.TokenRefTemplate = "env://TOKEN_{alias}"
+	status, answer, _ = w.serve(t, request("POST", "/accounts", strings.Replace(w.newBody(), "sample-new", "sample-x", 1)))
+	if status != 400 || answer["field"] != "alias" {
+		t.Fatalf("alias that makes no reference: %d %v", status, answer)
+	}
+	if status, _, body := w.serve(t, request("POST", "/accounts", strings.Replace(w.newBody(), "sample-new", "samplex", 1))); status != 200 {
+		t.Fatalf("control arm, an alias that makes one: %d %s", status, body)
 	}
 	// Without a template no account can be created; with one the same body passes (above).
 	w.writer.cfg.TokenRefTemplate = ""
@@ -565,12 +589,7 @@ func TestVerify(t *testing.T) {
 		t.Fatalf("probe after the round: %d %v", status, answer)
 	}
 
-	// One verify of an alias at a time; a stale revision is refused.
-	w.writer.verifying.Store("sample-a", true)
-	if status, _, _ := verify("sample-a"); status != 409 {
-		t.Fatalf("second verify of one alias: %d", status)
-	}
-	w.writer.verifying.Delete("sample-a")
+	// A stale revision is refused.
 	if status, _, _ := w.serve(t, request("POST", "/accounts/sample-a/verify", `{"rev":99}`)); status != 409 {
 		t.Fatalf("verify at a stale revision: %d", status)
 	}
@@ -655,6 +674,10 @@ func TestActivate(t *testing.T) {
 			row, _ := w.store.Account(t.Context(), "sample-new")
 			if row.Status != "testing" || slices.Contains(w.accounts.Candidates(), "sample-new") {
 				t.Fatalf("the account is %s and served %v", row.Status, w.accounts.Candidates())
+			}
+			// What the failed activation learned is audited as the activation.
+			if audit, _ := w.store.AccountAudit(t.Context(), "sample-new"); len(audit) == 0 || audit[len(audit)-1].Action != actionActivate {
+				t.Fatalf("audit of a failed activation = %+v", audit)
 			}
 		})
 	}

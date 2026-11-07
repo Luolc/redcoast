@@ -79,8 +79,10 @@ type AccountWriter struct {
 	cfg AccountWriterConfig
 	now func() time.Time
 
-	mu        sync.Mutex // serializes the writes
-	verifying sync.Map   // aliases whose checks run now
+	// mu serializes the writes, so each reads the table the previous one left. A verify
+	// or an activate holds it through its network checks, up to verifyTimeout plus
+	// probeWait, and every other write waits for it, even when its client has left.
+	mu sync.Mutex
 }
 
 // NewAccountWriter returns the write path for cfg.
@@ -156,7 +158,8 @@ func route[B any](w *AccountWriter, action string, handle func(r *http.Request, 
 	return func(rw http.ResponseWriter, r *http.Request) {
 		var body B
 		ip, _ := peer(r)
-		refuse := func(err error) { refuseWrite(rw, ip, action, err) }
+		listed, _ := w.writeStatus(r)
+		refuse := func(err error) { refuseWrite(rw, ip, listed, action, err) }
 		if err := w.admit(r, action); err != nil {
 			refuse(err)
 			return
@@ -186,14 +189,18 @@ func route[B any](w *AccountWriter, action string, handle func(r *http.Request, 
 	}
 }
 
-// refuseWrite logs a refused write without request content and answers it: the status,
+// refuseWrite logs a refused write of a listed source without request content and answers it: the status,
 // the message and the field or check it concerns.
-func refuseWrite(rw http.ResponseWriter, ip netip.Addr, action string, err error) {
+func refuseWrite(rw http.ResponseWriter, ip netip.Addr, listed bool, action string, err error) {
 	var we writeError
 	if !errors.As(err, &we) {
 		we = writeError{status: http.StatusInternalServerError, message: "write failed"}
 	}
-	log.Printf("account write refused ip=%s action=%s status=%d reason=%q", ip, action, we.status, we.message)
+	// A source outside the list could add log lines without limit, so only the refusals
+	// of listed sources are logged.
+	if listed {
+		log.Printf("account write refused ip=%s action=%s status=%d reason=%q", ip, action, we.status, we.message)
+	}
 	answer := map[string]string{"error": we.message}
 	for key, value := range map[string]string{"field": we.field, "check": we.check} {
 		if value != "" {
@@ -263,7 +270,10 @@ func noRepeatedKeys(decoder *json.Decoder) error {
 			if err != nil {
 				return err
 			}
+			// encoding/json matches a key to a field whatever its case, so a key repeated in
+			// another case is a repeat.
 			name, _ := key.(string)
+			name = strings.ToLower(name)
 			if seen[name] {
 				return errors.New("repeated key")
 			}

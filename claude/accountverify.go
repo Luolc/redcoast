@@ -47,10 +47,6 @@ func (w *AccountWriter) runChecks(ctx context.Context, row session.AccountRow) (
 	if row.Access != "gateway" {
 		return session.Verification{}, verifyReport{}, writeError{status: http.StatusConflict, message: "the account is not on the gateway path", check: "access"}
 	}
-	if _, busy := w.verifying.LoadOrStore(row.Alias, true); busy {
-		return session.Verification{}, verifyReport{}, writeError{status: http.StatusConflict, message: "the account is being verified", check: "busy"}
-	}
-	defer w.verifying.Delete(row.Alias)
 	ctx, cancel := context.WithTimeout(ctx, verifyTimeout)
 	defer cancel()
 

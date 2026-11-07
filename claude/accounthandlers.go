@@ -96,6 +96,9 @@ func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entr
 	if err := checkRow(row, proxyRefOptions(rows), true); err != nil {
 		return nil, err
 	}
+	if checkRowRefs(row) != nil {
+		return nil, fieldProblem("alias", "gives a token reference that is not a credential reference")
+	}
 	now := w.now()
 	if _, err := w.cfg.Store.PlanQuotaUnit(ctx, *body.Plan, now); err != nil {
 		return nil, fieldProblem("plan", "no such plan")
@@ -321,7 +324,7 @@ func (w *AccountWriter) activate(r *http.Request, alias string, body *revBody, e
 	}{{"token_ok", result.TokenOK, report.TokenOK}, {"egress_ok", result.EgressOK, report.EgressOK}, {"probe_ok", result.ProbeOK, report.ProbeOK}} {
 		if check.ok == nil || !*check.ok {
 			// What was learned is stored, so that the page shows which check failed.
-			if _, err := w.cfg.Store.SetVerification(ctx, alias, before.Rev, result, session.AuditEntry{SourceIP: entry.SourceIP, Action: actionVerify}); err != nil {
+			if _, err := w.cfg.Store.SetVerification(ctx, alias, before.Rev, result, entry); err != nil {
 				return nil, storeError(err)
 			}
 			return nil, notReady(check.name, fmt.Sprintf("%s did not pass: %s", check.name, check.result.Reason))
