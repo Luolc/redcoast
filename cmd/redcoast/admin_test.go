@@ -12,6 +12,11 @@ import (
 	"testing"
 )
 
+const (
+	setupRequestID = "0123456789abcdef0123456789abcdef"
+	setupRunID     = "20261107T041325123Z"
+)
+
 // TestAdminCommandParsing checks which management invocations are accepted and the
 // request each one sends.
 func TestAdminCommandParsing(t *testing.T) {
@@ -52,6 +57,25 @@ func TestAdminCommandParsing(t *testing.T) {
 		{"machine_add_without_hash", []string{"machine", "add", "client-a", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"machine_limit_zero", []string{"machine", "limit", "client-a", "0", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"machine_unknown_verb", []string{"machine", "drop", "client-a", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_next", []string{"setup", "next", "--admin-socket", "admin.sock"}, "POST", "/setup/next", ""},
+		{"setup_report", []string{"setup", "report", "sample-a", setupRequestID, "--run-id", setupRunID, "--state", "running", "--step", "email_page", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/setup/report",
+			`{"reason":null,"request_id":"` + setupRequestID + `","run_id":"` + setupRunID + `","state":"running","step":"email_page"}`},
+		{"setup_report_with_reason", []string{"setup", "report", "sample-a", setupRequestID, "--admin-socket", "admin.sock", "--run-id", setupRunID, "--state", "failed", "--step", "cli", "--reason", "cli_login_failed"}, "POST", "/accounts/sample-a/setup/report",
+			`{"reason":"cli_login_failed","request_id":"` + setupRequestID + `","run_id":"` + setupRunID + `","state":"failed","step":"cli"}`},
+		{"setup_token", []string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/setup/token?request_id=" + setupRequestID + "&run_id=" + setupRunID, ""},
+		{"setup_without_verb", []string{"setup", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_unknown_verb", []string{"setup", "done", "sample-a", setupRequestID, "--run-id", setupRunID, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_next_with_alias", []string{"setup", "next", "sample-a", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_next_with_run_id", []string{"setup", "next", "--run-id", setupRunID, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_report_without_run_id", []string{"setup", "report", "sample-a", setupRequestID, "--state", "running", "--step", "cli", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_report_without_state", []string{"setup", "report", "sample-a", setupRequestID, "--run-id", setupRunID, "--step", "cli", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_report_without_step", []string{"setup", "report", "sample-a", setupRequestID, "--run-id", setupRunID, "--state", "running", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_report_without_request_id", []string{"setup", "report", "sample-a", "--run-id", setupRunID, "--state", "running", "--step", "cli", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_report_bad_alias", []string{"setup", "report", "Sample A", setupRequestID, "--run-id", setupRunID, "--state", "running", "--step", "cli", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_token_with_state", []string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--state", "running", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_token_with_reason", []string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--reason", "x", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_token_without_run_id", []string{"setup", "token", "sample-a", setupRequestID, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"run_id_outside_setup", []string{"status", "--run-id", setupRunID, "--admin-socket", "admin.sock"}, "", "", ""},
 		{"max_sessions_outside_machine", []string{"reload", "--admin-socket", "admin.sock", "--max-sessions", "2"}, "", "", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -178,5 +202,76 @@ func TestRefreshAllCommand(t *testing.T) {
 	}
 	if len(received) != 2 || received[0] != "POST /refresh" {
 		t.Fatalf("socket received %q", received)
+	}
+}
+
+// TestSetupTokenCommand checks that the token is read from stdin and sent as the raw body
+// of the handover, with one line break dropped, as text, and that a token of more than
+// 4 KiB is refused before anything is sent; an answer of the gateway's, success or refusal,
+// never holds the token on the command's output.
+func TestSetupTokenCommand(t *testing.T) {
+	const token = "sk-ant-oat01-SYNTHETIC-TOKEN_0123"
+	socket := filepath.Join(t.TempDir(), "a.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received []string
+	var types []string
+	status := http.StatusOK
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received = append(received, r.Method+" "+r.URL.RequestURI()+" "+string(body))
+		types = append(types, r.Header.Get("Content-Type"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = io.WriteString(w, `{"probe":"ok","written":true,"reload":"ok"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"error":"probe_refused","written":false}`)
+	}))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	parse := func() adminCommand {
+		cmd, err := parseAdminCommand([]string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--admin-socket", socket})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cmd
+	}
+	wantPath := "POST /accounts/sample-a/setup/token?request_id=" + setupRequestID + "&run_id=" + setupRunID + " "
+	for _, input := range []string{token, token + "\n", token + "\r\n"} {
+		cmd := parse()
+		cmd.input = strings.NewReader(input)
+		var out bytes.Buffer
+		if err := runAdmin(t.Context(), cmd, &out); err != nil || strings.Contains(out.String(), token) {
+			t.Fatalf("handover of %q: %v %q", input, err, out.String())
+		}
+	}
+	if len(received) != 3 || received[0] != wantPath+token || received[1] != received[0] || received[2] != received[0] || types[0] != "text/plain" {
+		t.Fatalf("received %q with types %q", received, types)
+	}
+	// A refusal exits with an error that names the code, not the token.
+	status = http.StatusBadGateway
+	cmd := parse()
+	cmd.input = strings.NewReader(token)
+	var out bytes.Buffer
+	if err := runAdmin(t.Context(), cmd, &out); err == nil || !strings.Contains(err.Error(), "refused: probe_refused") || strings.Contains(err.Error(), token) || out.Len() != 0 {
+		t.Fatalf("refusal: %v %q", err, out.String())
+	}
+	// 4096 bytes go; 4097 do not, and nothing is sent.
+	status = http.StatusOK
+	before := len(received)
+	cmd = parse()
+	cmd.input = strings.NewReader(strings.Repeat("a", maxSetupInput) + "\n")
+	if err := runAdmin(t.Context(), cmd, &out); err != nil {
+		t.Fatalf("4096 bytes: %v", err)
+	}
+	cmd = parse()
+	cmd.input = strings.NewReader(strings.Repeat("a", maxSetupInput+1))
+	if err := runAdmin(t.Context(), cmd, &out); err == nil || !strings.Contains(err.Error(), "4 KiB") || len(received) != before+1 {
+		t.Fatalf("4097 bytes: %v, requests %d", err, len(received)-before)
 	}
 }

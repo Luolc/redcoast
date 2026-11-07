@@ -55,6 +55,7 @@ type writeHarness struct {
 	egress  *Egress
 	handler http.Handler
 	logs    *bytes.Buffer
+	cfg     AccountWriterConfig
 
 	mu          sync.Mutex
 	probeStatus int
@@ -117,7 +118,7 @@ func newWriteHarness(t *testing.T, allow ...netip.Prefix) *writeHarness {
 	if len(allow) == 0 {
 		allow = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
 	}
-	w.writer = NewAccountWriter(AccountWriterConfig{
+	w.cfg = AccountWriterConfig{
 		Store: w.store, Accounts: w.accounts, Egress: w.egress, Entrypoint: entry,
 		Reload: func(ctx context.Context) (Reload, error) {
 			return w.accounts.ReloadFrom(ctx, StoreSource(w.store, w.dir), writeResolve, w.egress.Check)
@@ -125,7 +126,15 @@ func newWriteHarness(t *testing.T, allow ...netip.Prefix) *writeHarness {
 		Resolve:          func(context.Context) (Resolver, error) { return writeResolve, nil },
 		AllowFrom:        allow,
 		TokenRefTemplate: "op://example-vault/token-{alias}/credential",
-	})
+	}
+	w.build()
+	return w
+}
+
+// build makes the write path and the dashboard over w.cfg.
+func (w *writeHarness) build() {
+	t := w.t
+	w.writer = NewAccountWriter(w.cfg)
 	reader, err := session.OpenReadOnly(w.path, session.Config{Now: func() time.Time { return w.clock }}, DefaultLimits.MaxTunnel)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +142,6 @@ func newWriteHarness(t *testing.T, allow ...netip.Prefix) *writeHarness {
 	t.Cleanup(func() { _ = reader.Close() })
 	d := NewDashboard(w.egress, DashboardConfig{Provider: "claude", Reader: reader, Store: w.store, DBPath: w.path, Started: w.clock, Write: w.writer})
 	w.handler = HostGuard([]string{writeHost}, d.Handler())
-	return w
 }
 
 // actionOf is the action name a route's requests carry.
@@ -145,6 +153,8 @@ func actionOf(method, path string) string {
 		return actionUpdate
 	case strings.HasSuffix(path, "/verify"):
 		return actionVerify
+	case strings.HasSuffix(path, "/setup"):
+		return actionSetup
 	}
 	return actionActivate
 }

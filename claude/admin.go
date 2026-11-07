@@ -29,6 +29,8 @@ type Admin struct {
 	RefreshAll func(ctx context.Context, each func(alias string, refreshed Refreshed, err error)) error
 	// Import replaces an account's login and renews it; nil refuses every import.
 	Import func(ctx context.Context, alias string, login []byte) error
+	// Setup serves the setup commands of a login machine; nil answers them with 501.
+	Setup *Setup
 }
 
 // NewAdmin returns the management interface over accounts and store; reload runs one
@@ -58,6 +60,9 @@ func (a *Admin) Handler() http.Handler {
 	mux.HandleFunc("POST /accounts/{alias}/refresh", a.serveRefresh)
 	mux.HandleFunc("POST /refresh", a.serveRefreshAll)
 	mux.HandleFunc("POST /accounts/{alias}/import", a.serveImport)
+	mux.HandleFunc("POST /setup/next", a.serveSetupNext)
+	mux.HandleFunc("POST /accounts/{alias}/setup/report", a.serveSetupReport)
+	mux.HandleFunc("POST /accounts/{alias}/setup/token", a.serveSetupToken)
 	mux.HandleFunc("GET /sessions", a.serveSessions)
 	mux.HandleFunc("GET /machines", a.serveMachines)
 	mux.HandleFunc("POST /machines", a.serveAddMachine)
@@ -381,4 +386,75 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// setupAnswer writes the refusal err as {"error": code}, with "written" for a handover
+// that failed; any other error is a 500.
+func setupAnswer(w http.ResponseWriter, err error, handover bool) {
+	var refused setupError
+	if !errors.As(err, &refused) {
+		refused = setupError{status: http.StatusInternalServerError, code: errorSetupStoreNotReady}
+	}
+	body := map[string]any{"error": refused.code}
+	if handover {
+		body["written"] = refused.written
+	}
+	writeJSON(w, refused.status, body)
+}
+
+// serveSetupNext hands the next setup task to a login machine: {"task": null} or the task.
+func (a *Admin) serveSetupNext(w http.ResponseWriter, r *http.Request) {
+	if a.Setup == nil {
+		setupAnswer(w, setupError{status: http.StatusNotImplemented, code: errorSetupUnavailable}, false)
+		return
+	}
+	task, err := a.Setup.Next(r.Context())
+	if err != nil {
+		setupAnswer(w, err, false)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"task": task})
+}
+
+// serveSetupReport records one step of the running task: a JSON body of at most 4 KiB
+// with no unknown or repeated key.
+func (a *Admin) serveSetupReport(w http.ResponseWriter, r *http.Request) {
+	if a.Setup == nil {
+		setupAnswer(w, setupError{status: http.StatusNotImplemented, code: errorSetupUnavailable}, false)
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSetupReport))
+	var body reportBody
+	if err != nil || decodeStrict(data, &body) != nil {
+		setupAnswer(w, setupError{status: http.StatusBadRequest, code: errorBadRequest}, false)
+		return
+	}
+	block, err := a.Setup.Report(r.Context(), r.PathValue("alias"), body)
+	if err != nil {
+		setupAnswer(w, err, false)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"setup": block})
+}
+
+// serveSetupToken takes the token of a handover, the raw request body of at most 4 KiB;
+// the two IDs are in the query. The token is in no answer.
+func (a *Admin) serveSetupToken(w http.ResponseWriter, r *http.Request) {
+	if a.Setup == nil {
+		setupAnswer(w, setupError{status: http.StatusNotImplemented, code: errorSetupUnavailable}, true)
+		return
+	}
+	query := r.URL.Query()
+	// One byte more than the limit tells a token that is too long from one that fits.
+	token, err := io.ReadAll(io.LimitReader(r.Body, maxSetupToken+1))
+	if err != nil {
+		setupAnswer(w, setupError{status: http.StatusBadRequest, code: errorBadRequest}, true)
+		return
+	}
+	result, err := a.Setup.Token(r.Context(), r.PathValue("alias"), query.Get("request_id"), query.Get("run_id"), token)
+	if err != nil {
+		setupAnswer(w, err, true)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }

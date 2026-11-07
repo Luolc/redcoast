@@ -270,3 +270,44 @@ func TestDashboardWriteConfiguration(t *testing.T) {
 		})
 	}
 }
+
+// TestSetupConfiguration checks setup.enabled: off by default and when the section is
+// absent; on only for the Claude gateway with a 1Password service account token to write
+// with and a token reference template to say where; the Codex gateway refuses the key.
+func TestSetupConfiguration(t *testing.T) {
+	const section = "codex: {accounts_dir: /var/lib/redcoast-codex/accounts, session_key: 'env://SESSION_KEY'}\n"
+	const credentials = "credentials: {onepassword_token: 'env://OP_TOKEN'}\n"
+	const template = "dashboard_write: {token_ref_template: 'op://example-vault/token-{alias}/credential'}\n"
+	for _, test := range []struct {
+		name, provider, yaml string
+		want                 bool
+		problem              string
+	}{
+		{"absent", "claude", credentials, false, ""},
+		{"off", "claude", credentials + "setup: {enabled: false}\n", false, ""},
+		{"on", "claude", credentials + template + "setup: {enabled: true}\n", true, ""},
+		{"on_without_token", "claude", template + "credentials: {}\nsetup: {enabled: true}\n", false, "setup.enabled: needs credentials.onepassword_token"},
+		{"on_with_the_stdin_entry", "claude", template + "credentials: {stdin_test_entry: true}\nsetup: {enabled: true}\n", false, "setup.enabled: needs credentials.onepassword_token"},
+		{"on_without_template", "claude", credentials + "setup: {enabled: true}\n", false, "setup.enabled: needs dashboard_write.token_ref_template"},
+		{"unknown_key", "claude", credentials + "setup: {enabled: true, login_machine: x}\n", false, "field login_machine not found"},
+		{"codex_off", "codex", "setup: {enabled: false}\n", false, "setup: only the Claude gateway takes it"},
+		{"codex_on", "codex", "setup: {enabled: true}\n", false, "setup: only the Claude gateway takes it"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			yaml := basePaths + test.yaml
+			if test.provider == "codex" {
+				yaml += section
+			}
+			cfg, err := parseConfig(test.provider, []byte(yaml))
+			if test.problem != "" {
+				if err == nil || !strings.Contains(err.Error(), test.problem) {
+					t.Fatalf("got %v, want %q", err, test.problem)
+				}
+				return
+			}
+			if err != nil || cfg.setupEnabled != test.want {
+				t.Fatalf("got %v %v, want %v", cfg.setupEnabled, err, test.want)
+			}
+		})
+	}
+}

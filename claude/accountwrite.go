@@ -70,6 +70,12 @@ type AccountWriterConfig struct {
 	// TokenRefTemplate is the token reference of a new account with the alias in place of
 	// {alias}; empty lets no account be created.
 	TokenRefTemplate string
+	// SetupEnabled turns the setup routes on; off, they answer 501.
+	SetupEnabled bool
+	// SetupSecrets opens the secret store that a setup handover writes the token to, with
+	// the credential the gateway reads its references with. It is called when a
+	// handover writes and when tokens are dated, and the store is not kept.
+	SetupSecrets func(ctx context.Context) (credential.Store, error)
 }
 
 // AccountWriter is the dashboard's write path over the accounts table: create, edit,
@@ -83,11 +89,18 @@ type AccountWriter struct {
 	// or an activate holds it through its network checks, up to verifyTimeout plus
 	// probeWait, and every other write waits for it, even when its client has left.
 	mu sync.Mutex
+
+	// setup is the gateway's side of setting tokens; nil while setup is off.
+	setup *Setup
 }
 
 // NewAccountWriter returns the write path for cfg.
 func NewAccountWriter(cfg AccountWriterConfig) *AccountWriter {
-	return &AccountWriter{cfg: cfg, now: time.Now}
+	w := &AccountWriter{cfg: cfg, now: time.Now}
+	if cfg.SetupEnabled {
+		w.setup = &Setup{w: w}
+	}
+	return w
 }
 
 // writeError is the answer to a refused write: the status, a message that never holds
@@ -183,6 +196,10 @@ func route[B any](w *AccountWriter, action string, handle func(r *http.Request, 
 		answer, err := handle(r, alias, &body, session.AuditEntry{SourceIP: ip.String(), Action: action})
 		if err != nil {
 			refuse(err)
+			return
+		}
+		if done, ok := answer.(accepted); ok {
+			writeJSON(rw, http.StatusAccepted, done.body)
 			return
 		}
 		writeJSON(rw, http.StatusOK, answer)
