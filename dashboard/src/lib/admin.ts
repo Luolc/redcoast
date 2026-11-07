@@ -268,3 +268,41 @@ export function patchBody(
   if (Object.keys(proxy).length > 0) body["proxy"] = proxy;
   return body;
 }
+
+/**
+ * Why the page offers no setup button for the account; null when it does.
+ * The conditions are the gateway's: setup on, a testing or active account,
+ * and an exit that is not direct.
+ */
+export function setupOffReason(d: Dashboard, m: Managed): string | null {
+  const c = m.config;
+  if (c === undefined) return "This gateway keeps no accounts table to set up.";
+  if (d.gateway.setup?.enabled !== true) return "Setup is off on this gateway.";
+  if (!canWrite(d)) return "Writing is off, so setup cannot be requested.";
+  if (c.status !== "testing" && c.status !== "active")
+    return `Setup is only for accounts that are testing or active; this one is ${c.status}.`;
+  if (c.proxy.direct)
+    return "Setup is not offered for an account with a direct exit.";
+  return null;
+}
+
+/** Whether a task is already requested or running, which the gateway refuses to double. */
+export function setupBusy(m: Managed): boolean {
+  const s = m.config?.setup?.state;
+  return s === "requested" || s === "running";
+}
+
+/** Asks the gateway to log the account in and set its token, against the revision the page read. */
+export function requestSetup(
+  alias: string,
+  rev: number,
+  post?: typeof fetch,
+): Promise<Outcome> {
+  return writeAccount(
+    "account-setup",
+    "POST",
+    accountPath(alias, "/setup"),
+    { action: "login_and_token", rev },
+    post,
+  );
+}

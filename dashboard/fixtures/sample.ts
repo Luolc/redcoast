@@ -1,6 +1,6 @@
 // Made-up data in the shape of GET /dashboard.json, for `pnpm dev` and the
 // tests. Times are relative to now so ages and countdowns look live.
-import type { AccountConfig, Dashboard } from "../src/lib/types.ts";
+import type { AccountConfig, Dashboard, SetupBlock } from "../src/lib/types.ts";
 
 export function sampleDashboard(now: Date): Dashboard {
   const at = (minutes: number) =>
@@ -19,6 +19,7 @@ export function sampleDashboard(now: Date): Dashboard {
     status: string,
     verified: boolean,
     port = 8443,
+    setup?: Partial<SetupBlock>,
   ): AccountConfig => ({
     alias,
     email: `${alias.slice(-2)}@example.test`,
@@ -43,6 +44,21 @@ export function sampleDashboard(now: Date): Dashboard {
     rev: 3 + n,
     created_at: at(-40 * 24 * 60),
     updated_at: at(-2 * 24 * 60),
+    setup: {
+      state: "not_started",
+      request_id: null,
+      run_id: null,
+      step: null,
+      reason: null,
+      updated_at: null,
+      token_set_at: null,
+      action: null,
+      identity: null,
+      token_expiry: verified
+        ? { state: "read", expires_at: at(335 * 24 * 60), read_at: at(-5) }
+        : { state: "no_field", expires_at: null, read_at: at(-5) },
+      ...setup,
+    },
   });
   return {
     at: at(0),
@@ -80,6 +96,7 @@ export function sampleDashboard(now: Date): Dashboard {
         last_started: at(-41),
         last_finished: at(-40),
       },
+      setup: { enabled: true, queued: 0, last_asked_at: at(-1) },
     },
     db_bytes: 12_582_912,
     accounts: [
@@ -162,7 +179,14 @@ export function sampleDashboard(now: Date): Dashboard {
         next_plan: null,
         in_flight: 3,
         concurrency: 32,
-        config: config("sample-ab", 1, "active", true, 8443),
+        config: config("sample-ab", 1, "active", true, 8443, {
+          state: "done",
+          step: "complete",
+          reason: "complete",
+          action: "login_and_token",
+          updated_at: at(-30 * 24 * 60),
+          token_set_at: at(-30 * 24 * 60),
+        }),
       },
       {
         alias: "sample-ac",
@@ -230,7 +254,15 @@ export function sampleDashboard(now: Date): Dashboard {
         config: config("sample-ad", 3, "active", true, 8444),
       },
     ],
-    unserved_accounts: [config("sample-af", 5, "testing", false, 8446)],
+    unserved_accounts: [
+      config("sample-af", 5, "testing", false, 8446, {
+        state: "needs_human",
+        step: "email_page",
+        reason: "captcha_challenge",
+        action: "login_and_token",
+        updated_at: at(-12),
+      }),
+    ],
     accounts_editable: true,
     write: { enabled: true, can_create: true },
     proxy_ref_options: [

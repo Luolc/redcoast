@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { sampleDashboard } from "../../fixtures/sample.ts";
 import { Page } from "../App";
 import type { Route } from "../lib/route";
-import type { Dashboard } from "../lib/types";
+import type { AccountConfig, Dashboard } from "../lib/types";
 import { Confirm, RefusalCallout } from "./AdminUi";
 
 const now = new Date("2026-10-07T12:20:00Z");
@@ -160,7 +160,9 @@ it("has no field that takes a credential", () => {
   // The forms take references and settings; a credential never reaches the page.
   for (const route of [
     { view: "add", arg: "1" },
+    { view: "add", arg: "3/sample-af" },
     { view: "add", arg: "4/sample-af" },
+    { view: "account", arg: "sample-ab" },
     { view: "account", arg: "sample-ab/edit" },
   ] satisfies Route[]) {
     const out = html(route);
@@ -188,4 +190,90 @@ it("offers only the first click of a confirmed act", () => {
   expect(out).toContain("Activate");
   expect(out).not.toContain("Yes, activate");
   expect(out).not.toContain("Sure?");
+});
+
+function withConfig(
+  alias: string,
+  patch: (c: AccountConfig) => Partial<AccountConfig>,
+): Dashboard {
+  const edit = (c: AccountConfig) =>
+    c.alias === alias ? { ...c, ...patch(c) } : c;
+  return {
+    ...data,
+    accounts: data.accounts.map((a) =>
+      a.config === undefined ? a : { ...a, config: edit(a.config) },
+    ),
+    unserved_accounts: data.unserved_accounts?.map(edit),
+  };
+}
+
+it("offers the setup button for a testing or active account with a proxy exit", () => {
+  const step3 = html({ view: "add", arg: "3/sample-af" });
+  expect(step3).toContain("Start setup");
+  expect(step3).not.toContain("Yes, start setup");
+  expect(html({ view: "account", arg: "sample-ab" })).toContain("Start setup");
+});
+
+it("says why there is no setup button instead", () => {
+  const cases: [Dashboard, string][] = [
+    [
+      { ...data, gateway: { ...data.gateway, setup: null } },
+      "Setup is off on this gateway.",
+    ],
+    [
+      withConfig("sample-ab", () => ({ status: "paused" })),
+      "only for accounts that are testing or active; this one is paused",
+    ],
+    [
+      withConfig("sample-ab", (c) => ({
+        proxy: { ...c.proxy, direct: true },
+      })),
+      "not offered for an account with a direct exit",
+    ],
+  ];
+  for (const [d, why] of cases) {
+    const out = html({ view: "account", arg: "sample-ab" }, d);
+    expect(out).not.toContain("Start setup");
+    expect(text(out)).toContain(why);
+  }
+  expect(html({ view: "account", arg: "sample-ab" }, off)).not.toContain(
+    "Start setup",
+  );
+});
+
+it("shows the state of the setup, and what a person must do when it needs one", () => {
+  const out = text(html({ view: "add", arg: "3/sample-af" }));
+  for (const t of [
+    "Needs a person",
+    "On the email page",
+    "The login page asked for a CAPTCHA",
+    "put its token in the secret manager",
+    "press Verify",
+  ])
+    expect(out).toContain(t);
+  const busy = withConfig("sample-af", (c) => ({
+    setup: c.setup && { ...c.setup, state: "running" },
+  }));
+  const running = html({ view: "add", arg: "3/sample-af" }, busy);
+  expect(running).not.toContain("Start setup");
+  expect(text(running)).toContain("A setup is under way");
+});
+
+it("shows when the token was set and falls due, or that it is not recorded", () => {
+  const set = text(html({ view: "account", arg: "sample-ab" }));
+  expect(set).toContain("Token set");
+  expect(set).toContain("Token expires");
+  expect(set).not.toContain("not recorded");
+  const unset = text(html({ view: "account", arg: "sample-af" }));
+  expect(unset).toContain("not recorded");
+  expect(unset).toContain("The token item has no expiry field");
+  const unreadable = withConfig("sample-ab", (c) => ({
+    setup: c.setup && {
+      ...c.setup,
+      token_expiry: { state: "unreadable", expires_at: null, read_at: null },
+    },
+  }));
+  expect(
+    text(html({ view: "account", arg: "sample-ab" }, unreadable)),
+  ).toContain("could not be read");
 });
