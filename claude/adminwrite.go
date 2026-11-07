@@ -77,6 +77,19 @@ type adminProxyBody struct {
 	PasswordRef *string `json:"password_ref"`
 }
 
+// adminSetBody is the body of PATCH /accounts/{alias} of the management socket: the
+// revision the edit is made against and the three fields it may change, a key left out
+// staying as it is. Nothing else of an account is edited through the socket.
+type adminSetBody struct {
+	Rev           *int64  `json:"rev"`
+	ReceiverEmail *string `json:"receiver_email"`
+	Proxy         *struct {
+		Provider *string `json:"provider"`
+		Type     *string `json:"type"`
+	} `json:"proxy"`
+	Source *sourceBody `json:"source"`
+}
+
 // adminRevBody is the body of verify, activate and setup request of the management socket.
 type adminRevBody struct {
 	Rev    *int64      `json:"rev"`
@@ -105,6 +118,13 @@ func (a *Admin) handleAccountWrites(mux *http.ServeMux) {
 	mux.HandleFunc("POST /accounts", adminWrite(a, actionCreate, func(w *AccountWriter, r *http.Request, _ string, body *adminCreateBody, entry session.AuditEntry) (any, error) {
 		return w.create(r, "", body.toCreate(), entry)
 	}, func(b *adminCreateBody) *sourceBody { return b.Source }, false))
+	mux.HandleFunc("PATCH /accounts/{alias}", adminWrite(a, actionUpdate, func(w *AccountWriter, r *http.Request, alias string, body *adminSetBody, entry session.AuditEntry) (any, error) {
+		patch := &patchBody{Rev: body.Rev, ReceiverEmail: body.ReceiverEmail}
+		if body.Proxy != nil {
+			patch.Proxy = &proxyBody{Provider: body.Proxy.Provider, Type: body.Proxy.Type}
+		}
+		return w.update(r, alias, patch, entry)
+	}, func(b *adminSetBody) *sourceBody { return b.Source }, false))
 	mux.HandleFunc("POST /accounts/{alias}/verify", adminWrite(a, actionVerify, func(w *AccountWriter, r *http.Request, alias string, body *adminRevBody, entry session.AuditEntry) (any, error) {
 		return w.verify(r, alias, &revBody{Rev: body.Rev}, entry)
 	}, func(b *adminRevBody) *sourceBody { return b.Source }, false))

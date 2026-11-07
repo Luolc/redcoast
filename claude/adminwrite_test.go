@@ -218,6 +218,7 @@ func TestAgentWritesNeedTheSwitch(t *testing.T) {
 		{"POST", "/accounts/sample-a/verify", map[string]any{"source": slackSource()}},
 		{"POST", "/accounts/sample-a/activate", map[string]any{"rev": 1, "source": slackSource()}},
 		{"POST", "/accounts/sample-a/setup/request", map[string]any{"rev": 1, "source": slackSource()}},
+		{"PATCH", "/accounts/sample-a", map[string]any{"rev": 1, "receiver_email": "x@example.test", "source": slackSource()}},
 		{"POST", "/accounts", "not even json"},
 	} {
 		if status, answer, body := h.agent(t, c.method, c.path, c.body); status != 501 || answer["error"] != "account_write_unavailable" {
@@ -772,5 +773,59 @@ func TestAgentCreateTakesReceiverEmail(t *testing.T) {
 	proxy := account["proxy"].(map[string]any)
 	if account["receiver_email"] != "receiver@example.test" || proxy["provider"] != "example-provider" || proxy["type"] != "dedicated-isp" {
 		t.Fatalf("show = %v", account)
+	}
+}
+
+// TestAgentSetBackfillsThreeFields: PATCH through the management socket changes the
+// receiver email and the proxy's provider and type at the revision given, with the
+// source audited, a key left out stays, an empty value clears; a stale revision is 409,
+// and no other field is accepted.
+func TestAgentSetBackfillsThreeFields(t *testing.T) {
+	h := newSetupHarness(t, true)
+	if status, _, body := h.agent(t, "POST", "/accounts", h.agentCreateBody("sample-new")); status != 200 {
+		t.Fatalf("create: %d %s", status, body)
+	}
+	rev := h.revOf(t, "sample-new")
+	set := func(rev int64, fields map[string]any) (int, map[string]any, string) {
+		fields["rev"], fields["source"] = rev, slackSource()
+		return h.agent(t, "PATCH", "/accounts/sample-new", fields)
+	}
+	status, answer, body := set(rev, map[string]any{"receiver_email": "receiver@example.test", "proxy": map[string]any{"provider": "example-provider"}})
+	account, _ := answer["account"].(map[string]any)
+	if status != 200 || account["receiver_email"] != "receiver@example.test" || account["proxy"].(map[string]any)["provider"] != "example-provider" || account["rev"] != float64(rev+1) {
+		t.Fatalf("set: %d %s", status, body)
+	}
+	audit, err := h.store.AccountAudit(t.Context(), "sample-new")
+	last := audit[len(audit)-1]
+	if err != nil || last.Action != actionUpdate || last.Source.Thread != slackThread || last.Changes["receiver_email"].New != "receiver@example.test" {
+		t.Fatalf("audit = %+v, %v", last, err)
+	}
+	// A key left out stays; an empty value clears.
+	status, answer, body = set(rev+1, map[string]any{"receiver_email": ""})
+	account, _ = answer["account"].(map[string]any)
+	if status != 200 || account["receiver_email"] != "" || account["proxy"].(map[string]any)["provider"] != "example-provider" {
+		t.Fatalf("clear: %d %s", status, body)
+	}
+	for _, test := range []struct {
+		name   string
+		rev    int64
+		fields map[string]any
+		status int
+		field  string
+	}{
+		{"stale", rev, map[string]any{"receiver_email": "x@example.test"}, 409, "rev"},
+		{"bad_address", rev + 2, map[string]any{"receiver_email": "Someone <x@example.test>"}, 400, "receiver_email"},
+		{"email_is_not_settable", rev + 2, map[string]any{"email": "x@example.test"}, 400, ""},
+		{"proxy_host_is_not_settable", rev + 2, map[string]any{"proxy": map[string]any{"host": "x.example.test"}}, 400, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			status, answer, body := set(test.rev, test.fields)
+			if status != test.status || (test.field != "" && answer["field"] != test.field) {
+				t.Fatalf("%d %s", status, body)
+			}
+		})
+	}
+	if row, _ := h.store.Account(t.Context(), "sample-new"); row.Rev != rev+2 || row.Email != "new@example.test" {
+		t.Fatalf("a refused set wrote: %+v", row)
 	}
 }
