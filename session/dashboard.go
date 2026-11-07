@@ -274,17 +274,16 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		return Snapshot{}, err
 	}
 	var pending []machineWindow
-	var owner []int // the index in out.Accounts of each pending window's account
 	for _, a := range status.Accounts {
 		view, windows, err := r.account(ctx, a, now)
 		if err != nil {
 			return Snapshot{}, err
 		}
 		view.Totals = totals[a.Alias]
-		for range windows {
-			owner = append(owner, len(out.Accounts))
+		for _, w := range windows {
+			w.account = len(out.Accounts)
+			pending = append(pending, w)
 		}
-		pending = append(pending, windows...)
 		out.Accounts = append(out.Accounts, view)
 	}
 	bursts, err := r.machineBursts(ctx, pending)
@@ -292,7 +291,7 @@ func (r *Reader) Snapshot(ctx context.Context, aliases []string) (Snapshot, erro
 		return Snapshot{}, err
 	}
 	for i, b := range bursts {
-		by := &out.Accounts[owner[i]].Burn.ByMachine
+		by := &out.Accounts[pending[i].account].Burn.ByMachine
 		*by = append(*by, b...)
 	}
 	if out.Machines, err = r.machines(ctx); err != nil {

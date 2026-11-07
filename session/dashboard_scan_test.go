@@ -172,16 +172,25 @@ func TestSnapshotMatchesPerAccountQueries(t *testing.T) {
 	use := func(in, out int64) *Usage {
 		return &Usage{InputTokens: in, OutputTokens: out, CacheRead: 1, CacheCreation: 2}
 	}
+	// Each account has its own token counts and its own split over the machines, so that
+	// a query that mixed accounts would give another result.
+	k := map[string]int64{"sample-a": 1, "sample-b": 2, "sample-c": 3}
 	rows := func(alias string) []fixtureRow {
-		n := int64(len(alias)) // made-up variation between accounts
+		n := k[alias]
+		major, minor := "machine-a", "machine-b"
+		if n%2 == 0 {
+			major, minor = minor, major
+		}
 		return []fixtureRow{
-			{"machine-a", 10 * time.Minute, "inference", use(100, n)},
-			{"machine-b", 50 * time.Minute, "inference", use(50, 5)},
-			{"machine-a", 2 * time.Hour, "inference", nil}, // NULL tokens
-			{"machine-b", 2 * time.Hour, "connect", nil},
-			{"machine-a", 30 * time.Hour, "inference", use(7, 7)},       // inside 7 d, outside 24 h
-			{"machine-b", 3 * 24 * time.Hour, "inference", use(9, 9)},   // inside 7 d
-			{"machine-b", 8 * 24 * time.Hour, "inference", use(999, 9)}, // outside 7 d
+			{major, 10 * time.Minute, "inference", use(100*n, n)},
+			{minor, 50 * time.Minute, "inference", use(10*n, 5)},
+			{major, 2 * time.Hour, "inference", nil}, // NULL tokens
+			{minor, 2 * time.Hour, "connect", nil},
+			{major, 30 * time.Hour, "inference", use(7*n, 7)},
+			{minor, 3 * 24 * time.Hour, "inference", use(9*n, 9)},
+			{minor, dashboardHours * time.Hour, "inference", use(11*n, 1)},   // exactly at the start of the 24 h window
+			{major, dashboardDays * 24 * time.Hour, "inference", use(13, 1)}, // exactly at the start of the 7 d window
+			{minor, 8 * 24 * time.Hour, "inference", use(999, 9)},            // outside 7 d
 		}
 	}
 	// Different window starts: sample-a 5h from 90 minutes ago, sample-b 5h from 40
@@ -221,8 +230,8 @@ func TestSnapshotMatchesPerAccountQueries(t *testing.T) {
 	if machineWindows != 3 {
 		t.Fatalf("%d windows were split over machines, want 3: the fixture does not exercise the scan", machineWindows)
 	}
-	if got := snap.Accounts[0].Totals.Week.Requests; got != 5 {
-		t.Fatalf("sample-a week requests = %d, want 5", got)
+	if got := snap.Accounts[0].Totals; got.Day.Requests != 4 || got.Week.Requests != 7 {
+		t.Fatalf("sample-a totals = %+v, want 4 requests in 24 h and 7 in 7 d, the rows at the edges included", got)
 	}
 }
 

@@ -190,6 +190,7 @@ func shares(window string, rate float64, tokens map[string]int64) []MachineBurn 
 // machineWindow is a window of an account whose rate is split over the client machines,
 // by the tokens carried on the account since the window's last reset.
 type machineWindow struct {
+	account       int // the index of the account in the snapshot
 	alias, window string
 	rate          float64
 	since         time.Time
@@ -219,7 +220,7 @@ func (r *Reader) burn(alias string, history map[string][]QuotaPoint, latest map[
 		if est.RatePerHour == nil || *est.RatePerHour <= 0 {
 			continue
 		}
-		pending = append(pending, machineWindow{alias, w.name, *est.RatePerHour, used[0].At})
+		pending = append(pending, machineWindow{alias: alias, window: w.name, rate: *est.RatePerHour, since: used[0].At})
 	}
 	return out, pending
 }
