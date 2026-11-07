@@ -46,7 +46,7 @@ func TestQuotaReadingsFromHeaders(t *testing.T) {
 		{"reset_in_the_past", header("7d-Utilization", "0.5", "7d-Reset", "1700000000"), []string{"7d"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			readings := quotaReadings(test.header, "response")
+			readings := quotaReadings(test.header, "response", nil)
 			var windows []string
 			for _, r := range readings {
 				windows = append(windows, r.Window)

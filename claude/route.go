@@ -357,7 +357,19 @@ func (rt *router) recordUpstream(res *http.Response, source string) []session.Re
 	a := accountFrom(ctx)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), captureWriteTimeout)
 	defer cancel()
-	readings := rt.provider.Readings(res.Header, source)
+	// Only a refresh logs the windows it lacks: its probe asks for them, while an
+	// ordinary response may carry any subset.
+	var dropped func(window, reason, status string)
+	if source == "refresh" {
+		dropped = func(window, reason, status string) {
+			if status != "" {
+				log.Printf("quota window dropped alias=%s window=%s reason=%s status=%q", a.alias, window, reason, status)
+				return
+			}
+			log.Printf("quota window dropped alias=%s window=%s reason=%s", a.alias, window, reason)
+		}
+	}
+	readings := rt.provider.Readings(res.Header, source, dropped)
 	if err := rt.store.RecordQuota(ctx, a.alias, readings); err != nil {
 		log.Printf("quota record failed alias=%s", a.alias)
 	}

@@ -663,3 +663,37 @@ func TestRefreshRoundsTakeTurns(t *testing.T) {
 		t.Fatalf("exits received %d and %d requests, want 3 each", f.exits["sample-a"].requests(), f.exits["sample-b"].requests())
 	}
 }
+
+// TestRefreshLogsDroppedWindow checks that a refresh whose answer leaves out a quota
+// window logs that window with its reason, and one that gives both windows logs none.
+func TestRefreshLogsDroppedWindow(t *testing.T) {
+	h := newHarness(t)
+	exit := startRefreshExit(t, h.clock)
+	exit.answer(200, "0.1")
+	exitURL, err := url.Parse(exit.server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.addWithExit("sample-a", "sk-ant-oat01-synthetic-token-a", exitURL)
+	rt := h.router(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, accountTransport{})
+	var logged strings.Builder
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&logged)
+
+	if _, err := rt.refresh(context.Background(), "sample-a"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logged.String(), "quota window dropped") {
+		t.Errorf("both windows given, logged: %q", logged.String())
+	}
+
+	exit.mu.Lock()
+	exit.windows = []string{session.Window7d}
+	exit.mu.Unlock()
+	if _, err := rt.refresh(context.Background(), "sample-a"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "quota window dropped alias=sample-a window=5h reason=absent"; !strings.Contains(logged.String(), want) {
+		t.Errorf("5h left out, log %q lacks %q", logged.String(), want)
+	}
+}
