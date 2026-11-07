@@ -33,6 +33,9 @@ const (
 	SetupTokenLife       = 365 * 24 * time.Hour
 	SetupRenewWithin     = 30 * 24 * time.Hour
 	SetupRenewRetry      = 24 * time.Hour
+	// SetupWriteSkew is how much later than the gateway's own write a secret store item may
+	// be dated without having been changed by hand.
+	SetupWriteSkew = 2 * time.Minute
 )
 
 // Reasons the store itself gives for a task it ends.
@@ -511,15 +514,17 @@ func (r *Reader) SetupRows(ctx context.Context) (map[string]SetupRow, error) {
 }
 
 // SetTokenEstimate records when a token that the gateway did not write was set, as the
-// secret store dates its item. It changes nothing for an account whose token the
-// gateway wrote.
+// secret store dates its item. It changes nothing for a token the gateway wrote, unless
+// the item was changed by hand after.
 func (s *Store) SetTokenEstimate(ctx context.Context, alias string, at time.Time) error {
 	return s.transact(ctx, func(tx *sql.Tx) error {
 		row, err := setupRow(ctx, tx, alias)
 		if err != nil {
 			return err
 		}
-		if !row.TokenSetAt.IsZero() && !row.TokenSetEstimated {
+		// A token the gateway wrote is dated by the write; an item changed later than the
+		// write explains was changed by hand, and dates the token it holds.
+		if !row.TokenSetAt.IsZero() && !row.TokenSetEstimated && !at.After(row.TokenSetAt.Add(SetupWriteSkew)) {
 			return nil
 		}
 		if row.TokenSetAt.Equal(at) && row.TokenSetEstimated {

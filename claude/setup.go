@@ -421,11 +421,15 @@ func (s *Setup) audit(ctx context.Context, task session.SetupTask, outcome strin
 	}
 }
 
-// step records the step of the handover.
-func (s *Setup) step(ctx context.Context, task session.SetupTask, step string) {
+// step records the step of the handover. It fails when the task is no longer the
+// claimed, running one, because a timeout or a restart ended it; the handover then goes
+// no further.
+func (s *Setup) step(ctx context.Context, task session.SetupTask, step string) error {
 	if err := s.w.cfg.Store.SetupStep(ctx, task.Alias, task.RequestID, step); err != nil {
-		log.Printf("setup alias=%s request_id=%s: the step was not recorded", task.Alias, task.RequestID)
+		log.Printf("setup alias=%s request_id=%s: the task ended before step %s", task.Alias, task.RequestID, step)
+		return setupError{status: http.StatusConflict, code: errorNoOpenTask}
 	}
+	return nil
 }
 
 // handover runs the steps of a claimed task.
@@ -437,7 +441,9 @@ func (s *Setup) handover(ctx context.Context, task session.SetupTask, token stri
 	if w.cfg.TokenRefTemplate == "" || account.TokenRef != strings.Replace(w.cfg.TokenRefTemplate, aliasPlaceholder, account.Alias, 1) {
 		return nil, s.fail(ctx, task, stepWrite, reasonTargetNotAllowed, http.StatusUnprocessableEntity, false)
 	}
-	s.step(ctx, task, stepProbe)
+	if err := s.step(ctx, task, stepProbe); err != nil {
+		return nil, err
+	}
 	status, err := s.probe(ctx, account, token)
 	switch {
 	case err != nil:
@@ -447,13 +453,17 @@ func (s *Setup) handover(ctx context.Context, task session.SetupTask, token stri
 	case status/100 != 2:
 		return nil, s.fail(ctx, task, stepProbe, reasonProbeFailed, http.StatusBadGateway, false)
 	}
-	s.step(ctx, task, stepWrite)
 	if w.cfg.SetupSecrets == nil {
 		return nil, s.fail(ctx, task, stepWrite, reasonWriteFailed, http.StatusBadGateway, false)
 	}
 	secrets, err := w.cfg.SetupSecrets(ctx)
 	if err != nil {
 		return nil, s.fail(ctx, task, stepWrite, reasonWriteFailed, http.StatusBadGateway, false)
+	}
+	// The last look at the task before the write: a task that was ended meanwhile gets no
+	// write.
+	if err := s.step(ctx, task, stepWrite); err != nil {
+		return nil, err
 	}
 	if _, err := credential.Write(ctx, secrets, account.TokenRef, token, true); err != nil {
 		switch {
@@ -467,12 +477,15 @@ func (s *Setup) handover(ctx context.Context, task session.SetupTask, token stri
 		return nil, s.fail(ctx, task, stepWrite, reasonWriteFailed, http.StatusBadGateway, false)
 	}
 	if err := w.cfg.Store.NoteTokenWritten(ctx, task.Alias, task.RequestID); err != nil {
-		log.Printf("setup alias=%s request_id=%s: the time of the write was not recorded", task.Alias, task.RequestID)
+		log.Printf("setup alias=%s request_id=%s: the task ended after the write", task.Alias, task.RequestID)
+		return nil, setupError{status: http.StatusConflict, code: errorNoOpenTask, written: true}
 	}
 	if !s.readBack(ctx, account.TokenRef, token) {
 		return nil, s.fail(ctx, task, stepWrite, reasonReadbackMismatch, http.StatusInternalServerError, true)
 	}
-	s.step(ctx, task, stepReload)
+	if err := s.step(ctx, task, stepReload); err != nil {
+		return nil, setupError{status: http.StatusConflict, code: errorNoOpenTask, written: true}
+	}
 	if _, err := w.cfg.Reload(ctx); err != nil {
 		return nil, s.fail(ctx, task, stepReload, reasonReloadFailed, http.StatusInternalServerError, true)
 	}
@@ -480,8 +493,8 @@ func (s *Setup) handover(ctx context.Context, task session.SetupTask, token stri
 	defer cancel()
 	row, err := w.cfg.Store.FinishSetup(rec, task.Alias, task.RequestID, session.SetupDone, stepComplete, reasonComplete)
 	if err != nil {
-		log.Printf("setup alias=%s request_id=%s: the end was not recorded", task.Alias, task.RequestID)
-		row = task.SetupRow
+		log.Printf("setup alias=%s request_id=%s: the task ended before it could be closed", task.Alias, task.RequestID)
+		return nil, setupError{status: http.StatusConflict, code: errorNoOpenTask, written: true}
 	}
 	s.audit(rec, task, session.SetupDone)
 	log.Printf("setup alias=%s request_id=%s step=%s result=done written=true", task.Alias, task.RequestID, stepComplete)
@@ -595,10 +608,6 @@ func (s *Setup) estimate(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	set, err := s.w.cfg.Store.SetupRows(ctx)
-	if err != nil {
-		return
-	}
 	secrets, err := s.w.cfg.SetupSecrets(ctx)
 	if err != nil {
 		log.Printf("setup: the secret store is not available to date tokens")
@@ -606,9 +615,6 @@ func (s *Setup) estimate(ctx context.Context) {
 	}
 	for _, row := range rows {
 		if row.Status != "active" && row.Status != "paused" {
-			continue
-		}
-		if known := set[row.Alias]; !known.TokenSetAt.IsZero() && !known.TokenSetEstimated {
 			continue
 		}
 		at, err := credential.Updated(ctx, secrets, row.TokenRef)

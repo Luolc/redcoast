@@ -972,3 +972,54 @@ func TestSetupNextWhenIdle(t *testing.T) {
 		t.Fatal("gateway.setup.last_asked_at is null after a login machine asked")
 	}
 }
+
+// TestSetupTaskEndedBeforeTheWrite: a task that the store ended between the quota request
+// and the write (a new process's start during a handoff, or the handover's 5 minutes)
+// gets no write and no success answer.
+func TestSetupTaskEndedBeforeTheWrite(t *testing.T) {
+	h := newSetupHarness(t, true)
+	id := h.running(t, "sample-a")
+	h.cfg.SetupSecrets = func(context.Context) (credential.Store, error) {
+		if n, err := h.store.InterruptSetups(t.Context()); err != nil || n != 1 {
+			t.Fatalf("interrupt: n=%d err=%v", n, err)
+		}
+		return h.secrets, nil
+	}
+	h.writer.cfg.SetupSecrets = h.cfg.SetupSecrets
+	status, answer, body := h.token(t, "sample-a", id, setupRun, setupToken)
+	if status != 409 || answer["error"] != "no_open_task" || answer["written"] != false {
+		t.Fatalf("%d %s", status, body)
+	}
+	if h.secrets.sets != 0 || h.secrets.creates != 0 {
+		t.Fatalf("sets=%d creates=%d for an ended task", h.secrets.sets, h.secrets.creates)
+	}
+	if got := h.setupState(t, "sample-a"); got.State != "failed" || got.Reason != "interrupted" || !got.TokenSetAt.IsZero() {
+		t.Fatalf("task = %+v", got)
+	}
+}
+
+// TestSetupDatesATokenSetByHand: an item changed by hand after the gateway wrote its
+// token dates the token, so no renewal is queued for a token that was just set; the
+// gateway's own write is not taken for a hand edit.
+func TestSetupDatesATokenSetByHand(t *testing.T) {
+	h := newSetupHarness(t, true)
+	id := h.running(t, "sample-a")
+	if status, _, body := h.token(t, "sample-a", id, setupRun, setupToken); status != 200 {
+		t.Fatalf("handover: %d %s", status, body)
+	}
+	written := h.setupState(t, "sample-a").TokenSetAt
+	// The store dates the item at the write: nothing changes.
+	h.secrets.items[0].updated = written.Add(time.Second)
+	h.writer.Setup().sweep(t.Context())
+	if got := h.setupState(t, "sample-a"); !got.TokenSetAt.Equal(written) || got.TokenSetEstimated {
+		t.Fatalf("the gateway's write was re-dated: %+v", got)
+	}
+	// 340 days later the operator sets the token by hand.
+	h.clock = h.clock.Add(340 * 24 * time.Hour)
+	h.secrets.items[0].updated = h.clock
+	h.writer.Setup().sweep(t.Context())
+	got := h.setupState(t, "sample-a")
+	if !got.TokenSetAt.Equal(h.clock) || !got.TokenSetEstimated || got.State == "requested" {
+		t.Fatalf("a hand-set token was not dated: %+v", got)
+	}
+}
