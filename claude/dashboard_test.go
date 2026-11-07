@@ -523,13 +523,14 @@ func TestQuotaRefreshEndpoint(t *testing.T) {
 	}
 }
 
-// newTestDashboard is NewDashboard with the snapshot computed once, as the background
-// refresh would have done; a test that needs a newer one calls d.refresh again.
+// newTestDashboard is NewDashboard with the snapshot computed now and again after every
+// reload, as the background refresh would have done; a test that needs a newer one calls
+// d.refresh.
 func newTestDashboard(t *testing.T, egress *Egress, cfg DashboardConfig) *Dashboard {
 	t.Helper()
 	d := NewDashboard(egress, cfg)
 	if d.snapshot != nil {
-		d.refresh(t.Context())
+		egress.accounts.onSwap(func(*AccountSet) { d.refresh(context.Background()) })
 	}
 	return d
 }
