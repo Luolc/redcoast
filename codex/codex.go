@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Luolc/redcoast/claude"
+	"github.com/Luolc/redcoast/session"
 )
 
 // Upstream is the base URL of the ChatGPT backend's Codex API, the only upstream other
@@ -42,13 +43,15 @@ func New(accountsDir, tokenURL string) claude.Provider {
 		Screen:     screen,
 		NotSession: notSession,
 		Account:    l.account,
-		Readings:   quotaReadings,
-		Usage:      usage,
-		Refused:    l.refused,
-		Renew:      r.renew,
-		Import:     r.importLogin,
-		Problems:   l.problems,
-		Guard:      guard,
+		Readings: func(header http.Header, source string, _ func(window, reason, status string)) []session.Reading {
+			return quotaReadings(header, source)
+		},
+		Usage:    usage,
+		Refused:  l.refused,
+		Renew:    r.renew,
+		Import:   r.importLogin,
+		Problems: l.problems,
+		Guard:    guard,
 	}
 }
 

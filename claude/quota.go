@@ -26,18 +26,27 @@ func parseUtilization(value string) (float64, bool) {
 // response into one reading per window. A window whose utilization is missing or
 // malformed, or whose status or reset is present but malformed, yields no reading, so
 // the previous good reading of that window is kept. source names where the reading
-// came from: response, 429 or refresh.
-func quotaReadings(header http.Header, source string) []session.Reading {
+// came from: response, 429 or refresh. A window left out is reported to dropped, when
+// it is not nil, with the reason (absent, bad_status or bad_reset) and, for bad_status,
+// the status header's value, which is not a credential.
+func quotaReadings(header http.Header, source string, dropped func(window, reason, status string)) []session.Reading {
+	drop := func(window, reason, status string) {
+		if dropped != nil {
+			dropped(window, reason, status)
+		}
+	}
 	var readings []session.Reading
 	for _, window := range []string{session.Window5h, session.Window7d} {
 		prefix := "Anthropic-Ratelimit-Unified-" + window + "-"
 		utilization, ok := parseUtilization(header.Get(prefix + "Utilization"))
 		if !ok {
+			drop(window, "absent", "")
 			continue
 		}
 		reading := session.Reading{Window: window, Utilization: utilization, Source: source}
 		if status := header.Get(prefix + "Status"); status != "" {
 			if status != "allowed" && status != "allowed_warning" && status != "rejected" {
+				drop(window, "bad_status", status)
 				continue
 			}
 			reading.Status = status
@@ -45,6 +54,7 @@ func quotaReadings(header http.Header, source string) []session.Reading {
 		if reset := header.Get(prefix + "Reset"); reset != "" {
 			seconds, err := strconv.ParseInt(reset, 10, 64)
 			if err != nil || seconds <= 0 {
+				drop(window, "bad_reset", "")
 				continue
 			}
 			reading.ResetAt = time.Unix(seconds, 0).UTC()

@@ -32,8 +32,9 @@ type Provider struct {
 	// returns what builds the account's credential. Its errors name the alias and the
 	// field, never a value.
 	Account func(alias string, document []byte) (CredentialSource, error)
-	// Readings parses an upstream response's quota readings, recorded under source.
-	Readings func(header http.Header, source string) []session.Reading
+	// Readings parses an upstream response's quota readings, recorded under source. It
+	// reports each window it leaves out to dropped, when that is not nil.
+	Readings func(header http.Header, source string, dropped func(window, reason, status string)) []session.Reading
 	// Usage reads what one JSON document of a 200 response to a forwarded request says
 	// of its model and tokens: the whole body of a JSON response, or the data of one
 	// event of an event stream. The traffic row keeps what the response's documents
