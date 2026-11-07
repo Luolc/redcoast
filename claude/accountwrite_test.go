@@ -929,3 +929,64 @@ func TestUpdatePlan(t *testing.T) {
 		t.Fatalf("spare audit = %+v", audit)
 	}
 }
+
+// TestReceiverEmailAndProxyKinds checks the receiver email and the proxy's provider and
+// type: all three are optional on create and empty when left out, a create and an edit
+// set them, they are audited like the email, a bare address is the only receiver email
+// that passes, and an edit of them reloads nothing.
+func TestReceiverEmailAndProxyKinds(t *testing.T) {
+	w := newWriteHarness(t)
+	configOfAccount := func(answer map[string]any) (receiver, provider, kind any) {
+		account := answer["account"].(map[string]any)
+		proxy := account["proxy"].(map[string]any)
+		return account["receiver_email"], proxy["provider"], proxy["type"]
+	}
+	// Left out, they are empty.
+	status, answer, body := w.serve(t, request("POST", "/accounts", w.newBody()))
+	if receiver, provider, kind := configOfAccount(answer); status != 200 || receiver != "" || provider != "" || kind != "" {
+		t.Fatalf("create without them: %d %s", status, body)
+	}
+	// A create sets them.
+	withThem := strings.Replace(w.bodyFor("sample-two"), `"proxy":{`, `"receiver_email":"receiver@example.test","proxy":{"provider":"example-provider","type":"dedicated-isp",`, 1)
+	status, answer, body = w.serve(t, request("POST", "/accounts", withThem))
+	if receiver, provider, kind := configOfAccount(answer); status != 200 || receiver != "receiver@example.test" || provider != "example-provider" || kind != "dedicated-isp" {
+		t.Fatalf("create with them: %d %s", status, body)
+	}
+	audit, err := w.store.AccountAudit(t.Context(), "sample-two")
+	if err != nil || len(audit) == 0 || audit[0].Changes["receiver_email"].New != "receiver@example.test" || audit[0].Changes["proxy_provider"].New != "example-provider" || audit[0].Changes["proxy_type"].New != "dedicated-isp" {
+		t.Fatalf("audit = %+v, %v", audit, err)
+	}
+	if strings.Contains(w.logs.String(), "receiver@example.test") {
+		t.Fatalf("log holds the receiver email: %q", w.logs.String())
+	}
+	// Refused values, each naming its field and writing nothing.
+	for _, test := range []struct{ name, body, field string }{
+		{"display_name", `{"rev":1,"receiver_email":"Someone <receiver@example.test>"}`, "receiver_email"},
+		{"quoted_name", `{"rev":1,"receiver_email":"\"Someone\" <receiver@example.test>"}`, "receiver_email"},
+		{"not_an_address", `{"rev":1,"receiver_email":"receiver"}`, "receiver_email"},
+		{"two_addresses", `{"rev":1,"receiver_email":"a@example.test, b@example.test"}`, "receiver_email"},
+		{"bad_provider", `{"rev":1,"proxy":{"provider":"a b"}}`, "proxy.provider"},
+		{"bad_type", `{"rev":1,"proxy":{"type":"sk-ant-oat01-PASTED value"}}`, "proxy.type"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := w.state(t)
+			status, answer, body := w.serve(t, request("PATCH", "/accounts/sample-a", test.body))
+			if status != 400 || answer["field"] != test.field || strings.Contains(body, "PASTED") || w.state(t) != before {
+				t.Fatalf("%d %s", status, body)
+			}
+		})
+	}
+	badCreate := strings.Replace(w.bodyFor("sample-three"), `"proxy":{`, `"receiver_email":"Someone <receiver@example.test>","proxy":{`, 1)
+	if status, answer, _ := w.serve(t, request("POST", "/accounts", badCreate)); status != 400 || answer["field"] != "receiver_email" {
+		t.Fatalf("create with a display name: %d %v", status, answer)
+	}
+	// An edit of a served account sets them and reloads nothing, and clearing them works.
+	status, answer, body = w.serve(t, request("PATCH", "/accounts/sample-a", `{"rev":1,"receiver_email":"r2@example.test","proxy":{"provider":"p","type":"t"}}`))
+	if receiver, provider, kind := configOfAccount(answer); status != 200 || answer["reload"] != nil || receiver != "r2@example.test" || provider != "p" || kind != "t" {
+		t.Fatalf("edit: %d %s", status, body)
+	}
+	status, answer, body = w.serve(t, request("PATCH", "/accounts/sample-a", `{"rev":2,"receiver_email":"","proxy":{"provider":"","type":""}}`))
+	if receiver, provider, kind := configOfAccount(answer); status != 200 || receiver != "" || provider != "" || kind != "" {
+		t.Fatalf("clearing: %d %s", status, body)
+	}
+}

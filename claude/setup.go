@@ -313,15 +313,16 @@ func (w *AccountWriter) setupRequest(r *http.Request, alias string, body *setupB
 // nextTask is the task `setup next` answers: what a login machine needs of the account,
 // as references and addresses, never the values of the credentials.
 type nextTask struct {
-	Alias       string        `json:"alias"`
-	Action      string        `json:"action"`
-	RequestID   string        `json:"request_id"`
-	RequestedAt time.Time     `json:"requested_at"`
-	Status      string        `json:"status"`
-	Source      taskSource    `json:"source"`
-	Email       string        `json:"email"`
-	DeviceID    string        `json:"device_id"`
-	Proxy       taskProxyView `json:"proxy"`
+	Alias         string        `json:"alias"`
+	Action        string        `json:"action"`
+	RequestID     string        `json:"request_id"`
+	RequestedAt   time.Time     `json:"requested_at"`
+	Status        string        `json:"status"`
+	Source        taskSource    `json:"source"`
+	Email         string        `json:"email"`
+	ReceiverEmail string        `json:"receiver_email"`
+	DeviceID      string        `json:"device_id"`
+	Proxy         taskProxyView `json:"proxy"`
 }
 
 type taskProxyView struct {
@@ -370,7 +371,7 @@ func (s *Setup) handedOut(task *session.SetupTask, err error) (*nextTask, error)
 	}
 	a := task.Account
 	log.Printf("setup alias=%s request_id=%s result=handed_out action=%s", task.Alias, task.RequestID, task.Action)
-	return &nextTask{Alias: task.Alias, Action: task.Action, RequestID: task.RequestID, RequestedAt: task.RequestedAt, Status: a.Status, Source: sourceOfRow(task.SetupRow), Email: a.Email, DeviceID: a.DeviceID,
+	return &nextTask{Alias: task.Alias, Action: task.Action, RequestID: task.RequestID, RequestedAt: task.RequestedAt, Status: a.Status, Source: sourceOfRow(task.SetupRow), Email: a.Email, ReceiverEmail: a.ReceiverEmail, DeviceID: a.DeviceID,
 		Proxy: taskProxyView{Host: a.ProxyHost, Port: a.ProxyPort, UsernameRef: a.UsernameRef, PasswordRef: a.PasswordRef, ExpectedIP: a.ExpectedIP, Direct: a.Direct}}, nil
 }
 

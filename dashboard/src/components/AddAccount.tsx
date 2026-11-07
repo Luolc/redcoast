@@ -9,6 +9,8 @@ import {
   validEmail,
   validIp,
   validPlan,
+  validProxyKind,
+  validReceiver,
   validPort,
   validUuid,
   writeOffReason,
@@ -84,6 +86,9 @@ function Nav({
 interface Form {
   alias: string;
   email: string;
+  receiver: string;
+  provider: string;
+  kind: string;
   device: string;
   host: string;
   port: string;
@@ -97,6 +102,9 @@ function FillIn({ data, reload }: { data: Dashboard; reload: () => void }) {
   const [f, setF] = useState<Form>({
     alias: "",
     email: "",
+    receiver: "",
+    provider: "",
+    kind: "",
     device: "",
     host: "",
     port: "",
@@ -117,6 +125,15 @@ function FillIn({ data, reload }: { data: Dashboard; reload: () => void }) {
         ? "An account has this alias"
         : undefined,
     email: validEmail(f.email) ? undefined : "An email address",
+    receiver: validReceiver(f.receiver)
+      ? undefined
+      : "An email address, no name",
+    provider: validProxyKind(f.provider)
+      ? undefined
+      : "Letters, digits, . - and _, up to 64",
+    kind: validProxyKind(f.kind)
+      ? undefined
+      : "Letters, digits, . - and _, up to 64",
     device: validDevice(f.device) ? undefined : "64 lowercase hex characters",
     port: validPort(f.port) ? undefined : "A port from 1 to 65535",
     ip: validIp(f.ip) ? undefined : "An IPv4 address, like 192.0.2.10",
@@ -139,7 +156,11 @@ function FillIn({ data, reload }: { data: Dashboard; reload: () => void }) {
       device_id: f.device,
       access: "gateway",
       plan: f.plan,
+      // Left out when empty, so the gateway stores nothing for it.
+      ...(f.receiver === "" ? {} : { receiver_email: f.receiver }),
       proxy: {
+        ...(f.provider === "" ? {} : { provider: f.provider }),
+        ...(f.kind === "" ? {} : { type: f.kind }),
         direct: false,
         host: f.host.trim(),
         port: Number(f.port),
@@ -186,6 +207,30 @@ function FillIn({ data, reload }: { data: Dashboard; reload: () => void }) {
             error={shown("email")}
             hint="Shown only"
             placeholder="name@example.test"
+          />
+          <TextField
+            label="Receiver email"
+            value={f.receiver}
+            onChange={set("receiver")}
+            error={shown("receiver")}
+            hint="Optional; the address that receives the account's mail"
+            placeholder="inbox@example.test"
+          />
+          <TextField
+            label="Proxy provider"
+            mono
+            value={f.provider}
+            onChange={set("provider")}
+            error={shown("provider")}
+            hint="Optional"
+          />
+          <TextField
+            label="Proxy type"
+            mono
+            value={f.kind}
+            onChange={set("kind")}
+            error={shown("kind")}
+            hint="Optional"
           />
           <TextField
             label="Device ID"

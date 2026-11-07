@@ -182,6 +182,8 @@ interface Plan {
 // The proxy block of an account's row in the accounts table. The references
 // are names in the secret manager, never values.
 interface ProxyConfig {
+  provider: string; // empty when not set
+  type: string; // empty when not set
   direct: boolean;
   host: string;
   port: number;
@@ -203,6 +205,7 @@ export interface Verification {
 export interface AccountConfig {
   alias: string;
   email: string;
+  receiver_email: string; // empty when not set
   access: string; // direct or gateway
   status: string; // testing, active, paused, suspended or retired
   token_ref: string;
@@ -471,10 +474,13 @@ const isSetupBlock = object<SetupBlock>({
 const isAccountConfig: Guard<AccountConfig> = object<AccountConfig>({
   alias: isString,
   email: isString,
+  receiver_email: isString,
   access: isString,
   status: isString,
   token_ref: isString,
   proxy: object<ProxyConfig>({
+    provider: isString,
+    type: isString,
     direct: isBoolean,
     host: isString,
     port: isNumber,

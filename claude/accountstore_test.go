@@ -461,3 +461,95 @@ func TestDashboardShowsAccountConfig(t *testing.T) {
 		t.Fatalf("answer without a table: %s", recorder.Body.String())
 	}
 }
+
+// realShape is an account file with every key the accounts table holds, in the order the
+// export writes them.
+const realShape = `email: sample-a@example.test
+receiver_email: receiver-a@example.test
+access: gateway
+status: active
+oauth_token: op://example-vault/token-sample-a/credential
+device_id: ` + syntheticDeviceID + `
+account_uuid: ` + syntheticAccountUUID + `
+proxy:
+  provider: example-provider
+  type: dedicated-isp
+  host: proxy.example.test
+  port: 8080
+  expected_egress_ip: 192.0.2.1
+  username_ref: op://example-proxies/proxy-account/username
+  password_ref: op://example-proxies/proxy-account/password
+`
+
+// TestImportKeepsEveryKey checks that the receiver email and the proxy's provider and type
+// are imported as columns, that the export writes the file back as it was, and that
+// importing the export gives the same rows.
+func TestImportKeepsEveryKey(t *testing.T) {
+	h := newHarness(t)
+	importFixture(t, h, writeInventory(t, map[string]string{"sample-a.yaml": realShape}))
+	rows, _, err := h.store.Accounts(t.Context())
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	if got := rows[0]; got.ReceiverEmail != "receiver-a@example.test" || got.ProxyProvider != "example-provider" || got.ProxyType != "dedicated-isp" {
+		t.Fatalf("row = %+v", got)
+	}
+	out := filepath.Join(t.TempDir(), "export")
+	if err := ExportInventory(out, rows); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(out, "sample-a.yaml")); err != nil || string(data) != realShape {
+		t.Fatalf("exported file:\n%s\nwant:\n%s\n%v", data, realShape, err)
+	}
+	again := newHarness(t)
+	importFixture(t, again, out)
+	rows2, _, err := again.store.Accounts(t.Context())
+	if err != nil || len(rows2) != 1 {
+		t.Fatalf("rows after the round trip = %+v, %v", rows2, err)
+	}
+	for _, row := range []*session.AccountRow{&rows[0], &rows2[0]} {
+		row.CreatedAt, row.UpdatedAt = time.Time{}, time.Time{}
+	}
+	if rows[0] != rows2[0] {
+		t.Fatalf("round trip changed the row:\n%+v\n%+v", rows[0], rows2[0])
+	}
+}
+
+// TestImportRefusesUnknownKeys checks that a key no column holds, at the top or under
+// proxy, refuses the whole import, naming the file and the key and never the value, and
+// that the same files without the keys import.
+func TestImportRefusesUnknownKeys(t *testing.T) {
+	const secretValue = "VALUE-NOT-TO-BE-SHOWN"
+	h := newHarness(t)
+	dir := writeInventory(t, map[string]string{
+		"sample-a.yaml": realShape,
+		"sample-b.yaml": strings.Replace(realShape, "access:", "notes: "+secretValue+"\naccess:", 1),
+		"sample-c.yaml": strings.Replace(realShape, "  host:", "  region: "+secretValue+"\n  host:", 1),
+	})
+	imported, err := ImportInventory(t.Context(), h.store, dir, Claude)
+	if err == nil || imported {
+		t.Fatalf("import = %v, %v", imported, err)
+	}
+	for _, want := range []string{"sample-b: notes: unknown key", "sample-c: proxy.region: unknown key"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q lacks %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), secretValue) || strings.Contains(err.Error(), "sample-a:") {
+		t.Fatalf("error = %q", err)
+	}
+	if rows, initialized, err := h.store.Accounts(t.Context()); err != nil || initialized || len(rows) != 0 {
+		t.Fatalf("table after a refused import: %d rows, initialized %v, %v", len(rows), initialized, err)
+	}
+	// Control arm: without the two keys the same directory imports, and a start from
+	// the directory is not made stricter by them.
+	if _, _, err := readInventory(dir, Claude); err != nil {
+		t.Fatalf("a start from the directory refused unknown keys: %v", err)
+	}
+	for _, name := range []string{"sample-b", "sample-c"} {
+		if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(strings.ReplaceAll(realShape, "sample-a", name)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	importFixture(t, h, dir)
+}

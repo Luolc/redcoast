@@ -42,29 +42,35 @@ CREATE TABLE accounts (
 // (op://, env:// or file://), never credential values. An empty string or a zero
 // port is a field the account does not have.
 type AccountRow struct {
-	Alias       string    `json:"alias"`
-	Email       string    `json:"email"`
-	Access      string    `json:"access"` // direct or gateway
-	Status      string    `json:"status"` // testing, active, paused, suspended or retired
-	TokenRef    string    `json:"token_ref"`
-	Direct      bool      `json:"direct"` // the proxy block's direct: the gateway's own address is the exit
-	ProxyHost   string    `json:"proxy_host"`
-	ProxyPort   int       `json:"proxy_port"`
-	ExpectedIP  string    `json:"expected_egress_ip"`
-	UsernameRef string    `json:"proxy_username_ref"`
-	PasswordRef string    `json:"proxy_password_ref"`
-	DeviceID    string    `json:"device_id"`
-	AccountUUID string    `json:"account_uuid"`
-	Rev         int64     `json:"rev"` // starts at 1; the version an edit is made against
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Alias       string `json:"alias"`
+	Email       string `json:"email"`
+	Access      string `json:"access"` // direct or gateway
+	Status      string `json:"status"` // testing, active, paused, suspended or retired
+	TokenRef    string `json:"token_ref"`
+	Direct      bool   `json:"direct"` // the proxy block's direct: the gateway's own address is the exit
+	ProxyHost   string `json:"proxy_host"`
+	ProxyPort   int    `json:"proxy_port"`
+	ExpectedIP  string `json:"expected_egress_ip"`
+	UsernameRef string `json:"proxy_username_ref"`
+	PasswordRef string `json:"proxy_password_ref"`
+	DeviceID    string `json:"device_id"`
+	AccountUUID string `json:"account_uuid"`
+	// ReceiverEmail is the address that receives the account's mail, the inventory's
+	// receiver_email; empty when the account has none.
+	ReceiverEmail string `json:"receiver_email"`
+	// ProxyProvider and ProxyType are the inventory's proxy.provider and proxy.type.
+	ProxyProvider string    `json:"proxy_provider"`
+	ProxyType     string    `json:"proxy_type"`
+	Rev           int64     `json:"rev"` // starts at 1; the version an edit is made against
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 
 	Verify Verification `json:"verify"` // the last run of the three checks, voided by a change of exit or reference
 }
 
 // accountColumns are the columns of an AccountRow, in the order scanRow reads them.
 const accountColumns = `alias, email, access, status, token_ref, proxy_direct, proxy_host, proxy_port, expected_egress_ip,
-	proxy_username_ref, proxy_password_ref, device_id, account_uuid, rev, created_at, updated_at, token_ok, egress_ok, probe_ok, verified_at`
+	proxy_username_ref, proxy_password_ref, device_id, account_uuid, receiver_email, proxy_provider, proxy_type, rev, created_at, updated_at, token_ok, egress_ok, probe_ok, verified_at`
 
 // scanner is a row of a query, *sql.Row or *sql.Rows.
 type scanner interface{ Scan(dest ...any) error }
@@ -76,7 +82,7 @@ func scanRow(r scanner) (AccountRow, error) {
 	var tokenOK, egressOK, probeOK sql.NullBool
 	var verified sql.NullInt64
 	if err := r.Scan(&row.Alias, &row.Email, &row.Access, &row.Status, &row.TokenRef, &row.Direct, &row.ProxyHost, &row.ProxyPort,
-		&row.ExpectedIP, &row.UsernameRef, &row.PasswordRef, &row.DeviceID, &row.AccountUUID, &row.Rev, &created, &updated,
+		&row.ExpectedIP, &row.UsernameRef, &row.PasswordRef, &row.DeviceID, &row.AccountUUID, &row.ReceiverEmail, &row.ProxyProvider, &row.ProxyType, &row.Rev, &created, &updated,
 		&tokenOK, &egressOK, &probeOK, &verified); err != nil {
 		return AccountRow{}, err
 	}
@@ -94,6 +100,22 @@ func boolPointer(b sql.NullBool) *bool {
 		return nil
 	}
 	return &b.Bool
+}
+
+// schemaV13 adds the inventory keys the table did not keep: the receiver email, the proxy's
+// provider and type.
+const schemaV13 = `
+ALTER TABLE accounts ADD COLUMN receiver_email TEXT NOT NULL DEFAULT '';
+ALTER TABLE accounts ADD COLUMN proxy_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE accounts ADD COLUMN proxy_type TEXT NOT NULL DEFAULT '';
+`
+
+// migrateToV13 adds the columns of schemaV13; the rows it finds have them empty.
+func migrateToV13(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, schemaV13); err != nil {
+		return fmt.Errorf("session store migration v13: %v", err)
+	}
+	return nil
 }
 
 // accountRow reads account alias inside tx, ErrAccountNotFound when there is none.
@@ -137,10 +159,11 @@ func (s *Store) ImportAccounts(ctx context.Context, rows []AccountRow) (bool, er
 	now := s.now()
 	for _, row := range rows {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO accounts (alias, email, access, status, token_ref, proxy_direct, proxy_host, proxy_port,
-			expected_egress_ip, proxy_username_ref, proxy_password_ref, device_id, account_uuid, rev, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+			expected_egress_ip, proxy_username_ref, proxy_password_ref, device_id, account_uuid, receiver_email, proxy_provider, proxy_type, rev, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 			row.Alias, row.Email, row.Access, row.Status, row.TokenRef, row.Direct, row.ProxyHost, row.ProxyPort,
-			row.ExpectedIP, row.UsernameRef, row.PasswordRef, row.DeviceID, row.AccountUUID, now, now); err != nil {
+			row.ExpectedIP, row.UsernameRef, row.PasswordRef, row.DeviceID, row.AccountUUID,
+			row.ReceiverEmail, row.ProxyProvider, row.ProxyType, now, now); err != nil {
 			return false, fmt.Errorf("import accounts: %s: %v", row.Alias, err)
 		}
 	}

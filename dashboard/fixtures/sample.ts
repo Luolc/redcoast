@@ -23,10 +23,13 @@ export function sampleDashboard(now: Date): Dashboard {
   ): AccountConfig => ({
     alias,
     email: `${alias.slice(-2)}@example.test`,
+    receiver_email: verified ? `receiver-${alias.slice(-2)}@example.test` : "",
     access: "gateway",
     status,
     token_ref: `op://sample-vault/claude-oauth-token-${alias}/credential`,
     proxy: {
+      provider: verified ? "example-provider" : "",
+      type: verified ? "dedicated-isp" : "",
       direct: false,
       host: "proxy-1.example.test",
       port,

@@ -61,16 +61,52 @@ type adminCreateBody struct {
 	Plan     *string         `json:"plan"`
 	Proxy    *adminProxyBody `json:"proxy"`
 	DeviceID *string         `json:"device_id"`
-	Source   *sourceBody     `json:"source"`
+	// ReceiverEmail is optional.
+	ReceiverEmail *string     `json:"receiver_email"`
+	Source        *sourceBody `json:"source"`
 }
 
 // adminProxyBody is the proxy of an adminCreateBody.
 type adminProxyBody struct {
+	Provider    *string `json:"provider"`
+	Type        *string `json:"type"`
 	Host        *string `json:"host"`
 	Port        *int    `json:"port"`
 	ExpectedIP  *string `json:"expected_egress_ip"`
 	UsernameRef *string `json:"username_ref"`
 	PasswordRef *string `json:"password_ref"`
+}
+
+// adminSetBody is the body of PATCH /accounts/{alias} of the management socket: the
+// revision the edit is made against and the three fields it may change, a key left out
+// staying as it is. Nothing else of an account is edited through the socket.
+type adminSetBody struct {
+	Rev           *int64  `json:"rev"`
+	ReceiverEmail *string `json:"receiver_email"`
+	// DeviceID is accepted for a testing account only.
+	DeviceID *string `json:"device_id"`
+	Proxy    *struct {
+		Provider *string `json:"provider"`
+		Type     *string `json:"type"`
+	} `json:"proxy"`
+	Source *sourceBody `json:"source"`
+}
+
+// checkDeviceIDSettable refuses a device ID that is not 64 lower-case hex digits and one
+// for an account whose status is not testing: the identity of a served or retired account
+// does not change under it. The duplicate check is the edit's own.
+func (w *AccountWriter) checkDeviceIDSettable(ctx context.Context, alias, deviceID string) error {
+	if !deviceIDShape.MatchString(deviceID) {
+		return fieldProblem("device_id", "not 64 lower-case hex digits")
+	}
+	row, err := w.cfg.Store.Account(ctx, alias)
+	if err != nil {
+		return storeError(err)
+	}
+	if row.Status != "testing" {
+		return writeError{status: http.StatusConflict, message: "the device ID is set only on a testing account", check: "status", code: codeNotReady}
+	}
+	return nil
 }
 
 // adminRevBody is the body of verify, activate and setup request of the management socket.
@@ -101,6 +137,18 @@ func (a *Admin) handleAccountWrites(mux *http.ServeMux) {
 	mux.HandleFunc("POST /accounts", adminWrite(a, actionCreate, func(w *AccountWriter, r *http.Request, _ string, body *adminCreateBody, entry session.AuditEntry) (any, error) {
 		return w.create(r, "", body.toCreate(), entry)
 	}, func(b *adminCreateBody) *sourceBody { return b.Source }, false))
+	mux.HandleFunc("PATCH /accounts/{alias}", adminWrite(a, actionUpdate, func(w *AccountWriter, r *http.Request, alias string, body *adminSetBody, entry session.AuditEntry) (any, error) {
+		patch := &patchBody{Rev: body.Rev, ReceiverEmail: body.ReceiverEmail, DeviceID: body.DeviceID}
+		if body.DeviceID != nil {
+			if err := w.checkDeviceIDSettable(r.Context(), alias, *body.DeviceID); err != nil {
+				return nil, err
+			}
+		}
+		if body.Proxy != nil {
+			patch.Proxy = &proxyBody{Provider: body.Proxy.Provider, Type: body.Proxy.Type}
+		}
+		return w.update(r, alias, patch, entry)
+	}, func(b *adminSetBody) *sourceBody { return b.Source }, false))
 	mux.HandleFunc("POST /accounts/{alias}/verify", adminWrite(a, actionVerify, func(w *AccountWriter, r *http.Request, alias string, body *adminRevBody, entry session.AuditEntry) (any, error) {
 		return w.verify(r, alias, &revBody{Rev: body.Rev}, entry)
 	}, func(b *adminRevBody) *sourceBody { return b.Source }, false))
@@ -122,10 +170,10 @@ func (a *Admin) handleAccountWrites(mux *http.ServeMux) {
 // gateway path behind the proxy b names.
 func (b *adminCreateBody) toCreate() *createBody {
 	access := "gateway"
-	out := &createBody{Alias: b.Alias, Email: b.Email, Plan: b.Plan, Access: &access, DeviceID: b.DeviceID}
+	out := &createBody{Alias: b.Alias, Email: b.Email, Plan: b.Plan, Access: &access, DeviceID: b.DeviceID, ReceiverEmail: b.ReceiverEmail}
 	if b.Proxy != nil {
 		direct := false
-		out.Proxy = &proxyBody{Direct: &direct, Host: b.Proxy.Host, Port: b.Proxy.Port, ExpectedIP: b.Proxy.ExpectedIP,
+		out.Proxy = &proxyBody{Provider: b.Proxy.Provider, Type: b.Proxy.Type, Direct: &direct, Host: b.Proxy.Host, Port: b.Proxy.Port, ExpectedIP: b.Proxy.ExpectedIP,
 			UsernameRef: b.Proxy.UsernameRef, PasswordRef: b.Proxy.PasswordRef}
 	}
 	return out

@@ -13,7 +13,8 @@ import (
 type agentFlags struct {
 	sourceKind, waitUntil, requestID, thread, ts string
 	email, plan, host, ip, userRef, passRef      string
-	deviceID                                     string
+	deviceID, receiverEmail                      string
+	provider, kind                               string
 	port                                         int
 	rev                                          int64
 	given                                        map[string]bool
@@ -33,6 +34,9 @@ func registerAgentFlags(flags *flag.FlagSet, subcommand string) *agentFlags {
 	flags.StringVar(&f.ts, "source-ts", "", "ts of the Slack message a write came from")
 	flags.StringVar(&f.email, "email", "", "Login email of a new account")
 	flags.StringVar(&f.deviceID, "device-id", "", "Device ID of a new account, 64 lower-case hex digits")
+	flags.StringVar(&f.receiverEmail, "receiver-email", "", "Email address that receives the new account's mail, optional")
+	flags.StringVar(&f.provider, "proxy-provider", "", "Provider of the new account's proxy, optional")
+	flags.StringVar(&f.kind, "proxy-type", "", "Type of the new account's proxy, optional")
 	flags.StringVar(&f.plan, "plan", "", "Plan of a new account")
 	flags.StringVar(&f.host, "proxy-host", "", "Proxy host of a new account")
 	flags.IntVar(&f.port, "proxy-port", 0, "Proxy port of a new account")
@@ -110,13 +114,17 @@ func accountAgentCommand(a *agentFlags, socket string, rest []string) (adminComm
 		cmd.method, cmd.path, cmd.timeout = http.MethodGet, "/accounts/"+alias, 10*time.Second
 	case "create":
 		fields := []string{"email", "device-id", "plan", "proxy-host", "proxy-port", "expected-egress-ip", "proxy-username-ref", "proxy-password-ref", "source-thread", "source-ts"}
-		if !a.only(fields...) || !a.has(fields...) {
+		if !a.only(append([]string{"receiver-email", "proxy-provider", "proxy-type"}, fields...)...) || !a.has(fields...) {
 			return adminCommand{}, errAdminUsage
 		}
 		cmd.path = "/accounts"
-		cmd.body = map[string]any{"alias": alias, "email": a.email, "device_id": a.deviceID, "plan": a.plan, "source": a.source(),
-			"proxy": map[string]any{"host": a.host, "port": a.port, "expected_egress_ip": a.ip, "username_ref": a.userRef, "password_ref": a.passRef}}
+		cmd.body = a.createBody(alias)
 		cmd.timeout = 30 * time.Second
+	case "set":
+		if !a.only("rev", "receiver-email", "device-id", "proxy-provider", "proxy-type", "source-thread", "source-ts") || !a.has("rev", "source-thread", "source-ts") || !a.setsAField() {
+			return adminCommand{}, errAdminUsage
+		}
+		cmd.method, cmd.path, cmd.body = http.MethodPatch, "/accounts/"+alias, a.setBody()
 	case "verify", "activate":
 		required := []string{"source-thread", "source-ts"}
 		if rest[0] == "activate" {
@@ -130,6 +138,49 @@ func accountAgentCommand(a *agentFlags, socket string, rest []string) (adminComm
 		return adminCommand{}, errAdminUsage
 	}
 	return cmd, nil
+}
+
+// createBody is the body of `account create`: the optional flags are in it only when given.
+func (a *agentFlags) createBody(alias string) map[string]any {
+	proxy := map[string]any{"host": a.host, "port": a.port, "expected_egress_ip": a.ip, "username_ref": a.userRef, "password_ref": a.passRef}
+	body := map[string]any{"alias": alias, "email": a.email, "device_id": a.deviceID, "plan": a.plan, "source": a.source(), "proxy": proxy}
+	if a.given["receiver-email"] {
+		body["receiver_email"] = a.receiverEmail
+	}
+	if a.given["proxy-provider"] {
+		proxy["provider"] = a.provider
+	}
+	if a.given["proxy-type"] {
+		proxy["type"] = a.kind
+	}
+	return body
+}
+
+// setsAField reports whether a flag of `account set` that names a field is given.
+func (a *agentFlags) setsAField() bool {
+	return a.given["receiver-email"] || a.given["device-id"] || a.given["proxy-provider"] || a.given["proxy-type"]
+}
+
+// setBody is the body of `account set`: the fields given, an empty value clearing one.
+func (a *agentFlags) setBody() map[string]any {
+	body := a.revBody()
+	if a.given["receiver-email"] {
+		body["receiver_email"] = a.receiverEmail
+	}
+	if a.given["device-id"] {
+		body["device_id"] = a.deviceID
+	}
+	proxy := map[string]any{}
+	if a.given["proxy-provider"] {
+		proxy["provider"] = a.provider
+	}
+	if a.given["proxy-type"] {
+		proxy["type"] = a.kind
+	}
+	if len(proxy) > 0 {
+		body["proxy"] = proxy
+	}
+	return body
 }
 
 // accountCommandTimeout bounds a verify or an activate: the gateway's three checks, each

@@ -69,6 +69,7 @@ export function writeOffReason(d: Dashboard): string | null {
 const ALIAS_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const PLAN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 const EMAIL = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
+const PROXY_KIND = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const DEVICE = /^[0-9a-f]{64}$/;
 const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
@@ -94,6 +95,16 @@ export function validEmail(v: string): boolean {
   return v.length <= 254 && EMAIL.test(v);
 }
 
+/** The receiver email is optional: empty, or a bare address. */
+export function validReceiver(v: string): boolean {
+  return v === "" || validEmail(v);
+}
+
+/** The proxy's provider and type are optional: empty, or a short word. */
+export function validProxyKind(v: string): boolean {
+  return v === "" || PROXY_KIND.test(v);
+}
+
 export function validUuid(v: string): boolean {
   return UUID.test(v);
 }
@@ -111,6 +122,9 @@ export interface Draft {
   ip: string;
   device: string;
   uuid: string;
+  receiver: string;
+  provider: string;
+  kind: string;
   // The proxy login: the index in the gateway's list of those in use.
   login: string;
 }
@@ -137,6 +151,9 @@ export function draftOf(m: Managed, options: ProxyRefOption[]): Draft {
     ip: c?.proxy.expected_egress_ip ?? "",
     device: c?.device_id ?? "",
     uuid: c?.account_uuid ?? "",
+    receiver: c?.receiver_email ?? "",
+    provider: c?.proxy.provider ?? "",
+    kind: c?.proxy.type ?? "",
     login: loginIndex(
       options,
       c?.proxy.username_ref ?? "",
@@ -153,6 +170,9 @@ const DRAFT_KEYS: (keyof Draft)[] = [
   "ip",
   "device",
   "uuid",
+  "receiver",
+  "provider",
+  "kind",
   "login",
 ];
 
@@ -164,6 +184,9 @@ const DRAFT_LABELS: Record<keyof Draft, string> = {
   ip: "Expected egress IP",
   device: "Device ID",
   uuid: "Account UUID",
+  receiver: "Receiver email",
+  provider: "Proxy provider",
+  kind: "Proxy type",
   login: "Proxy login",
 };
 
@@ -181,6 +204,10 @@ export function draftErrors(
   if (d.plan !== "" && !validPlan(d.plan))
     e.plan = "Lowercase letters, digits, . - and _, up to 32";
   if (d.uuid !== "" && !validUuid(d.uuid)) e.uuid = "Not a UUID";
+  if (!validReceiver(d.receiver)) e.receiver = "An email address, no name";
+  if (!validProxyKind(d.provider))
+    e.provider = "Letters, digits, . - and _, up to 64";
+  if (!validProxyKind(d.kind)) e.kind = "Letters, digits, . - and _, up to 64";
   if (d.device !== "" && !validDevice(d.device))
     e.device = "64 lowercase hex characters";
   return e;
@@ -245,6 +272,15 @@ export function patchBody(
         break;
       case "uuid":
         body["account_uuid"] = c.to;
+        break;
+      case "receiver":
+        body["receiver_email"] = c.to;
+        break;
+      case "provider":
+        proxy["provider"] = c.to;
+        break;
+      case "kind":
+        proxy["type"] = c.to;
         break;
       case "host":
         proxy["host"] = c.to;

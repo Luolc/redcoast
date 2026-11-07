@@ -21,20 +21,22 @@ type createBody struct {
 	Plan   *string    `json:"plan"`
 	Proxy  *proxyBody `json:"proxy"`
 
-	DeviceID *string `json:"device_id"`
+	DeviceID      *string `json:"device_id"`
+	ReceiverEmail *string `json:"receiver_email"`
 }
 
 // patchBody is the body of PATCH /accounts/{alias}: the revision the edit is made
 // against and the fields to change, the subscription plan among them. The alias, the access and the token reference are
 // not editable, and a status is anything but active, which only activate sets.
 type patchBody struct {
-	Rev         *int64     `json:"rev"`
-	Email       *string    `json:"email"`
-	Status      *string    `json:"status"`
-	DeviceID    *string    `json:"device_id"`
-	AccountUUID *string    `json:"account_uuid"`
-	Plan        *string    `json:"plan"`
-	Proxy       *proxyBody `json:"proxy"`
+	Rev           *int64     `json:"rev"`
+	Email         *string    `json:"email"`
+	Status        *string    `json:"status"`
+	DeviceID      *string    `json:"device_id"`
+	AccountUUID   *string    `json:"account_uuid"`
+	ReceiverEmail *string    `json:"receiver_email"`
+	Plan          *string    `json:"plan"`
+	Proxy         *proxyBody `json:"proxy"`
 }
 
 // revBody is the body of verify and activate.
@@ -93,6 +95,9 @@ func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entr
 	}
 	row := session.AccountRow{Alias: *body.Alias, Email: *body.Email, Access: *body.Access, Status: "testing", DeviceID: *body.DeviceID,
 		TokenRef: strings.Replace(w.cfg.TokenRefTemplate, aliasPlaceholder, *body.Alias, 1)}
+	if body.ReceiverEmail != nil {
+		row.ReceiverEmail = *body.ReceiverEmail
+	}
 	body.Proxy.applyProxy(&row)
 	rows, err := w.accountRows(ctx)
 	if err != nil {
@@ -162,6 +167,9 @@ func patched(before session.AccountRow, body *patchBody) (session.AccountRow, er
 	}
 	if body.AccountUUID != nil {
 		after.AccountUUID = *body.AccountUUID
+	}
+	if body.ReceiverEmail != nil {
+		after.ReceiverEmail = *body.ReceiverEmail
 	}
 	body.Proxy.applyProxy(&after)
 	return after, nil

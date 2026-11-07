@@ -544,7 +544,7 @@ func TestSetupHandoverCreates(t *testing.T) {
 		t.Fatalf("request: %d %s", status, body)
 	}
 	task := h.next(t)
-	for key, want := range map[string]any{"alias": "sample-new", "action": "login_and_token", "email": "new@example.test", "device_id": testDeviceID} {
+	for key, want := range map[string]any{"alias": "sample-new", "action": "login_and_token", "email": "new@example.test", "receiver_email": "", "device_id": testDeviceID} {
 		if task[key] != want {
 			t.Fatalf("task[%s] = %v, want %v", key, task[key], want)
 		}
@@ -1284,5 +1284,34 @@ func TestSetupTaskEndedAfterTheWrite(t *testing.T) {
 	}
 	if got := h.setupState(t, "sample-a"); got.State != "failed" || got.Reason != "interrupted" {
 		t.Fatalf("task = %+v", got)
+	}
+}
+
+// TestSetupTaskCarriesReceiverEmail: the receiver email is a key of every task, empty
+// for an account without one, and the account's record and the dashboard's JSON show it
+// with the proxy's provider and type.
+func TestSetupTaskCarriesReceiverEmail(t *testing.T) {
+	h := newSetupHarness(t, true)
+	h.created(t)
+	row, _ := h.store.Account(t.Context(), "sample-new")
+	if status, _, body := h.serve(t, request("PATCH", "/accounts/sample-new", fmt.Sprintf(`{"rev":%d,"receiver_email":"receiver@example.test","proxy":{"provider":"example-provider","type":"dedicated-isp"}}`, row.Rev))); status != 200 {
+		t.Fatalf("edit: %d %s", status, body)
+	}
+	row, _ = h.store.Account(t.Context(), "sample-new")
+	if status, _, body := h.page(t, "sample-new", fmt.Sprintf(`{"action":"login_and_token","rev":%d}`, row.Rev)); status != 202 {
+		t.Fatalf("request: %d %s", status, body)
+	}
+	if task := h.next(t); task["receiver_email"] != "receiver@example.test" {
+		t.Fatalf("task = %v", task)
+	}
+	status, record, body := h.adminDo(t, "GET", "/accounts/sample-new", "", "")
+	account, _ := record["account"].(map[string]any)
+	proxy, _ := account["proxy"].(map[string]any)
+	if status != 200 || account["receiver_email"] != "receiver@example.test" || proxy["provider"] != "example-provider" || proxy["type"] != "dedicated-isp" {
+		t.Fatalf("show: %d %s", status, body)
+	}
+	status, _, body = h.dashboardJSON(t)
+	if status != 200 || !strings.Contains(body, `"receiver_email":"receiver@example.test"`) || !strings.Contains(body, `"provider":"example-provider"`) {
+		t.Fatalf("dashboard.json: %d", status)
 	}
 }
