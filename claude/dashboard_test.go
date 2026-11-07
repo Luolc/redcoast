@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -521,110 +522,289 @@ func TestQuotaRefreshEndpoint(t *testing.T) {
 	}
 }
 
-// snapshotCounter wraps d's snapshot computation with a count and gives d a clock the
-// test moves.
-func snapshotCounter(d *Dashboard) (calls *int, clock *time.Time) {
-	calls, clock = new(int), new(time.Time)
-	*clock = time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
-	d.now = func() time.Time { return *clock }
-	compute := d.snapshot
-	d.snapshot = func(ctx context.Context, aliases []string) (session.Snapshot, error) {
-		*calls++
-		return compute(ctx, aliases)
-	}
-	return calls, clock
+// snapshotFixture is a dashboard whose background computation the test drives: tick
+// starts the next one, waits receives once the loop rests after one, started receives
+// each computation's number as it starts. Computation n gives the snapshot at
+// snapshotAt(n); one fails while fail is set and holds while hold is open.
+type snapshotFixture struct {
+	h       *harness
+	d       *Dashboard
+	tick    chan time.Time
+	waits   chan struct{}
+	started chan int
+
+	mu    sync.Mutex
+	calls int
+	fail  bool
+	hold  chan struct{}
 }
 
-// dashboardAliases returns the aliases that /dashboard.json shows.
-func dashboardAliases(t *testing.T, d *Dashboard) []string {
+func snapshotAt(n int) time.Time {
+	return time.Date(2026, 10, 6, 12, n, 0, 0, time.UTC)
+}
+
+func newSnapshotFixture(t *testing.T) *snapshotFixture {
 	t.Helper()
-	recorder := httptest.NewRecorder()
-	d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
-	var view struct {
-		Accounts []struct{ Alias string }
-	}
-	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &view) != nil {
-		t.Fatalf("dashboard answered %d: %s", recorder.Code, recorder.Body.String())
-	}
-	var aliases []string
-	for _, a := range view.Accounts {
-		aliases = append(aliases, a.Alias)
-	}
-	return aliases
-}
-
-// TestDashboardSnapshotCache computes the snapshot once for the requests within its
-// TTL and again after it, and shows a new account set at once, as after a write that
-// reloads.
-func TestDashboardSnapshotCache(t *testing.T) {
-	h := newHarness(t, "sample-a")
-	reader, err := session.OpenReadOnly(h.path, session.Config{Now: func() time.Time { return h.clock }}, DefaultLimits.MaxTunnel)
+	f := &snapshotFixture{h: newHarness(t, "sample-a"), tick: make(chan time.Time), waits: make(chan struct{}, 16), started: make(chan int, 16)}
+	reader, err := session.OpenReadOnly(f.h.path, session.Config{Now: func() time.Time { return f.h.clock }}, DefaultLimits.MaxTunnel)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	d := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path})
-	calls, clock := snapshotCounter(d)
-
-	for range 3 {
-		if got := dashboardAliases(t, d); !slices.Equal(got, []string{"sample-a"}) {
-			t.Fatalf("accounts = %v", got)
+	f.d = NewDashboard(NewEgress(f.h.accounts, f.h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: f.h.store, DBPath: f.h.path})
+	f.d.every = func() <-chan time.Time {
+		f.waits <- struct{}{}
+		return f.tick
+	}
+	compute := f.d.snapshot
+	f.d.snapshot = func(ctx context.Context, aliases []string) (session.Snapshot, error) {
+		f.mu.Lock()
+		f.calls++
+		n, fail, hold := f.calls, f.fail, f.hold
+		f.mu.Unlock()
+		f.started <- n
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+				return session.Snapshot{}, ctx.Err()
+			}
 		}
-	}
-	if *calls != 1 {
-		t.Fatalf("snapshot computed %d times for 3 requests within the TTL, want 1", *calls)
-	}
-
-	// A reload swaps in a new set; the next request shows it without waiting for the TTL.
-	h.add("sample-b", "sk-ant-oat01-synthetic-sample-b-token")
-	next := &AccountSet{byAlias: maps.Clone(h.accounts.set.Load().byAlias), provider: Claude}
-	h.accounts.set.Store(next)
-	if got := dashboardAliases(t, d); !slices.Equal(got, []string{"sample-a", "sample-b"}) {
-		t.Fatalf("accounts after the reload = %v", got)
-	}
-	if *calls != 2 {
-		t.Fatalf("snapshot computed %d times after the reload, want 2", *calls)
-	}
-
-	*clock = clock.Add(snapshotTTL - time.Millisecond)
-	dashboardAliases(t, d)
-	if *calls != 2 {
-		t.Fatalf("snapshot computed %d times just inside the TTL, want 2", *calls)
-	}
-	*clock = clock.Add(time.Millisecond)
-	dashboardAliases(t, d)
-	if *calls != 3 {
-		t.Fatalf("snapshot computed %d times at the TTL, want 3", *calls)
-	}
-}
-
-// TestDashboardSnapshotCacheKeepsNoError does not keep a failed computation: the next
-// request computes again.
-func TestDashboardSnapshotCacheKeepsNoError(t *testing.T) {
-	h := newHarness(t, "sample-a")
-	reader, err := session.OpenReadOnly(h.path, session.Config{Now: func() time.Time { return h.clock }}, DefaultLimits.MaxTunnel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = reader.Close() })
-	d := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path})
-	calls, _ := snapshotCounter(d)
-	compute := d.snapshot
-	fail := true
-	d.snapshot = func(ctx context.Context, aliases []string) (session.Snapshot, error) {
 		if fail {
-			*calls++
 			return session.Snapshot{}, errors.New("synthetic failure")
 		}
-		return compute(ctx, aliases)
+		snap, err := compute(ctx, aliases)
+		snap.At = snapshotAt(n)
+		return snap, err
 	}
+	return f
+}
+
+// run runs the background computation until the test ends, and checks that it stops.
+func (f *snapshotFixture) run(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.d.RunSnapshots(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("RunSnapshots: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("RunSnapshots did not stop with its context")
+		}
+	})
+}
+
+func (f *snapshotFixture) set(fail bool, hold chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail, f.hold = fail, hold
+}
+
+func (f *snapshotFixture) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// next starts the next background computation and waits for it to start.
+func (f *snapshotFixture) next(t *testing.T) int {
+	t.Helper()
+	for len(f.started) > 0 {
+		<-f.started
+	}
+	select {
+	case f.tick <- time.Now():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the background computation does not wait for its interval")
+	}
+	select {
+	case n := <-f.started:
+		return n
+	case <-time.After(5 * time.Second):
+		t.Fatal("no computation started after the interval")
+	}
+	return 0
+}
+
+// rest waits until the background loop rests after a computation.
+func (f *snapshotFixture) rest(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.waits:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the background loop does not rest")
+	}
+}
+
+// snapshotView is what the snapshot tests read of /dashboard.json.
+type snapshotView struct {
+	status  int
+	at      time.Time
+	aliases []string
+}
+
+// get reads /dashboard.json; it may run outside the test's goroutine.
+func (f *snapshotFixture) get(ctx context.Context) (snapshotView, error) {
 	recorder := httptest.NewRecorder()
-	d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("failed computation answered %d", recorder.Code)
+	f.d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil).WithContext(ctx))
+	v := snapshotView{status: recorder.Code}
+	if v.status != http.StatusOK {
+		return v, nil
 	}
-	fail = false
-	if got := dashboardAliases(t, d); !slices.Equal(got, []string{"sample-a"}) {
-		t.Fatalf("accounts after the failure = %v", got)
+	var body struct {
+		At       time.Time
+		Accounts []struct{ Alias string }
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		return v, err
+	}
+	v.at = body.At
+	for _, a := range body.Accounts {
+		v.aliases = append(v.aliases, a.Alias)
+	}
+	return v, nil
+}
+
+func (f *snapshotFixture) mustGet(t *testing.T) snapshotView {
+	t.Helper()
+	v, err := f.get(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// TestDashboardSnapshotBackground: requests read the snapshot the background computes,
+// once at the start and again after each rest, and never wait for or start one; those
+// that arrive before the first wait for it, which is computed once.
+func TestDashboardSnapshotBackground(t *testing.T) {
+	f := newSnapshotFixture(t)
+	f.run(t)
+	views := make(chan snapshotView, 3)
+	for range 3 {
+		go func() {
+			v, _ := f.get(t.Context())
+			views <- v
+		}()
+	}
+	for range 3 {
+		if v := <-views; v.status != http.StatusOK || !v.at.Equal(snapshotAt(1)) {
+			t.Fatalf("request at the start = %+v, want the first snapshot", v)
+		}
+	}
+	f.rest(t)
+	for range 3 {
+		if v := f.mustGet(t); !v.at.Equal(snapshotAt(1)) {
+			t.Fatalf("later request = %+v, want the first snapshot", v)
+		}
+	}
+	if n := f.callCount(); n != 1 {
+		t.Fatalf("snapshot computed %d times for 6 requests, want 1", n)
+	}
+
+	// While the background computes, a request answers at once with the snapshot before.
+	hold := make(chan struct{})
+	f.set(false, hold)
+	if n := f.next(t); n != 2 {
+		t.Fatalf("background computation %d, want 2", n)
+	}
+	answered := make(chan snapshotView, 1)
+	go func() {
+		v, _ := f.get(t.Context())
+		answered <- v
+	}()
+	select {
+	case v := <-answered:
+		if v.status != http.StatusOK || !v.at.Equal(snapshotAt(1)) {
+			t.Fatalf("request during the computation = %+v, want the first snapshot", v)
+		}
+	case <-time.After(2 * time.Second):
+		close(hold)
+		t.Fatal("a request waited for the background computation")
+	}
+	close(hold)
+	f.rest(t)
+	if v := f.mustGet(t); !v.at.Equal(snapshotAt(2)) {
+		t.Fatalf("request after the computation = %+v, want the second snapshot", v)
+	}
+	if n := f.callCount(); n != 2 {
+		t.Fatalf("snapshot computed %d times, want 2", n)
+	}
+}
+
+// TestDashboardSnapshotReload shows a new account set at once, as after a write that
+// reloads: the next request computes the snapshot for it, and the background goes on
+// with it.
+func TestDashboardSnapshotReload(t *testing.T) {
+	f := newSnapshotFixture(t)
+	f.run(t)
+	f.rest(t)
+	if v := f.mustGet(t); !slices.Equal(v.aliases, []string{"sample-a"}) {
+		t.Fatalf("accounts = %v", v.aliases)
+	}
+	// The loop rests, so nothing reads the set while it changes.
+	f.h.add("sample-b", "sk-ant-oat01-synthetic-sample-b-token")
+	f.h.accounts.set.Store(&AccountSet{byAlias: maps.Clone(f.h.accounts.set.Load().byAlias), provider: Claude})
+	if v := f.mustGet(t); !slices.Equal(v.aliases, []string{"sample-a", "sample-b"}) || !v.at.Equal(snapshotAt(2)) {
+		t.Fatalf("after the reload = %+v, want both accounts in the second snapshot", v)
+	}
+	if v := f.mustGet(t); !v.at.Equal(snapshotAt(2)) {
+		t.Fatalf("second request after the reload = %+v, want the second snapshot", v)
+	}
+	f.next(t)
+	f.rest(t)
+	if v := f.mustGet(t); !slices.Equal(v.aliases, []string{"sample-a", "sample-b"}) || !v.at.Equal(snapshotAt(3)) {
+		t.Fatalf("after the next background computation = %+v", v)
+	}
+}
+
+// TestDashboardSnapshotKeepsNoError keeps no failed computation: before any succeeds a
+// request gets an error and the next computes again; after one has, a failure leaves it
+// shown, at its own at.
+func TestDashboardSnapshotKeepsNoError(t *testing.T) {
+	f := newSnapshotFixture(t)
+	f.set(true, nil)
+	f.run(t)
+	f.rest(t)
+	if v := f.mustGet(t); v.status != http.StatusInternalServerError {
+		t.Fatalf("before any success = %+v, want 500", v)
+	}
+	f.set(false, nil)
+	good := f.mustGet(t)
+	if good.status != http.StatusOK || !good.at.Equal(snapshotAt(f.callCount())) {
+		t.Fatalf("after the failures = %+v", good)
+	}
+	f.set(true, nil)
+	f.next(t)
+	f.rest(t)
+	if v := f.mustGet(t); v.status != http.StatusOK || !v.at.Equal(good.at) {
+		t.Fatalf("after a failed background computation = %+v, want the snapshot at %v", v, good.at)
+	}
+}
+
+// TestDashboardSnapshotStops stops the background computation under way with its
+// context, as at a handoff or shutdown.
+func TestDashboardSnapshotStops(t *testing.T) {
+	f := newSnapshotFixture(t)
+	f.set(false, make(chan struct{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.d.RunSnapshots(ctx) }()
+	<-f.started
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSnapshots: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunSnapshots did not stop while computing")
+	}
+	if latest := f.d.snaps.load(); latest != nil {
+		t.Fatalf("a computation stopped short was kept: %v", latest.snap.At)
 	}
 }

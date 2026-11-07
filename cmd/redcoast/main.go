@@ -142,6 +142,8 @@ func main() {
 		func(ctx context.Context) error { return entrypoint.RunRenewals(ctx, renewalSweep) },
 		func(ctx context.Context) error { return entrypoint.RunQuotaRechecks(ctx, quotaRecheck) },
 		func(ctx context.Context) error { return dashboard.RunQuotaRefresh(ctx) },
+		// The snapshot stops at a handoff, when the new process computes its own.
+		func(ctx context.Context) error { return dashboard.RunSnapshots(ctx) },
 		setup.Run,
 		func(ctx context.Context) error {
 			return claude.Serve(ctx, l.health, cfg.hostGuarded(egress.HealthHandler()))

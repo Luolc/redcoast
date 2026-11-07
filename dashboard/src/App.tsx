@@ -18,8 +18,11 @@ import { useData, useNow, useRoute, useTheme } from "./lib/useData";
 import { providerName } from "./lib/words";
 
 const REFRESH_MS = 30_000;
-// Two missed refreshes: the page is showing old data.
-const STALE_MS = 2 * REFRESH_MS + 5_000;
+// The gateway computes its snapshot in the background and rests 30 s after each run, so
+// data just read is up to 30 s and two runs old; a run takes seconds.
+const SNAPSHOT_MS = 45_000;
+// Two missed refreshes of a fresh snapshot: the page is showing old data.
+const STALE_MS = 2 * REFRESH_MS + SNAPSHOT_MS;
 
 /** The page of route over data. */
 export function Page({
