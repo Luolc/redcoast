@@ -3,6 +3,7 @@ package claude
 import (
 	"compress/gzip"
 	"context"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -61,57 +62,122 @@ type Dashboard struct {
 	egress *Egress
 	cfg    DashboardConfig
 
-	// Test hooks: now is the clock of the snapshot cache, snapshot the computation it
-	// caches.
-	now      func() time.Time
+	// Test hooks: snapshot is the computation the background refresh runs, interval
+	// the wait between two runs.
 	snapshot func(context.Context, []string) (session.Snapshot, error)
+	interval time.Duration
 	cache    snapshotCache
+	// kick asks the refresh for a run at once; one pending ask covers any number.
+	kick chan struct{}
 }
 
-// snapshotTTL is how long a computed snapshot answers further requests. Computing it
-// reads the whole store and takes seconds on a large one, while the page and the monitor
-// poll every few seconds; 3 s keeps the answer fresh enough for both and lets requests
-// that arrive together share one computation. Nothing else the dashboard shows is cached.
-const snapshotTTL = 3 * time.Second
+// snapshotInterval is how long the background refresh waits, after one computation
+// ends, before the next. Computing a snapshot reads the whole store and takes seconds on
+// a large one, so no request does it: requests read the last one. Nothing else the
+// dashboard shows is cached.
+const snapshotInterval = 20 * time.Second
 
-// snapshotCache holds the last snapshot. mu is held while one is computed, so that
-// requests arriving meanwhile wait for it instead of computing their own. The snapshot
-// is only read after it is stored.
+// snapshotCache holds the last computed snapshot, written only by the background
+// refresh and read by requests.
 type snapshotCache struct {
-	mu   sync.Mutex
-	set  *AccountSet // the set whose candidates the snapshot was computed for
-	at   time.Time
-	snap session.Snapshot
-	ok   bool
+	mu  sync.Mutex
+	cur *computedSnapshot // nil until the first computation succeeds
+	err error             // the last computation's failure; nil after a success
+	// changed is closed and replaced whenever cur or err changes, so that a request
+	// waiting for a snapshot wakes up.
+	changed chan struct{}
 }
 
-// NewDashboard returns the dashboard over the egress checks' accounts.
+// computedSnapshot is a snapshot with the set whose candidates it was computed for.
+type computedSnapshot struct {
+	set  *AccountSet
+	snap session.Snapshot
+}
+
+// NewDashboard returns the dashboard over the egress checks' accounts. Its snapshot is
+// computed by RunSnapshot.
 func NewDashboard(egress *Egress, cfg DashboardConfig) *Dashboard {
-	d := &Dashboard{egress: egress, cfg: cfg, now: time.Now}
+	d := &Dashboard{egress: egress, cfg: cfg, interval: snapshotInterval, kick: make(chan struct{}, 1)}
+	d.cache.changed = make(chan struct{})
 	if cfg.Reader != nil {
 		d.snapshot = cfg.Reader.Snapshot
+	}
+	// A reload makes the next computation start at once, so that an account that a write
+	// added, removed or changed shows soon.
+	egress.accounts.onSwap(func(*AccountSet) {
+		select {
+		case d.kick <- struct{}{}:
+		default:
+		}
+	})
+	// onSwap calls back at once with the current set; RunSnapshot computes at its start.
+	select {
+	case <-d.kick:
+	default:
 	}
 	return d
 }
 
-// cachedSnapshot returns the snapshot for set's candidates, at most snapshotTTL old. A
-// different set, as after a reload, misses, so an account that a write added, removed or
-// changed shows at once. A failed computation is not kept.
-func (d *Dashboard) cachedSnapshot(ctx context.Context, set *AccountSet) (session.Snapshot, error) {
+// RunSnapshot computes the snapshot now, then again each interval after a computation
+// ends and whenever a reload asks, until ctx is canceled. A failed computation keeps
+// the last snapshot and is tried again at the next turn.
+func (d *Dashboard) RunSnapshot(ctx context.Context) error {
+	for {
+		d.refresh(ctx)
+		timer := time.NewTimer(d.interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		case <-d.kick:
+			timer.Stop()
+		}
+	}
+}
+
+// refresh computes the snapshot for the current set's candidates and stores it. A
+// computation that ctx cut short is dropped.
+func (d *Dashboard) refresh(ctx context.Context) {
+	set := d.egress.accounts.set.Load()
+	snap, err := d.snapshot(ctx, set.Candidates())
+	if ctx.Err() != nil {
+		return
+	}
 	c := &d.cache
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if now := d.now(); c.ok && c.set == set && now.Sub(c.at) >= 0 && now.Sub(c.at) < snapshotTTL {
-		return c.snap, nil
-	}
-	c.ok = false
-	started := d.now()
-	snap, err := d.snapshot(ctx, set.Candidates())
 	if err != nil {
-		return session.Snapshot{}, err
+		log.Printf("dashboard: snapshot: %v", err)
+		c.err = err
+	} else {
+		c.cur, c.err = &computedSnapshot{set: set, snap: snap}, nil
 	}
-	c.set, c.at, c.snap, c.ok = set, started, snap, true
-	return snap, nil
+	close(c.changed)
+	c.changed = make(chan struct{})
+}
+
+// cachedSnapshot returns the last snapshot if it was computed for set's candidates. After
+// a reload, or before the first computation ends, it waits for the computation that
+// follows, until ctx ends; it fails if that computation failed.
+func (d *Dashboard) cachedSnapshot(ctx context.Context, set *AccountSet) (session.Snapshot, error) {
+	c := &d.cache
+	for {
+		c.mu.Lock()
+		cur, err, changed := c.cur, c.err, c.changed
+		c.mu.Unlock()
+		if cur != nil && cur.set == set {
+			return cur.snap, nil
+		}
+		if err != nil {
+			return session.Snapshot{}, err
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return session.Snapshot{}, ctx.Err()
+		}
+	}
 }
 
 // dashboardView is the JSON answer. Its Accounts hides the embedded snapshot's, which

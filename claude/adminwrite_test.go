@@ -743,7 +743,7 @@ func TestDashboardRecord(t *testing.T) {
 		t.Fatalf("without dashboard_write: %d %v", status, answer)
 	}
 	// A gateway with no account writer answers 501 too.
-	none := HostGuard([]string{writeHost}, NewDashboard(h.egress, DashboardConfig{Provider: "codex", Store: h.store}).Handler())
+	none := HostGuard([]string{writeHost}, newTestDashboard(t, h.egress, DashboardConfig{Provider: "codex", Store: h.store}).Handler())
 	rec := httptest.NewRecorder()
 	r = httptest.NewRequest("GET", "/accounts/sample-a/record", nil)
 	r.Host = writeHost

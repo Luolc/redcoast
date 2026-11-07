@@ -483,7 +483,7 @@ func newQuotaRefreshFixture(t *testing.T, aliases ...string) *quotaRefreshFixtur
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	d := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path, QuotaRefresh: f.refresh})
+	d := newTestDashboard(t, NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path, QuotaRefresh: f.refresh})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

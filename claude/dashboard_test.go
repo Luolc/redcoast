@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +57,7 @@ func TestDashboardJSON(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reader.Close() })
 	inventoryCommit := strings.Repeat("b", 40)
-	d := NewDashboard(e, DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path, Version: "1.2.3", Inventory: inventoryTree(t, inventoryCommit),
+	d := newTestDashboard(t, e, DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path, Version: "1.2.3", Inventory: inventoryTree(t, inventoryCommit),
 		Started: h.clock.Add(-time.Hour), Tunnels: func() (int, int) { return 3, 256 }})
 
 	recorder := httptest.NewRecorder()
@@ -125,7 +127,7 @@ func TestDashboardLinks(t *testing.T) {
 	t.Cleanup(func() { _ = reader.Close() })
 	read := func(t *testing.T, links []DashboardLink, host string, overTLS bool) json.RawMessage {
 		t.Helper()
-		handler := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "codex", Links: links, Reader: reader, Store: h.store, DBPath: h.path}).Handler()
+		handler := newTestDashboard(t, NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "codex", Links: links, Reader: reader, Store: h.store, DBPath: h.path}).Handler()
 		request := httptest.NewRequest(http.MethodGet, "/dashboard.json", nil)
 		request.Host = host
 		if overTLS {
@@ -211,7 +213,7 @@ func TestDashboardFrontend(t *testing.T) {
 		root      int
 	}{{"built", built, http.StatusOK}, {"no_index", unbuilt, http.StatusNotFound}, {"missing", filepath.Join(built, "missing"), http.StatusNotFound}} {
 		t.Run(arm.name, func(t *testing.T) {
-			handler := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Dir: arm.dir}).Handler()
+			handler := newTestDashboard(t, NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Dir: arm.dir}).Handler()
 			for path, want := range map[string]int{"/": arm.root, "/dashboard.json": http.StatusOK, "/assets/index.js": http.StatusNotFound, "/assets/": http.StatusNotFound, "/index.html": http.StatusNotFound} {
 				recorder := httptest.NewRecorder()
 				handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
@@ -235,7 +237,7 @@ func dashboardServer(t *testing.T, dir string) *httptest.Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	server := httptest.NewServer(NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Dir: dir}).Handler())
+	server := httptest.NewServer(newTestDashboard(t, NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Dir: dir}).Handler())
 	t.Cleanup(server.Close)
 	return server
 }
@@ -357,7 +359,7 @@ func TestDashboardGzip(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(page), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Started: h.clock, Dir: dir}).Handler()
+	handler := newTestDashboard(t, NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Reader: reader, Store: h.store, DBPath: h.path, Started: h.clock, Dir: dir}).Handler()
 	get := func(path, encoding, ranges string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		if encoding != "" {
@@ -508,7 +510,7 @@ func TestQuotaRefreshEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	codex := httptest.NewServer(NewDashboard(NewEgress(f.h.accounts, f.h.store, testUpstream), DashboardConfig{Provider: "codex", Reader: reader, Store: f.h.store, DBPath: f.h.path}).Handler())
+	codex := httptest.NewServer(newTestDashboard(t, NewEgress(f.h.accounts, f.h.store, testUpstream), DashboardConfig{Provider: "codex", Reader: reader, Store: f.h.store, DBPath: f.h.path}).Handler())
 	t.Cleanup(codex.Close)
 	if status := send(t, codex, http.MethodPost, page(codex)); status != http.StatusNotImplemented {
 		t.Fatalf("POST at a process that cannot refresh: status=%d", status)
@@ -521,110 +523,242 @@ func TestQuotaRefreshEndpoint(t *testing.T) {
 	}
 }
 
-// snapshotCounter wraps d's snapshot computation with a count and gives d a clock the
-// test moves.
-func snapshotCounter(d *Dashboard) (calls *int, clock *time.Time) {
-	calls, clock = new(int), new(time.Time)
-	*clock = time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
-	d.now = func() time.Time { return *clock }
-	compute := d.snapshot
-	d.snapshot = func(ctx context.Context, aliases []string) (session.Snapshot, error) {
-		*calls++
-		return compute(ctx, aliases)
-	}
-	return calls, clock
-}
-
-// dashboardAliases returns the aliases that /dashboard.json shows.
-func dashboardAliases(t *testing.T, d *Dashboard) []string {
+// newTestDashboard is NewDashboard with the snapshot computed once, as the background
+// refresh would have done; a test that needs a newer one calls d.refresh again.
+func newTestDashboard(t *testing.T, egress *Egress, cfg DashboardConfig) *Dashboard {
 	t.Helper()
-	recorder := httptest.NewRecorder()
-	d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
-	var view struct {
-		Accounts []struct{ Alias string }
+	d := NewDashboard(egress, cfg)
+	if d.snapshot != nil {
+		d.refresh(t.Context())
 	}
-	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &view) != nil {
-		t.Fatalf("dashboard answered %d: %s", recorder.Code, recorder.Body.String())
-	}
-	var aliases []string
-	for _, a := range view.Accounts {
-		aliases = append(aliases, a.Alias)
-	}
-	return aliases
+	return d
 }
 
-// TestDashboardSnapshotCache computes the snapshot once for the requests within its
-// TTL and again after it, and shows a new account set at once, as after a write that
-// reloads.
-func TestDashboardSnapshotCache(t *testing.T) {
+// snapshotRig is a dashboard whose background refresh runs against a computation the test
+// controls.
+type snapshotRig struct {
+	h       *harness
+	d       *Dashboard
+	started chan struct{} // gets a value each time a computation starts
+	release chan struct{} // a computation waits for a value here, unless open is set
+	open    atomic.Bool
+	fail    atomic.Bool // a computation fails after the gate
+	calls   atomic.Int32
+	done    chan struct{}
+	stop    context.CancelFunc
+}
+
+// newSnapshotRig returns a dashboard over one account, "sample-a", with the real
+// computation behind a gate, and starts its refresh with the given interval.
+func newSnapshotRig(t *testing.T, interval time.Duration) *snapshotRig {
+	t.Helper()
 	h := newHarness(t, "sample-a")
 	reader, err := session.OpenReadOnly(h.path, session.Config{Now: func() time.Time { return h.clock }}, DefaultLimits.MaxTunnel)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	d := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path})
-	calls, clock := snapshotCounter(d)
-
-	for range 3 {
-		if got := dashboardAliases(t, d); !slices.Equal(got, []string{"sample-a"}) {
-			t.Fatalf("accounts = %v", got)
+	g := &snapshotRig{h: h, started: make(chan struct{}, 100), release: make(chan struct{}), done: make(chan struct{})}
+	g.d = NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path})
+	g.d.interval = interval
+	compute := g.d.snapshot
+	g.d.snapshot = func(ctx context.Context, aliases []string) (session.Snapshot, error) {
+		g.calls.Add(1)
+		g.started <- struct{}{}
+		if !g.open.Load() {
+			select {
+			case <-g.release:
+			case <-ctx.Done():
+				return session.Snapshot{}, ctx.Err()
+			}
 		}
-	}
-	if *calls != 1 {
-		t.Fatalf("snapshot computed %d times for 3 requests within the TTL, want 1", *calls)
-	}
-
-	// A reload swaps in a new set; the next request shows it without waiting for the TTL.
-	h.add("sample-b", "sk-ant-oat01-synthetic-sample-b-token")
-	next := &AccountSet{byAlias: maps.Clone(h.accounts.set.Load().byAlias), provider: Claude}
-	h.accounts.set.Store(next)
-	if got := dashboardAliases(t, d); !slices.Equal(got, []string{"sample-a", "sample-b"}) {
-		t.Fatalf("accounts after the reload = %v", got)
-	}
-	if *calls != 2 {
-		t.Fatalf("snapshot computed %d times after the reload, want 2", *calls)
-	}
-
-	*clock = clock.Add(snapshotTTL - time.Millisecond)
-	dashboardAliases(t, d)
-	if *calls != 2 {
-		t.Fatalf("snapshot computed %d times just inside the TTL, want 2", *calls)
-	}
-	*clock = clock.Add(time.Millisecond)
-	dashboardAliases(t, d)
-	if *calls != 3 {
-		t.Fatalf("snapshot computed %d times at the TTL, want 3", *calls)
-	}
-}
-
-// TestDashboardSnapshotCacheKeepsNoError does not keep a failed computation: the next
-// request computes again.
-func TestDashboardSnapshotCacheKeepsNoError(t *testing.T) {
-	h := newHarness(t, "sample-a")
-	reader, err := session.OpenReadOnly(h.path, session.Config{Now: func() time.Time { return h.clock }}, DefaultLimits.MaxTunnel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = reader.Close() })
-	d := NewDashboard(NewEgress(h.accounts, h.store, testUpstream), DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path})
-	calls, _ := snapshotCounter(d)
-	compute := d.snapshot
-	fail := true
-	d.snapshot = func(ctx context.Context, aliases []string) (session.Snapshot, error) {
-		if fail {
-			*calls++
+		if g.fail.Load() {
 			return session.Snapshot{}, errors.New("synthetic failure")
 		}
 		return compute(ctx, aliases)
 	}
-	recorder := httptest.NewRecorder()
-	d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("failed computation answered %d", recorder.Code)
+	ctx, stop := context.WithCancel(t.Context())
+	g.stop = stop
+	go func() { defer close(g.done); _ = g.d.RunSnapshot(ctx) }()
+	t.Cleanup(func() { stop(); <-g.done })
+	return g
+}
+
+// waitStarted waits for a computation to start.
+func (g *snapshotRig) waitStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no computation started")
 	}
-	fail = false
-	if got := dashboardAliases(t, d); !slices.Equal(got, []string{"sample-a"}) {
-		t.Fatalf("accounts after the failure = %v", got)
+}
+
+// get reads /dashboard.json, failing the test if no answer comes within limit; it may
+// run in a goroutine.
+func (g *snapshotRig) get(t *testing.T, limit time.Duration) (int, []string) {
+	t.Helper()
+	type answer struct {
+		code    int
+		aliases []string
+	}
+	got := make(chan answer, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		g.d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
+		var view struct{ Accounts []struct{ Alias string } }
+		_ = json.Unmarshal(recorder.Body.Bytes(), &view)
+		var aliases []string
+		for _, a := range view.Accounts {
+			aliases = append(aliases, a.Alias)
+		}
+		got <- answer{recorder.Code, aliases}
+	}()
+	select {
+	case a := <-got:
+		return a.code, a.aliases
+	case <-time.After(limit):
+		t.Errorf("no answer within %v", limit)
+		return 0, nil
+	}
+}
+
+// TestDashboardAnswersWhileRecomputing shows that a request never waits for a
+// computation: with the next one stuck, it gets the last snapshot at once.
+func TestDashboardAnswersWhileRecomputing(t *testing.T) {
+	g := newSnapshotRig(t, time.Millisecond)
+	g.waitStarted(t)
+	g.release <- struct{}{} // the first computation ends
+	if code, aliases := g.get(t, 5*time.Second); code != http.StatusOK || !slices.Equal(aliases, []string{"sample-a"}) {
+		t.Fatalf("first answer %d %v", code, aliases)
+	}
+	g.waitStarted(t) // the next one starts and is held
+	if code, aliases := g.get(t, 500*time.Millisecond); code != http.StatusOK || !slices.Equal(aliases, []string{"sample-a"}) {
+		t.Fatalf("answer during a computation: %d %v", code, aliases)
+	}
+	g.open.Store(true)
+	close(g.release)
+}
+
+// TestDashboardWaitsForTheFirstSnapshot holds a request until the first computation ends,
+// and lets a canceled request go.
+func TestDashboardWaitsForTheFirstSnapshot(t *testing.T) {
+	g := newSnapshotRig(t, time.Hour)
+	g.waitStarted(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	recorder := httptest.NewRecorder()
+	g.d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil).WithContext(ctx))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("canceled request answered %d", recorder.Code)
+	}
+	answered := make(chan int, 1)
+	go func() { code, _ := g.get(t, 5*time.Second); answered <- code }()
+	select {
+	case code := <-answered:
+		t.Fatalf("answered %d before the first computation ended", code)
+	case <-time.After(100 * time.Millisecond):
+	}
+	g.release <- struct{}{}
+	if code := <-answered; code != http.StatusOK {
+		t.Fatalf("answered %d after the first computation", code)
+	}
+}
+
+// TestDashboardReloadRecomputes shows that a reload gets a new computation at once, that
+// a request after it sees the new set, and that reloads during a computation add one
+// more computation, not one each.
+func TestDashboardReloadRecomputes(t *testing.T) {
+	g := newSnapshotRig(t, time.Hour)
+	g.waitStarted(t)
+	g.release <- struct{}{}
+	if _, aliases := g.get(t, 5*time.Second); !slices.Equal(aliases, []string{"sample-a"}) {
+		t.Fatalf("accounts = %v", aliases)
+	}
+	g.h.add("sample-b", "sk-ant-oat01-synthetic-sample-b-token")
+	next := &AccountSet{byAlias: maps.Clone(g.h.accounts.set.Load().byAlias), provider: Claude}
+	g.h.accounts.set.Store(next)
+	for range 5 {
+		for _, f := range g.h.accounts.swapped {
+			f(next)
+		}
+	}
+	g.waitStarted(t) // held
+	for range 5 {
+		for _, f := range g.h.accounts.swapped {
+			f(next)
+		}
+	}
+	answered := make(chan []string, 1)
+	go func() { _, aliases := g.get(t, 5*time.Second); answered <- aliases }()
+	select {
+	case aliases := <-answered:
+		t.Fatalf("answered %v from the old set", aliases)
+	case <-time.After(100 * time.Millisecond):
+	}
+	g.release <- struct{}{}
+	if aliases := <-answered; !slices.Equal(aliases, []string{"sample-a", "sample-b"}) {
+		t.Fatalf("accounts after the reload = %v", aliases)
+	}
+	// The reloads asked while the computation ran share one more computation.
+	g.waitStarted(t)
+	g.open.Store(true)
+	close(g.release)
+	time.Sleep(50 * time.Millisecond)
+	if n := g.calls.Load(); n != 3 {
+		t.Fatalf("%d computations, want 3 (first, after the reloads, one coalesced)", n)
+	}
+}
+
+// TestDashboardConcurrentRequests reads while the refresh runs flat out; it is for
+// go test -race.
+func TestDashboardConcurrentRequests(t *testing.T) {
+	g := newSnapshotRig(t, time.Millisecond)
+	g.open.Store(true)
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			for range 10 {
+				if code, aliases := g.get(t, 10*time.Second); code != http.StatusOK || !slices.Equal(aliases, []string{"sample-a"}) {
+					t.Errorf("answer %d %v", code, aliases)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+}
+
+// TestDashboardSnapshotFailure answers 500 while no computation has succeeded, keeps the
+// last good snapshot through a later failure, and stops with its context.
+func TestDashboardSnapshotFailure(t *testing.T) {
+	g := newSnapshotRig(t, time.Millisecond)
+	g.fail.Store(true)
+	g.open.Store(true)
+	close(g.release)
+	if code, _ := g.get(t, 5*time.Second); code != http.StatusInternalServerError {
+		t.Fatalf("failed computation answered %d", code)
+	}
+	g.fail.Store(false)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		if code, aliases := g.get(t, 5*time.Second); code == http.StatusOK && slices.Equal(aliases, []string{"sample-a"}) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no snapshot after the failure ended")
+		}
+	}
+	g.fail.Store(true)
+	for n := g.calls.Load() + 3; g.calls.Load() < n; {
+		time.Sleep(time.Millisecond)
+	}
+	if code, aliases := g.get(t, 5*time.Second); code != http.StatusOK || !slices.Equal(aliases, []string{"sample-a"}) {
+		t.Fatalf("answer after a later failure: %d %v", code, aliases)
+	}
+	g.stop()
+	select {
+	case <-g.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunSnapshot did not stop with its context")
 	}
 }

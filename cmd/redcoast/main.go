@@ -142,6 +142,7 @@ func main() {
 		func(ctx context.Context) error { return entrypoint.RunRenewals(ctx, renewalSweep) },
 		func(ctx context.Context) error { return entrypoint.RunQuotaRechecks(ctx, quotaRecheck) },
 		func(ctx context.Context) error { return dashboard.RunQuotaRefresh(ctx) },
+		dashboard.RunSnapshot,
 		setup.Run,
 		func(ctx context.Context) error {
 			return claude.Serve(ctx, l.health, cfg.hostGuarded(egress.HealthHandler()))

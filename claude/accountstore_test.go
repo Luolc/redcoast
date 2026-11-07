@@ -405,7 +405,7 @@ func TestDashboardShowsAccountConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	d := NewDashboard(e, DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path, Started: h.clock})
+	d := newTestDashboard(t, e, DashboardConfig{Provider: "claude", Reader: reader, Store: h.store, DBPath: h.path, Started: h.clock})
 	recorder := httptest.NewRecorder()
 	d.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
 	if recorder.Code != http.StatusOK {
@@ -454,7 +454,7 @@ func TestDashboardShowsAccountConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader2.Close() })
-	d2 := NewDashboard(e2, DashboardConfig{Provider: "codex", Reader: reader2, Store: other.store, DBPath: other.path, Started: other.clock})
+	d2 := newTestDashboard(t, e2, DashboardConfig{Provider: "codex", Reader: reader2, Store: other.store, DBPath: other.path, Started: other.clock})
 	recorder = httptest.NewRecorder()
 	d2.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dashboard.json", nil))
 	if strings.Contains(recorder.Body.String(), `"config"`) || !strings.Contains(recorder.Body.String(), `"unserved_accounts":[]`) {
