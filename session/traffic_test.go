@@ -56,10 +56,13 @@ func TestRecordTraffic(t *testing.T) {
 	}
 }
 
-// undoV8 turns a version-8 file back into a version-7 one, but for user_version.
-var undoV8 = []string{"ALTER TABLE traffic DROP COLUMN failure"}
+// undoV9 turns a version-9 file back into a version-8 one, but for user_version.
+var undoV9 = []string{"DROP TABLE accounts"}
 
-// undoV7 turns a version-8 file back into a version-6 one, but for user_version.
+// undoV8 turns a version-9 file back into a version-7 one, but for user_version.
+var undoV8 = append(slices.Clone(undoV9), "ALTER TABLE traffic DROP COLUMN failure")
+
+// undoV7 turns a version-9 file back into a version-6 one, but for user_version.
 var undoV7 = append(slices.Clone(undoV8),
 	"ALTER TABLE traffic DROP COLUMN model", "ALTER TABLE traffic DROP COLUMN input_tokens", "ALTER TABLE traffic DROP COLUMN output_tokens",
 	"ALTER TABLE traffic DROP COLUMN cache_read_tokens", "ALTER TABLE traffic DROP COLUMN cache_creation_tokens", "DROP TABLE quota_history",

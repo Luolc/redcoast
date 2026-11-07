@@ -51,6 +51,7 @@ var errUsage = errors.New(`usage:
   redcoast claude|codex serve --config <path>
   redcoast claude|codex plan --session-db <path> ...
   redcoast claude|codex thresholds --session-db <path> <soft> <hard>
+  redcoast claude inventory export --session-db <path> <dir>
   redcoast claude|codex reload|handoff|status|sessions|pause|resume|refresh|machine ... --admin-socket <path>
 a command given without its arguments prints its own usage`)
 
@@ -63,7 +64,7 @@ func main() {
 		log.Fatal(err)
 	}
 	if command[0] != "serve" {
-		if err := runSubcommand(context.Background(), command); err != nil {
+		if err := runSubcommand(context.Background(), provider, command); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -88,15 +89,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	gateway, form, set, err := loadProvider(ctx, cfg, resolve)
+	gateway, form, err := newProvider(ctx, cfg, resolve)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("accounts: %s", strings.Join(set.Candidates(), " "))
 	store, err := openStore(ctx, cfg.sessionDB, form)
 	if err != nil {
 		log.Fatal(err)
 	}
+	set, err := loadAccounts(ctx, cfg, gateway, store, resolve)
+	if err != nil {
+		log.Fatal(errors.Join(err, store.Close()))
+	}
+	log.Printf("accounts: %s", strings.Join(set.Candidates(), " "))
 	backups, err := newBackup(ctx, cfg, store, resolve)
 	if err != nil {
 		log.Fatal(err)
@@ -109,7 +114,7 @@ func main() {
 	if err := egress.Sweep(ctx); err != nil {
 		log.Fatal(err)
 	}
-	admin := claude.NewAdmin(accounts, store, reloader(cfg, accounts, resolve, egress))
+	admin := claude.NewAdmin(accounts, store, reloader(cfg, store, accounts, resolve, egress))
 	admin.Handoff = upg.Upgrade
 	entrypoint, err := claude.NewHandler(cfg.upstream, gateway, cfg.captureDir, store, accounts, cfg.limits)
 	if err != nil {
@@ -284,7 +289,7 @@ func newBackup(ctx context.Context, cfg config, store *session.Store, resolve cl
 // reloader returns the reload the management interface runs. It resolves the token
 // reference again, so a rotated service account token is picked up; the stdin test entry keeps
 // the one object it read at startup.
-func reloader(cfg config, accounts *claude.Accounts, startup claude.Resolver, egress *claude.Egress) func(context.Context) (claude.Reload, error) {
+func reloader(cfg config, store *session.Store, accounts *claude.Accounts, startup claude.Resolver, egress *claude.Egress) func(context.Context) (claude.Reload, error) {
 	return func(ctx context.Context) (claude.Reload, error) {
 		reloadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
 		defer cancel()
@@ -295,14 +300,14 @@ func reloader(cfg config, accounts *claude.Accounts, startup claude.Resolver, eg
 				return claude.Reload{}, err
 			}
 		}
-		return accounts.Reload(reloadCtx, cfg.inventory, resolve, egress.Check)
+		return accounts.ReloadFrom(reloadCtx, accountSource(cfg, store), resolve, egress.Check)
 	}
 }
 
 // providerCommand returns the provider, claude or codex, and the arguments after it,
-// the first of them "serve", "plan", "thresholds" or a management subcommand.
+// the first of them "serve", "plan", "thresholds", "inventory" or a management subcommand.
 func providerCommand(arguments []string) (string, []string, error) {
-	if len(arguments) < 2 || arguments[0] != "claude" && arguments[0] != "codex" || arguments[1] != "serve" && arguments[1] != "plan" && arguments[1] != "thresholds" && !adminCommands[arguments[1]] {
+	if len(arguments) < 2 || arguments[0] != "claude" && arguments[0] != "codex" || arguments[1] != "serve" && arguments[1] != "plan" && arguments[1] != "thresholds" && arguments[1] != "inventory" && !adminCommands[arguments[1]] {
 		return "", nil, errUsage
 	}
 	return arguments[0], arguments[1:], nil
@@ -329,7 +334,7 @@ func newProvider(ctx context.Context, cfg config, resolve claude.Resolver) (clau
 }
 
 // runSubcommand runs "plan", "thresholds" or one of the management subcommands.
-func runSubcommand(ctx context.Context, arguments []string) error {
+func runSubcommand(ctx context.Context, provider string, arguments []string) error {
 	switch arguments[0] {
 	case "plan":
 		cmd, err := parsePlanCommand(arguments[1:])
@@ -343,6 +348,12 @@ func runSubcommand(ctx context.Context, arguments []string) error {
 			return err
 		}
 		return runThresholds(ctx, cmd)
+	case "inventory":
+		cmd, err := parseInventoryCommand(provider, arguments[1:])
+		if err != nil {
+			return err
+		}
+		return runInventory(ctx, cmd, os.Stdout)
 	}
 	cmd, err := parseAdminCommand(arguments)
 	if err != nil {
@@ -377,21 +388,26 @@ func newResolver(ctx context.Context, cfg config) (claude.Resolver, error) {
 	return credential.New(onePassword), nil
 }
 
-// loadProvider builds the configured provider and the form of its session credentials,
-// and loads its inventory.
-func loadProvider(ctx context.Context, cfg config, resolve claude.Resolver) (claude.Provider, session.CredentialForm, *claude.AccountSet, error) {
-	provider, form, err := newProvider(ctx, cfg, resolve)
-	if err != nil {
-		return claude.Provider{}, nil, nil, err
+// accountSource is where the accounts of cfg's provider are read: the Claude process
+// reads the accounts table, which its first start filled from the inventory directory;
+// the Codex process reads the directory.
+func accountSource(cfg config, store *session.Store) claude.AccountSource {
+	if cfg.provider == "codex" {
+		return claude.DirSource(cfg.inventory)
 	}
-	set, err := loadAccounts(ctx, cfg, provider, resolve)
-	return provider, form, set, err
+	return claude.StoreSource(store, cfg.inventory)
 }
 
-// loadAccounts loads the inventory for provider with resolve. Any failure is reported
-// as a whole; the gateway then does not start.
-func loadAccounts(ctx context.Context, cfg config, provider claude.Provider, resolve claude.Resolver) (*claude.AccountSet, error) {
+// loadAccounts loads the accounts for provider with resolve. The Claude process first
+// imports the inventory directory into an accounts table that was never imported. Any
+// failure is reported as a whole; the gateway then does not start.
+func loadAccounts(ctx context.Context, cfg config, provider claude.Provider, store *session.Store, resolve claude.Resolver) (*claude.AccountSet, error) {
 	loadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
 	defer cancel()
-	return claude.LoadAccounts(loadCtx, cfg.inventory, provider, resolve, cfg.accountConcurrency)
+	if cfg.provider != "codex" {
+		if _, err := claude.ImportInventory(loadCtx, store, cfg.inventory, provider); err != nil {
+			return nil, err
+		}
+	}
+	return claude.LoadAccountsFrom(loadCtx, accountSource(cfg, store), provider, resolve, cfg.accountConcurrency)
 }

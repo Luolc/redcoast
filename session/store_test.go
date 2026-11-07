@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -555,5 +556,49 @@ func TestReopenKeepsState(t *testing.T) {
 	var mode string
 	if err := store.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || mode != "wal" {
 		t.Fatalf("journal mode is %q (%v), want wal", mode, err)
+	}
+}
+
+// TestAccountsTableMigration checks that a version-8 file gets an empty, uninitialized
+// accounts table, and that the rows imported later come back as they went in. Control
+// arm: the version-8 file has no such table before the migration.
+func TestAccountsTableMigration(t *testing.T) {
+	store, path := open(t, newClock())
+	ctx := context.Background()
+	for _, statement := range append(slices.Clone(undoV9), "PRAGMA user_version = 8") {
+		if _, err := store.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec("SELECT 1 FROM accounts"); err == nil {
+		t.Fatal("control arm: the version-8 file has an accounts table")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(ctx, path, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = migrated.Close() }()
+	if rows, initialized, err := migrated.Accounts(ctx); err != nil || initialized || len(rows) != 0 {
+		t.Fatalf("after the migration: %d rows, initialized %v, %v", len(rows), initialized, err)
+	}
+	row := AccountRow{Alias: "sample-a", Email: "a@example.test", Access: "gateway", Status: "active", TokenRef: "op://example-vault/token-a/credential",
+		ProxyHost: "proxy.example.test", ProxyPort: 8080, ExpectedIP: "192.0.2.1", UsernameRef: "op://example-proxies/p/username", PasswordRef: "op://example-proxies/p/password"}
+	if imported, err := migrated.ImportAccounts(ctx, []AccountRow{row}); err != nil || !imported {
+		t.Fatalf("import = %v, %v", imported, err)
+	}
+	rows, initialized, err := migrated.Accounts(ctx)
+	if err != nil || !initialized || len(rows) != 1 {
+		t.Fatalf("after the import: %d rows, initialized %v, %v", len(rows), initialized, err)
+	}
+	got := rows[0]
+	if got.Rev != 1 || got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+		t.Fatalf("row = %+v", got)
+	}
+	got.Rev, got.CreatedAt, got.UpdatedAt = 0, time.Time{}, time.Time{}
+	if got != row {
+		t.Fatalf("row came back as %+v, went in as %+v", got, row)
 	}
 }

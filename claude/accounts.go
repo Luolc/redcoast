@@ -86,10 +86,15 @@ type AccountSet struct {
 // failure is collected and reported by alias and field name, and the resolved values
 // are never part of an error. A reference shared by several accounts is resolved once.
 func LoadAccounts(ctx context.Context, dir string, provider Provider, resolve Resolver, concurrency int) (*AccountSet, error) {
+	return LoadAccountsFrom(ctx, DirSource(dir), provider, resolve, concurrency)
+}
+
+// LoadAccountsFrom is LoadAccounts over src.
+func LoadAccountsFrom(ctx context.Context, src AccountSource, provider Provider, resolve Resolver, concurrency int) (*AccountSet, error) {
 	if concurrency < 1 {
 		return nil, errors.New("account concurrency must be at least 1")
 	}
-	inventory, directHosts, err := readInventory(dir, provider)
+	inventory, directHosts, err := src(ctx, provider)
 	if err != nil {
 		return nil, err
 	}

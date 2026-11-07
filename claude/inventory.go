@@ -102,8 +102,17 @@ func readInventory(dir string, provider Provider) ([]inventoryAccount, map[strin
 	if len(errs) > 0 {
 		return nil, nil, errors.Join(errs...)
 	}
+	if err := checkServed(accounts); err != nil {
+		return nil, nil, err
+	}
+	return accounts, directHosts, nil
+}
+
+// checkServed refuses a set of served accounts that is empty or that has two direct
+// accounts.
+func checkServed(accounts []inventoryAccount) error {
 	if len(accounts) == 0 {
-		return nil, nil, errors.New("inventory: no active gateway account")
+		return errors.New("inventory: no active gateway account")
 	}
 	// Every direct account leaves from the gateway's one address, so two would share an exit.
 	var direct []string
@@ -113,25 +122,39 @@ func readInventory(dir string, provider Provider) ([]inventoryAccount, map[strin
 		}
 	}
 	if len(direct) > 1 {
-		return nil, nil, fmt.Errorf("inventory: proxy.direct: more than one direct account: %s", strings.Join(direct, ", "))
+		return fmt.Errorf("inventory: proxy.direct: more than one direct account: %s", strings.Join(direct, ", "))
 	}
-	return accounts, directHosts, nil
+	return nil
 }
 
 // readInventoryFile reads one account file. served is false for an account the gateway
 // does not serve (not active, or not on the gateway path); its credential fields are
 // then not validated, because the file may describe an account that has none yet.
 func readInventoryFile(alias, path string, provider Provider) (account inventoryAccount, served bool, err error) {
+	file, data, err := decodeInventoryFile(alias, path)
+	if err != nil {
+		return inventoryAccount{}, false, err
+	}
+	if file.Status != "active" || file.Access != "gateway" {
+		return inventoryAccount{}, false, nil
+	}
+	account, err = servedAccount(alias, file, data, provider)
+	return account, err == nil, err
+}
+
+// decodeInventoryFile reads one account file, with its raw bytes, and checks its access
+// and status.
+func decodeInventoryFile(alias, path string) (inventoryFile, []byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return inventoryAccount{}, false, fieldError{alias, "file", "cannot read"}
+		return inventoryFile{}, nil, fieldError{alias, "file", "cannot read"}
 	}
 	if len(data) > maxInventoryFile {
-		return inventoryAccount{}, false, fieldError{alias, "file", "too large"}
+		return inventoryFile{}, nil, fieldError{alias, "file", "too large"}
 	}
 	var file inventoryFile
 	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&file); err != nil {
-		return inventoryAccount{}, false, fieldError{alias, "file", "not an account document"}
+		return inventoryFile{}, nil, fieldError{alias, "file", "not an account document"}
 	}
 	var errs []error
 	if file.Access != "direct" && file.Access != "gateway" {
@@ -142,13 +165,9 @@ func readInventoryFile(alias, path string, provider Provider) (account inventory
 		errs = append(errs, fieldError{alias, "status", "unknown value"})
 	}
 	if len(errs) > 0 {
-		return inventoryAccount{}, false, errors.Join(errs...)
+		return inventoryFile{}, nil, errors.Join(errs...)
 	}
-	if file.Status != "active" || file.Access != "gateway" {
-		return inventoryAccount{}, false, nil
-	}
-	account, err = servedAccount(alias, file, data, provider)
-	return account, err == nil, err
+	return file, data, nil
 }
 
 // servedAccount validates the fields a served account needs, the provider's own among

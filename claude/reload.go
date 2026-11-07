@@ -115,7 +115,7 @@ func (c *Accounts) bind(ctx context.Context, token, source string) (session.Bind
 	return binding, c.set.Load().lookup(binding.Alias), nil
 }
 
-// Reload loads the inventory in dir with resolve and, when everything loaded, replaces
+// Reload loads the inventory directory dir with resolve and, when everything loaded, replaces
 // the set by the plan's steps: the egress check on new and changed accounts, the diff
 // against the old set, the migration of the sessions bound to removed and changed
 // accounts in one transaction, then the swap, the last three under the exclusive lock.
@@ -123,6 +123,11 @@ func (c *Accounts) bind(ctx context.Context, token, source string) (session.Bind
 // context ends. Any failure leaves the old set and the old bindings in place; the
 // error says so.
 func (c *Accounts) Reload(ctx context.Context, dir string, resolve Resolver, verify EgressCheck) (Reload, error) {
+	return c.ReloadFrom(ctx, DirSource(dir), resolve, verify)
+}
+
+// ReloadFrom is Reload over src.
+func (c *Accounts) ReloadFrom(ctx context.Context, src AccountSource, resolve Resolver, verify EgressCheck) (Reload, error) {
 	select {
 	case c.reloading <- struct{}{}:
 		defer func() { <-c.reloading }()
@@ -130,7 +135,7 @@ func (c *Accounts) Reload(ctx context.Context, dir string, resolve Resolver, ver
 		return Reload{}, fmt.Errorf("reload: another reload in progress, this one abandoned: %v", ctx.Err())
 	}
 	current := c.set.Load()
-	next, err := LoadAccounts(ctx, dir, current.provider, resolve, current.concurrency)
+	next, err := LoadAccountsFrom(ctx, src, current.provider, resolve, current.concurrency)
 	if err != nil {
 		return Reload{}, fmt.Errorf("reload: inventory not loaded, accounts unchanged: %w", err)
 	}
