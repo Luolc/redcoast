@@ -44,9 +44,11 @@ type config struct {
 	upstream           *url.URL
 	sessionDB          string
 	captureDir         string
-	inventory          string // directory of account YAML files
-	tokenRef           string // env:// or file:// reference of the 1Password service account token; empty for none
-	credentialsStdin   bool   // test entry: resolve references from a JSON object on stdin
+	inventory          string         // directory of account YAML files
+	tokenRef           string         // env:// or file:// reference of the 1Password service account token; empty for none
+	credentialsStdin   bool           // test entry: resolve references from a JSON object on stdin
+	writeAllowFrom     []netip.Prefix // peer addresses the dashboard accepts account writes from; empty for none
+	tokenRefTemplate   string         // the token reference of a new account, with {alias}; empty for none
 	retention          session.Retention
 	backup             *backupConfig // nil takes no backups
 	tls                *tls.Config   // every TCP listener's; nil serves plain HTTP
@@ -128,8 +130,12 @@ type fileConfig struct {
 		OnePasswordToken string `yaml:"onepassword_token"`
 		StdinTestEntry   bool   `yaml:"stdin_test_entry"`
 	} `yaml:"credentials"`
-	Backup *backupConfig `yaml:"backup"`
-	Codex  *codexFile    `yaml:"codex"`
+	Backup         *backupConfig `yaml:"backup"`
+	Codex          *codexFile    `yaml:"codex"`
+	DashboardWrite struct {
+		AllowFrom        []string `yaml:"allow_from"`
+		TokenRefTemplate string   `yaml:"token_ref_template"`
+	} `yaml:"dashboard_write"`
 }
 
 // maxConfigFile bounds the configuration file; a real one is about a kilobyte.
@@ -273,15 +279,54 @@ func parseConfig(provider string, data []byte) (config, error) {
 	}
 	hostNames := readOnlyHosts(report, f.Listen.Health, f.Listen.Dashboard, serverName, f.Listen.HostNames)
 	links := checkDashboardLinks(report, provider, f.DashboardLinks)
+	allowFrom := checkDashboardWrite(report, provider, f.DashboardWrite.AllowFrom, f.DashboardWrite.TokenRefTemplate)
 	if len(errs) > 0 {
 		return config{}, errors.Join(errs...)
 	}
 	return config{provider: provider, codex: f.Codex, tls: serverTLS, serverName: serverName, warning: warning, listen: f.Listen.Reverse, forwardListen: f.Listen.Forward, socket: f.SessionSocket, sessionListen: f.Listen.Session, adminSocket: f.AdminSocket,
 		healthListen: f.Listen.Health, dashboardListen: f.Listen.Dashboard, dashboardDir: f.DashboardDir, dashboardLinks: links, hostNames: hostNames, egressInterval: f.EgressInterval, limits: limits,
 		accountConcurrency: f.Limits.AccountConcurrency, upstream: target, sessionDB: f.SessionDB, captureDir: f.CaptureDir, inventory: f.Inventory,
-		tokenRef: token, credentialsStdin: f.Credentials.StdinTestEntry,
+		tokenRef: token, credentialsStdin: f.Credentials.StdinTestEntry, writeAllowFrom: allowFrom, tokenRefTemplate: f.DashboardWrite.TokenRefTemplate,
 		retention: session.Retention{Traffic: time.Duration(f.Retention.TrafficDays) * 24 * time.Hour, Sessions: time.Duration(f.Retention.SessionDays) * 24 * time.Hour},
 		backup:    f.Backup}, nil
+}
+
+// checkDashboardWrite checks the dashboard_write section: only the Claude gateway takes
+// one, allow_from lists IP addresses and prefixes of at least one bit, and the token
+// reference template builds a credential reference from an alias. It returns the
+// prefixes, an address as a prefix of its own.
+func checkDashboardWrite(report func(key, problem string), provider string, allowFrom []string, template string) []netip.Prefix {
+	if provider != "claude" {
+		if len(allowFrom) > 0 || template != "" {
+			report("dashboard_write", "only the Claude gateway takes it")
+		}
+		return nil
+	}
+	var prefixes []netip.Prefix
+	for i, entry := range allowFrom {
+		key := fmt.Sprintf("dashboard_write.allow_from[%d]", i)
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			addr, addrErr := netip.ParseAddr(entry)
+			if addrErr != nil || addr.Zone() != "" {
+				report(key, "not an IP address or a prefix")
+				continue
+			}
+			addr = addr.Unmap()
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		if prefix.Bits() == 0 {
+			report(key, "a prefix of no bit would accept every address")
+			continue
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	if template != "" {
+		if err := claude.CheckTokenRefTemplate(template); err != nil {
+			report("dashboard_write.token_ref_template", err.Error())
+		}
+	}
+	return prefixes
 }
 
 // readOnlyHosts returns the Host names /health and the dashboard answer: the IPs of

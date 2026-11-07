@@ -35,7 +35,7 @@ const (
 
 // schemaVersion is stored in PRAGMA user_version. Each version's tables are created by
 // migrate when the file's version is lower.
-const schemaVersion = 9
+const schemaVersion = 10
 
 // schema creates the tables of version 1. Timestamps are Unix milliseconds in UTC.
 const schema = `
@@ -261,7 +261,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	for _, step := range []struct {
 		version int
 		apply   func(context.Context, *sql.Tx) error
-	}{{1, s.migrateToV1}, {2, migrateToV2}, {3, migrateToV3}, {4, migrateToV4}, {5, migrateToV5}, {6, migrateToV6}, {7, migrateToV7}, {8, migrateToV8}, {9, migrateToV9}} {
+	}{{1, s.migrateToV1}, {2, migrateToV2}, {3, migrateToV3}, {4, migrateToV4}, {5, migrateToV5}, {6, migrateToV6}, {7, migrateToV7}, {8, migrateToV8}, {9, migrateToV9}, {10, migrateToV10}} {
 		if version < step.version {
 			if err := step.apply(ctx, tx); err != nil {
 				return err

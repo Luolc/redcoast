@@ -9,6 +9,7 @@ import {
   Globe,
   LayoutDashboard,
   List,
+  Settings,
   Monitor as MonitorIcon,
   Moon,
   RefreshCw,
@@ -195,8 +196,13 @@ export function Sidebar({
   data: Dashboard | null;
   route: Route;
 }) {
-  // A client's page is one of Clients.
-  const v = route.view === "client" ? "clients" : route.view;
+  // A client's page is one of Clients; an account's, and adding one, of Manage.
+  const v =
+    route.view === "client"
+      ? "clients"
+      : route.view === "account" || route.view === "add"
+        ? "manage"
+        : route.view;
   return (
     <aside className="sidebar" aria-label="Navigation">
       <div className="brand">redcoast</div>
@@ -223,6 +229,7 @@ export function Sidebar({
           icon={User}
           {...(data === null ? {} : { count: data.accounts.length })}
         />
+        <NavItem view="manage" current={v} icon={Settings} />
         <NavItem view="exits" current={v} icon={Globe} />
       </nav>
       <nav className="nav nav-bottom" aria-label="Gateway">

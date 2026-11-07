@@ -287,6 +287,13 @@ func (e *Egress) unanswered(a *account) bool {
 	return e.lastCheck(a).Upstream == "unanswered"
 }
 
+// forget drops what the egress keeps of an account object that is no longer used.
+func (e *Egress) forget(a *account) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.last, a)
+}
+
 // lastCheck returns the last check of account object a; zero when none ran.
 func (e *Egress) lastCheck(a *account) EgressResult {
 	e.mu.Lock()

@@ -203,3 +203,33 @@ it("accepts burn and totals, or none, and refuses drift", () => {
       ),
     ).toThrow();
 });
+
+it("accepts the accounts table and the write state", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const parsed = parseDashboard(JSON.stringify(sample));
+  expect(parsed.accounts[0]?.config?.rev).toBe(4);
+  expect(parsed.unserved_accounts?.[0]?.verify.token_ok).toBeNull();
+  expect(parsed.write).toEqual({ enabled: true, can_create: true });
+});
+
+it("accepts a gateway older than the accounts table", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const older = {
+    ...sample,
+    unserved_accounts: undefined,
+    accounts_editable: undefined,
+    write: undefined,
+    proxy_ref_options: undefined,
+    accounts: sample.accounts.map((a) => ({ ...a, config: undefined })),
+  };
+  expect(parseDashboard(JSON.stringify(older)).write).toBeUndefined();
+});
+
+it("refuses a row of the accounts table that drifted", () => {
+  const sample = sampleDashboard(new Date("2026-10-07T12:00:00Z"));
+  const drifted = {
+    ...sample,
+    unserved_accounts: [{ alias: "sample-af" }],
+  };
+  expect(() => parseDashboard(JSON.stringify(drifted))).toThrow();
+});

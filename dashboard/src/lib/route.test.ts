@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import {
+  accountHref,
   clientHref,
   parseClient,
   parseRoute,
@@ -47,4 +48,16 @@ it("names a client by machine and program, the program possibly unknown", () => 
   }
   expect(parseClient("machine-a")).toBeNull();
   expect(parseClient(undefined)).toBeNull();
+});
+
+it("opens an account, its edit form and the steps of adding one", () => {
+  expect(parseRoute("#/account/sample-ab%2Fedit")).toEqual({
+    view: "account",
+    arg: "sample-ab/edit",
+  });
+  expect(parseRoute("#/add/3%2Fsample-af")).toEqual({
+    view: "add",
+    arg: "3/sample-af",
+  });
+  expect(accountHref("sample-ab", true)).toBe("#/account/sample-ab%2Fedit");
 });
