@@ -21,7 +21,7 @@ import (
 )
 
 // adminCommands are the subcommands served over the management socket.
-var adminCommands = map[string]bool{"reload": true, "handoff": true, "status": true, "sessions": true, "pause": true, "resume": true, "refresh": true, "machine": true, "import": true, "setup": true}
+var adminCommands = map[string]bool{"reload": true, "handoff": true, "status": true, "sessions": true, "pause": true, "resume": true, "refresh": true, "machine": true, "import": true, "setup": true, "account": true}
 
 // adminCommand is a parsed management invocation: the request to send to the socket.
 type adminCommand struct {
@@ -53,9 +53,16 @@ var errAdminUsage = errors.New(`usage:
   redcoast claude|codex refresh <alias> --admin-socket <path>
   redcoast claude|codex refresh --all --admin-socket <path>
   redcoast codex import <alias> --admin-socket <path> < auth.json
-  redcoast claude setup next --admin-socket <path>
-  redcoast claude setup report <alias> <request-id> --run-id <id> --state <state> --step <code> [--reason <code>] --admin-socket <path>
-  redcoast claude setup token <alias> <request-id> --run-id <id> --admin-socket <path> < token
+  redcoast claude setup next [--request-id <id>] --admin-socket <path>
+  redcoast claude setup report <alias> <request-id> --run-id <id> --source-kind <dashboard|slack> --state <state> --step <code> [--reason <code>] [--wait-until <RFC 3339>] --admin-socket <path>
+  redcoast claude setup token <alias> <request-id> --run-id <id> --source-kind <dashboard|slack> --admin-socket <path> < token
+  redcoast claude setup request <alias> --rev <n> --source-thread <CHANNEL/TS> --source-ts <TS> --admin-socket <path>
+  redcoast claude account create <alias> --email <email> --plan <plan> --proxy-host <host> --proxy-port <port>
+      --expected-egress-ip <ip> --proxy-username-ref <ref> --proxy-password-ref <ref>
+      --source-thread <CHANNEL/TS> --source-ts <TS> --admin-socket <path>
+  redcoast claude account show <alias> --admin-socket <path>
+  redcoast claude account verify <alias> [--rev <n>] --source-thread <CHANNEL/TS> --source-ts <TS> --admin-socket <path>
+  redcoast claude account activate <alias> --rev <n> --source-thread <CHANNEL/TS> --source-ts <TS> --admin-socket <path>
   redcoast claude|codex machine add <name> <sha256-of-credential> --admin-socket <path> [--max-sessions <n>]
   redcoast claude|codex machine revoke <name> --admin-socket <path>
   redcoast claude|codex machine limit <name> <n> --admin-socket <path>
@@ -71,8 +78,12 @@ one line per account and fails when any of them failed (an account skipped for a
 other than quota is not a failure); import reads a Codex login in auth.json's format
 from stdin, replaces the account's login with it when it is the account's, and renews
 it at once, so the copy it came from stops working; the setup commands are for a login machine: next prints
-the next setup task or {"task": null}, report records one step of the task it runs, and token reads the setup token from
-stdin (at most 4 KiB, one line) and hands it over, never printing it; sessions lists the sessions started in [since,
+the next setup task the dashboard asked for or {"task": null} (with --request-id, that one task, which must have been
+requested from Slack), report records one step of the task it runs, and token reads the setup token from
+stdin (at most 4 KiB, one line) and hands it over, never printing it; request queues a login-and-token task for an
+account from a Slack message; the account commands create, show, verify and activate an account as the dashboard does
+(activate only a testing one), the writing ones only while the gateway's admin_write is on and each with the Slack
+message it came from; sessions lists the sessions started in [since,
 until), by default the last day, newest first and at most 500, only the ended ones unless --state all; machine add takes the SHA-256 the client machine printed, never the credential itself`)
 
 // handoffCommandTimeout bounds a handoff command: the new process's startup, bounded
@@ -108,16 +119,18 @@ func parseAdminCommand(arguments []string) (adminCommand, error) {
 	maxSessions := flags.Int("max-sessions", 0, "Session limit of a machine being added; 0 takes the default")
 	all := flags.Bool("all", false, "Refresh every account")
 	setup := registerSetupFlags(flags, arguments[0])
+	agent := registerAgentFlags(flags, arguments[0])
 	listing := sessionFilters(flags, arguments[0])
 	flagArguments, rest := splitFlags(flags, arguments[1:])
 	if err := flags.Parse(flagArguments); err != nil || flags.NArg() != 0 || *socket == "" || *all && arguments[0] != "refresh" {
 		return adminCommand{}, errAdminUsage
 	}
+	agent.note(flags)
 	if arguments[0] == "sessions" {
 		return sessionsCommand(*socket, *until, listing, rest)
 	}
-	if arguments[0] == "setup" {
-		return parseSetup(flags, setup, *socket, rest, *reason, *until != "" || *maxSessions != 0)
+	if arguments[0] == "setup" || arguments[0] == "account" {
+		return parseSetupOrAccount(arguments[0], flags, setup, agent, *socket, rest, *reason, *until != "" || *maxSessions != 0)
 	}
 	if arguments[0] != "pause" && *until != "" || arguments[0] != "machine" && *maxSessions != 0 {
 		return adminCommand{}, errAdminUsage
@@ -151,6 +164,19 @@ func parseAdminCommand(arguments []string) (adminCommand, error) {
 		return adminCommand{}, errAdminUsage
 	}
 	return cmd, nil
+}
+
+// parseSetupOrAccount builds a setup or an account command. otherFlags says that a flag of
+// another subcommand (--until, --max-sessions) was given; --reason belongs to setup only.
+func parseSetupOrAccount(subcommand string, flags *flag.FlagSet, setup *setupFlags, agent *agentFlags, socket string, rest []string, reason string, otherFlags bool) (adminCommand, error) {
+	if subcommand == "setup" {
+		return parseSetup(flags, setup, agent, socket, rest, reason, otherFlags)
+	}
+	flags.Visit(func(f *flag.Flag) { otherFlags = otherFlags || f.Name == "reason" })
+	if otherFlags {
+		return adminCommand{}, errAdminUsage
+	}
+	return accountAgentCommand(agent, socket, rest)
 }
 
 // sessionFilters registers the filters of "sessions" on flags and returns the query
@@ -243,13 +269,13 @@ func registerSetupFlags(flags *flag.FlagSet, subcommand string) *setupFlags {
 
 // parseSetup builds a setup command from the parsed flags. otherFlags says that a flag
 // of another subcommand (--until, --max-sessions) was given.
-func parseSetup(flags *flag.FlagSet, setup *setupFlags, socket string, rest []string, reason string, otherFlags bool) (adminCommand, error) {
+func parseSetup(flags *flag.FlagSet, setup *setupFlags, agent *agentFlags, socket string, rest []string, reason string, otherFlags bool) (adminCommand, error) {
 	if otherFlags {
 		return adminCommand{}, errAdminUsage
 	}
 	flags.Visit(func(f *flag.Flag) { setup.reasonGiven = setup.reasonGiven || f.Name == "reason" })
 	setup.reason = reason
-	return setupCommand(socket, rest, *setup)
+	return setupCommand(socket, rest, *setup, agent)
 }
 
 // setupCommandTimeout bounds a setup command: the handover's own work, bounded by the
@@ -262,42 +288,64 @@ const maxSetupInput = 4 << 10
 // setupCommand builds `setup next`, `setup report <alias> <request-id>` or `setup token
 // <alias> <request-id>`. The IDs go into the request as the gateway's shapes only, so a
 // misuse is refused here without a request.
-func setupCommand(socket string, rest []string, f setupFlags) (adminCommand, error) {
+func setupCommand(socket string, rest []string, f setupFlags, a *agentFlags) (adminCommand, error) {
 	cmd := adminCommand{socket: socket, method: http.MethodPost, timeout: 30 * time.Second}
 	if len(rest) == 0 {
 		return adminCommand{}, errAdminUsage
 	}
+	plain := f.runID != "" || f.state != "" || f.step != "" || f.reasonGiven
 	switch rest[0] {
 	case "next":
-		if len(rest) != 1 || f.runID != "" || f.state != "" || f.step != "" || f.reasonGiven {
+		if len(rest) != 1 || plain || !a.only("request-id") {
 			return adminCommand{}, errAdminUsage
 		}
 		cmd.path = "/setup/next"
+		if a.given["request-id"] {
+			cmd.path += "?" + url.Values{"request_id": {a.requestID}}.Encode()
+		}
+		return cmd, nil
+	case "request":
+		if len(rest) != 2 || !accountAlias.MatchString(rest[1]) || plain || !a.only("rev", "source-thread", "source-ts") || !a.has("rev", "source-thread", "source-ts") {
+			return adminCommand{}, errAdminUsage
+		}
+		cmd.path, cmd.body = "/accounts/"+rest[1]+"/setup/request", a.revBody()
 		return cmd, nil
 	case "report", "token":
-		if len(rest) != 3 || !accountAlias.MatchString(rest[1]) || f.runID == "" {
+		if len(rest) != 3 || !accountAlias.MatchString(rest[1]) || f.runID == "" || !a.has("source-kind") {
 			return adminCommand{}, errAdminUsage
 		}
 	default:
 		return adminCommand{}, errAdminUsage
 	}
-	alias, requestID := rest[1], rest[2]
 	if rest[0] == "token" {
-		if f.state != "" || f.step != "" || f.reasonGiven {
-			return adminCommand{}, errAdminUsage
-		}
-		query := url.Values{"request_id": {requestID}, "run_id": {f.runID}}
-		cmd.path = "/accounts/" + alias + "/setup/token?" + query.Encode()
-		cmd.input, cmd.inputLimit, cmd.trimLine, cmd.timeout = os.Stdin, maxSetupInput, true, setupCommandTimeout
-		cmd.inputName, cmd.contentType = "token", "text/plain"
-		return cmd, nil
+		return setupTokenCommand(cmd, rest[1], rest[2], f, a)
 	}
-	if f.state == "" || f.step == "" {
+	return setupReportCommand(cmd, rest[1], rest[2], f, a)
+}
+
+// setupTokenCommand is `setup token <alias> <request-id>`, which reads the token from stdin.
+func setupTokenCommand(cmd adminCommand, alias, requestID string, f setupFlags, a *agentFlags) (adminCommand, error) {
+	if f.state != "" || f.step != "" || f.reasonGiven || !a.only("source-kind") {
 		return adminCommand{}, errAdminUsage
 	}
-	body := map[string]any{"request_id": requestID, "run_id": f.runID, "state": f.state, "step": f.step, "reason": nil}
+	query := url.Values{"request_id": {requestID}, "run_id": {f.runID}, "source_kind": {a.sourceKind}}
+	cmd.path = "/accounts/" + alias + "/setup/token?" + query.Encode()
+	cmd.input, cmd.inputLimit, cmd.trimLine, cmd.timeout = os.Stdin, maxSetupInput, true, setupCommandTimeout
+	cmd.inputName, cmd.contentType = "token", "text/plain"
+	return cmd, nil
+}
+
+// setupReportCommand is `setup report <alias> <request-id>`.
+func setupReportCommand(cmd adminCommand, alias, requestID string, f setupFlags, a *agentFlags) (adminCommand, error) {
+	if f.state == "" || f.step == "" || !a.only("source-kind", "wait-until") {
+		return adminCommand{}, errAdminUsage
+	}
+	body := map[string]any{"request_id": requestID, "run_id": f.runID, "state": f.state, "step": f.step, "reason": nil, "source_kind": a.sourceKind}
 	if f.reasonGiven {
 		body["reason"] = f.reason
+	}
+	if a.given["wait-until"] {
+		body["wait_until"] = a.waitUntil
 	}
 	cmd.path, cmd.body = "/accounts/"+alias+"/setup/report", body
 	return cmd, nil
@@ -373,13 +421,27 @@ type refusal struct {
 	path    string
 	status  int
 	message string // the gateway's error; empty when it gave none
+	// field and check are what the gateway said the refusal concerns, when it did.
+	field, check string
+	// written is whether a token handover reached the vault, when the gateway said.
+	written *bool
 }
 
 func (r *refusal) Error() string {
 	if r.message == "" {
 		return fmt.Sprintf("%s refused with status %d", r.path, r.status)
 	}
-	return fmt.Sprintf("%s refused: %s", r.path, r.message)
+	text := fmt.Sprintf("%s refused: %s", r.path, r.message)
+	if r.field != "" {
+		text += " (field: " + r.field + ")"
+	}
+	if r.check != "" {
+		text += " (check: " + r.check + ")"
+	}
+	if r.written != nil {
+		text += fmt.Sprintf(" (written: %t)", *r.written)
+	}
+	return text
 }
 
 // runAdmin sends the command to the gateway's management socket and writes the answer
@@ -431,11 +493,14 @@ func runAdmin(ctx context.Context, cmd adminCommand, out io.Writer) error {
 	}
 	if res.StatusCode/100 != 2 {
 		var failure struct {
-			Error string `json:"error"`
+			Error   string `json:"error"`
+			Field   string `json:"field"`
+			Check   string `json:"check"`
+			Written *bool  `json:"written"`
 		}
 		refused := &refusal{path: strings.TrimPrefix(cmd.path, "/"), status: res.StatusCode}
 		if json.Unmarshal(answer, &failure) == nil {
-			refused.message = failure.Error
+			refused.message, refused.field, refused.check, refused.written = failure.Error, failure.Field, failure.Check, failure.Written
 		}
 		return refused
 	}

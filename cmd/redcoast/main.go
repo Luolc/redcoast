@@ -123,6 +123,7 @@ func main() {
 	}
 	offerAccountActions(admin, gateway, entrypoint)
 	writer := accountWriter(cfg, store, accounts, egress, entrypoint, resolve, reload)
+	admin.Writer = writer
 	setup := offerSetup(ctx, admin, writer)
 	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started, writer)
 	if err != nil {
@@ -320,7 +321,7 @@ func accountWriter(cfg config, store *session.Store, accounts *claude.Accounts, 
 			return newResolver(ctx, cfg)
 		},
 		AllowFrom: cfg.writeAllowFrom, TokenRefTemplate: cfg.tokenRefTemplate,
-		SetupEnabled: cfg.setupEnabled,
+		SetupEnabled: cfg.setupEnabled, AdminWrite: cfg.adminWrite,
 		SetupSecrets: func(ctx context.Context) (credential.Store, error) { return newSecretStore(ctx, cfg) },
 	})
 }

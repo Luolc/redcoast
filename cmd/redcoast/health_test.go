@@ -311,3 +311,42 @@ func TestSetupConfiguration(t *testing.T) {
 		})
 	}
 }
+
+// TestAdminWriteConfiguration checks admin_write.enabled: off by default and when the
+// section is absent; on only for the Claude gateway with the token reference template,
+// since an account it creates has the reference that gives; the Codex gateway refuses
+// the key.
+func TestAdminWriteConfiguration(t *testing.T) {
+	const section = "codex: {accounts_dir: /var/lib/redcoast-codex/accounts, session_key: 'env://SESSION_KEY'}\n"
+	const template = "dashboard_write: {token_ref_template: 'op://example-vault/token-{alias}/credential'}\n"
+	for _, test := range []struct {
+		name, provider, yaml string
+		want                 bool
+		problem              string
+	}{
+		{"absent", "claude", "", false, ""},
+		{"off", "claude", "admin_write: {enabled: false}\n", false, ""},
+		{"on", "claude", template + "admin_write: {enabled: true}\n", true, ""},
+		{"on_without_template", "claude", "admin_write: {enabled: true}\n", false, "admin_write.enabled: needs dashboard_write.token_ref_template"},
+		{"unknown_key", "claude", template + "admin_write: {enabled: true, who: x}\n", false, "field who not found"},
+		{"codex_off", "codex", "admin_write: {enabled: false}\n", false, "admin_write: only the Claude gateway takes it"},
+		{"codex_on", "codex", "admin_write: {enabled: true}\n", false, "admin_write: only the Claude gateway takes it"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			yaml := basePaths + test.yaml
+			if test.provider == "codex" {
+				yaml += section
+			}
+			cfg, err := parseConfig(test.provider, []byte(yaml))
+			if test.problem != "" {
+				if err == nil || !strings.Contains(err.Error(), test.problem) {
+					t.Fatalf("got %v, want %q", err, test.problem)
+				}
+				return
+			}
+			if err != nil || cfg.adminWrite != test.want {
+				t.Fatalf("got %v %v, want %v", cfg.adminWrite, err, test.want)
+			}
+		})
+	}
+}

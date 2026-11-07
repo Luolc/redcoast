@@ -37,13 +37,25 @@ const (
 	SetupReasonInterrupted = "interrupted"
 )
 
+// The wait for a person at a captcha page: a login program may ask for it once per task
+// and for at most SetupMaxWait from the report.
+const (
+	SetupStepCaptcha = "awaiting_captcha"
+	SetupMaxWait     = 20 * time.Minute
+)
+
 // Errors of the setup tasks.
 var (
-	ErrSetupOpen        = errors.New("the account has a requested or running task")
-	ErrSetupStatus      = errors.New("the account is neither testing nor active")
-	ErrSetupDirect      = errors.New("the account has a direct exit")
-	ErrSetupNoOpenTask  = errors.New("no running task for the account")
-	ErrSetupIDsMismatch = errors.New("request_id or run_id does not match the task")
+	ErrSetupSourceMismatch = errors.New("the task came from another source")
+	ErrSetupTaskNotFound   = errors.New("no such task")
+	ErrSetupNotSlack       = errors.New("the task was not requested from Slack")
+	ErrSetupNotRequested   = errors.New("the task is not waiting to be handed out")
+	ErrSetupWaitUntil      = errors.New("wait_until is not allowed")
+	ErrSetupOpen           = errors.New("the account has a requested or running task")
+	ErrSetupStatus         = errors.New("the account is neither testing nor active")
+	ErrSetupDirect         = errors.New("the account has a direct exit")
+	ErrSetupNoOpenTask     = errors.New("no running task for the account")
+	ErrSetupIDsMismatch    = errors.New("request_id or run_id does not match the task")
 )
 
 // schemaV11 adds the setup tasks: one row per account holding its latest task and the
@@ -65,6 +77,28 @@ CREATE TABLE account_setup (
 	token_set_at INTEGER
 ) STRICT;
 `
+
+// schemaV12 records where each audited write and each setup task came from, and the
+// wait a login program asked for at a captcha page. The columns only add to a row; the
+// rows already there are the dashboard's.
+const schemaV12 = `
+ALTER TABLE account_audit ADD COLUMN source_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_audit ADD COLUMN source_thread TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_audit ADD COLUMN source_ts TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_setup ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'dashboard';
+ALTER TABLE account_setup ADD COLUMN source_thread TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_setup ADD COLUMN source_ts TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_setup ADD COLUMN wait_until INTEGER;
+ALTER TABLE account_setup ADD COLUMN wait_until_set INTEGER NOT NULL DEFAULT 0;
+`
+
+// migrateToV12 adds the source and wait columns.
+func migrateToV12(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, schemaV12); err != nil {
+		return fmt.Errorf("session store migration v12: %v", err)
+	}
+	return nil
+}
 
 // migrateToV11 creates the setup table.
 func migrateToV11(ctx context.Context, tx *sql.Tx) error {
@@ -93,6 +127,15 @@ type SetupRow struct {
 
 	// TokenSetAt is when the gateway wrote the token; zero for a token it did not write.
 	TokenSetAt time.Time
+
+	// Source is where the request came from: the dashboard (Kind SourceDashboard, no
+	// thread) or a Slack message.
+	Source Source
+	// WaitUntil is when a login program said it would be done waiting for a person at a
+	// captcha page, zero when it is not waiting; WaitUntilSet stays true once a task has
+	// set it, since a task sets it once.
+	WaitUntil    time.Time
+	WaitUntilSet bool
 }
 
 // SetupTask is a task handed to a login machine with the account it is for.
@@ -102,19 +145,20 @@ type SetupTask struct {
 }
 
 // setupColumns are the columns of a SetupRow.
-const setupColumns = `alias, state, request_id, run_id, step, reason, action, requested_at, started_at, reported_at, claimed_at, updated_at, token_set_at`
+const setupColumns = `alias, state, request_id, run_id, step, reason, action, requested_at, started_at, reported_at, claimed_at, updated_at, token_set_at, source_kind, source_thread, source_ts, wait_until, wait_until_set`
 
 func scanSetup(r scanner) (SetupRow, error) {
 	var row SetupRow
-	var requested, started, reported, claimed, updated, tokenSet sql.NullInt64
+	var requested, started, reported, claimed, updated, tokenSet, wait sql.NullInt64
 	if err := r.Scan(&row.Alias, &row.State, &row.RequestID, &row.RunID, &row.Step, &row.Reason, &row.Action,
-		&requested, &started, &reported, &claimed, &updated, &tokenSet); err != nil {
+		&requested, &started, &reported, &claimed, &updated, &tokenSet,
+		&row.Source.Kind, &row.Source.Thread, &row.Source.TS, &wait, &row.WaitUntilSet); err != nil {
 		return SetupRow{}, err
 	}
 	for _, t := range []struct {
 		from sql.NullInt64
 		to   *time.Time
-	}{{requested, &row.RequestedAt}, {started, &row.StartedAt}, {reported, &row.ReportedAt}, {claimed, &row.ClaimedAt}, {updated, &row.UpdatedAt}, {tokenSet, &row.TokenSetAt}} {
+	}{{requested, &row.RequestedAt}, {started, &row.StartedAt}, {reported, &row.ReportedAt}, {claimed, &row.ClaimedAt}, {updated, &row.UpdatedAt}, {tokenSet, &row.TokenSetAt}, {wait, &row.WaitUntil}} {
 		if t.from.Valid {
 			*t.to = fromMillis(t.from.Int64)
 		}
@@ -136,10 +180,10 @@ func setupRow(ctx context.Context, tx *sql.Tx, alias string) (SetupRow, error) {
 
 // putSetup writes row, replacing the account's.
 func putSetup(ctx context.Context, tx *sql.Tx, row SetupRow) error {
-	_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO account_setup (`+setupColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO account_setup (`+setupColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.Alias, row.State, row.RequestID, row.RunID, row.Step, row.Reason, row.Action,
 		nullableTime(row.RequestedAt), nullableTime(row.StartedAt), nullableTime(row.ReportedAt), nullableTime(row.ClaimedAt), nullableTime(row.UpdatedAt),
-		nullableTime(row.TokenSetAt))
+		nullableTime(row.TokenSetAt), row.Source.Kind, row.Source.Thread, row.Source.TS, nullableTime(row.WaitUntil), row.WaitUntilSet)
 	if err != nil {
 		return fmt.Errorf("write setup: %v", err)
 	}
@@ -256,7 +300,7 @@ func (s *Store) InterruptSetups(ctx context.Context) (int, error) {
 // must be at it. It fails with ErrAccountNotFound, ErrRevConflict, ErrSetupStatus and
 // ErrSetupDirect (an account that cannot have a setup) and ErrSetupOpen, in that order.
 // It returns the new row and the state the account's setup was in before.
-func (s *Store) RequestSetup(ctx context.Context, alias, action string, rev *int64, requestID string) (SetupRow, string, error) {
+func (s *Store) RequestSetup(ctx context.Context, alias, action string, rev *int64, requestID string, source Source) (SetupRow, string, error) {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
@@ -287,17 +331,33 @@ func (s *Store) RequestSetup(ctx context.Context, alias, action string, rev *int
 			return ErrSetupOpen
 		}
 		before = row.State
+		if source.Kind == "" {
+			source.Kind = SourceDashboard
+		}
 		out = SetupRow{Alias: alias, State: SetupRequested, RequestID: requestID, Action: action,
-			RequestedAt: now, UpdatedAt: now, TokenSetAt: row.TokenSetAt}
+			RequestedAt: now, UpdatedAt: now, TokenSetAt: row.TokenSetAt, Source: source}
 		return putSetup(ctx, tx, out)
 	})
 	return out, before, err
 }
 
-// NextSetup hands the next requested task out, or returns nil: they go in the order
-// requested, and none is handed out while another is running. The task becomes running with no step, and the time is when the
-// run's timeouts start.
+// NextSetup hands the next requested task that the dashboard asked for out, or returns
+// nil: they go in the order requested, and none is handed out while another is running.
+// A task requested from Slack is never handed out here. The task becomes running with no
+// step, and the time is when the run's timeouts start.
 func (s *Store) NextSetup(ctx context.Context) (*SetupTask, error) {
+	return s.nextSetup(ctx, "")
+}
+
+// NextSetupByID hands out the task with this request ID, which must be the latest task
+// of its account, requested from Slack and waiting; nil when it is but another task is
+// running. It fails with ErrSetupTaskNotFound, ErrSetupNotSlack and
+// ErrSetupNotRequested, in that order.
+func (s *Store) NextSetupByID(ctx context.Context, requestID string) (*SetupTask, error) {
+	return s.nextSetup(ctx, requestID)
+}
+
+func (s *Store) nextSetup(ctx context.Context, requestID string) (*SetupTask, error) {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
@@ -306,6 +366,10 @@ func (s *Store) NextSetup(ctx context.Context) (*SetupTask, error) {
 	var out *SetupTask
 	err := s.transact(ctx, func(tx *sql.Tx) error {
 		now := fromMillis(s.now())
+		row, err := pickSetup(ctx, tx, requestID)
+		if err != nil || row == nil {
+			return err
+		}
 		var running int
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM account_setup WHERE state = 'running'").Scan(&running); err != nil {
 			return fmt.Errorf("read setup: %v", err)
@@ -313,26 +377,47 @@ func (s *Store) NextSetup(ctx context.Context) (*SetupTask, error) {
 		if running > 0 {
 			return nil
 		}
-		row, err := scanSetup(tx.QueryRowContext(ctx, `SELECT `+setupColumns+` FROM account_setup WHERE state = 'requested'
-			ORDER BY requested_at, alias LIMIT 1`))
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read setup: %v", err)
-		}
 		account, err := accountRow(ctx, tx, row.Alias)
 		if err != nil {
 			return err
 		}
 		row.State, row.StartedAt, row.ReportedAt, row.UpdatedAt = SetupRunning, now, now, now
-		if err := putSetup(ctx, tx, row); err != nil {
+		if err := putSetup(ctx, tx, *row); err != nil {
 			return err
 		}
-		out = &SetupTask{SetupRow: row, Account: account}
+		out = &SetupTask{SetupRow: *row, Account: account}
 		return nil
 	})
 	return out, err
+}
+
+// pickSetup selects the task nextSetup would hand out: the oldest requested task the
+// dashboard asked for, or, with a request ID, that task if it is the account's latest,
+// from Slack and requested. A nil row with a nil error is no task to hand out.
+func pickSetup(ctx context.Context, tx *sql.Tx, requestID string) (*SetupRow, error) {
+	if requestID == "" {
+		row, err := scanSetup(tx.QueryRowContext(ctx, `SELECT `+setupColumns+` FROM account_setup WHERE state = 'requested' AND source_kind = ?
+			ORDER BY requested_at, alias LIMIT 1`, SourceDashboard))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read setup: %v", err)
+		}
+		return &row, nil
+	}
+	row, err := scanSetup(tx.QueryRowContext(ctx, `SELECT `+setupColumns+` FROM account_setup WHERE request_id = ?`, requestID))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, ErrSetupTaskNotFound
+	case err != nil:
+		return nil, fmt.Errorf("read setup: %v", err)
+	case row.Source.Kind != SourceSlack:
+		return nil, ErrSetupNotSlack
+	case row.State != SetupRequested:
+		return nil, ErrSetupNotRequested
+	}
+	return &row, nil
 }
 
 // runningUnclaimed reads the row of alias inside tx and checks it is a running task
@@ -354,8 +439,12 @@ func runningTask(ctx context.Context, tx *sql.Tx, alias, requestID string) (Setu
 
 // ReportSetup records one step a login machine reports for the running task: the first
 // report sets the run ID, which every later one carries. A task that a handover
-// claimed takes no report.
-func (s *Store) ReportSetup(ctx context.Context, alias, requestID, runID, state, step, reason string) (SetupRow, error) {
+// claimed takes no report, and neither does one that came from another source than
+// sourceKind (ErrSetupSourceMismatch, after the IDs are checked). A wait until is
+// allowed only with the running state and the step SetupStepCaptcha, once per task, and
+// within SetupMaxWait after now (ErrSetupWaitUntil, nothing written); a report with a
+// different state or step clears it, and one without it leaves it.
+func (s *Store) ReportSetup(ctx context.Context, alias, requestID, runID, sourceKind, state, step, reason string, waitUntil *time.Time) (SetupRow, error) {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
@@ -374,6 +463,18 @@ func (s *Store) ReportSetup(ctx context.Context, alias, requestID, runID, state,
 		if row.RunID != "" && row.RunID != runID {
 			return ErrSetupIDsMismatch
 		}
+		if row.Source.Kind != sourceKind {
+			return ErrSetupSourceMismatch
+		}
+		switch {
+		case waitUntil != nil:
+			if state != SetupRunning || step != SetupStepCaptcha || row.WaitUntilSet || !waitUntil.After(now) || waitUntil.After(now.Add(SetupMaxWait)) {
+				return ErrSetupWaitUntil
+			}
+			row.WaitUntil, row.WaitUntilSet = waitUntil.UTC(), true
+		case state != SetupRunning || step != SetupStepCaptcha:
+			row.WaitUntil = time.Time{}
+		}
 		row.RunID, row.Step, row.Reason, row.State = runID, step, reason, state
 		row.ReportedAt, row.UpdatedAt = now, now
 		out = row
@@ -384,14 +485,17 @@ func (s *Store) ReportSetup(ctx context.Context, alias, requestID, runID, state,
 
 // CheckHandover says whether a handover for these IDs would be taken now, without
 // claiming it.
-func (s *Store) CheckHandover(ctx context.Context, alias, requestID, runID string) error {
+func (s *Store) CheckHandover(ctx context.Context, alias, requestID, runID, sourceKind string) error {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
 		return err
 	}
 	return s.transact(ctx, func(tx *sql.Tx) error {
-		_, err := handoverTask(ctx, tx, alias, requestID, runID)
+		row, err := handoverTask(ctx, tx, alias, requestID, runID)
+		if err == nil && row.Source.Kind != sourceKind {
+			err = ErrSetupSourceMismatch
+		}
 		return err
 	})
 }
@@ -415,7 +519,7 @@ func handoverTask(ctx context.Context, tx *sql.Tx, alias, requestID, runID strin
 // ClaimHandover claims the task for a handover, at most once: from then on the task
 // takes no other handover and no report, and the handover's own time limit applies. It
 // returns the task with its account.
-func (s *Store) ClaimHandover(ctx context.Context, alias, requestID, runID string) (SetupTask, error) {
+func (s *Store) ClaimHandover(ctx context.Context, alias, requestID, runID, sourceKind string) (SetupTask, error) {
 	// The timeouts are applied in a transaction of their own, so that they stand when the
 	// operation that follows is refused.
 	if err := s.ExpireSetups(ctx); err != nil {
@@ -427,6 +531,9 @@ func (s *Store) ClaimHandover(ctx context.Context, alias, requestID, runID strin
 		row, err := handoverTask(ctx, tx, alias, requestID, runID)
 		if err != nil {
 			return err
+		}
+		if row.Source.Kind != sourceKind {
+			return ErrSetupSourceMismatch
 		}
 		account, err := accountRow(ctx, tx, alias)
 		if err != nil {

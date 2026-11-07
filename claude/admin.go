@@ -31,6 +31,8 @@ type Admin struct {
 	Import func(ctx context.Context, alias string, login []byte) error
 	// Setup serves the setup commands of a login machine; nil answers them with 501.
 	Setup *Setup
+	// Writer is the account write path the account commands use; nil answers them with 501.
+	Writer *AccountWriter
 }
 
 // NewAdmin returns the management interface over accounts and store; reload runs one
@@ -61,6 +63,7 @@ func (a *Admin) Handler() http.Handler {
 	mux.HandleFunc("POST /refresh", a.serveRefreshAll)
 	mux.HandleFunc("POST /accounts/{alias}/import", a.serveImport)
 	mux.HandleFunc("POST /setup/next", a.serveSetupNext)
+	a.handleAccountWrites(mux)
 	mux.HandleFunc("POST /accounts/{alias}/setup/report", a.serveSetupReport)
 	mux.HandleFunc("POST /accounts/{alias}/setup/token", a.serveSetupToken)
 	mux.HandleFunc("GET /sessions", a.serveSessions)
@@ -393,7 +396,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 func setupAnswer(w http.ResponseWriter, err error, handover bool) {
 	var refused setupError
 	if !errors.As(err, &refused) {
-		refused = setupError{status: http.StatusInternalServerError, code: errorSetupStoreNotReady}
+		refused = setupError{status: http.StatusInternalServerError, code: errorStoreUnavailable}
 	}
 	body := map[string]any{"error": refused.code}
 	if handover {
@@ -402,13 +405,21 @@ func setupAnswer(w http.ResponseWriter, err error, handover bool) {
 	writeJSON(w, refused.status, body)
 }
 
-// serveSetupNext hands the next setup task to a login machine: {"task": null} or the task.
+// serveSetupNext hands a setup task out: {"task": null} or the task. Without a query it is
+// the next one the dashboard asked for, for the login machine at the desk; with request_id
+// it is that one task, which must have been requested from Slack.
 func (a *Admin) serveSetupNext(w http.ResponseWriter, r *http.Request) {
 	if a.Setup == nil {
 		setupAnswer(w, setupError{status: http.StatusNotImplemented, code: errorSetupUnavailable}, false)
 		return
 	}
-	task, err := a.Setup.Next(r.Context())
+	var task *nextTask
+	var err error
+	if r.URL.Query().Has("request_id") {
+		task, err = a.Setup.NextByID(r.Context(), r.URL.Query().Get("request_id"))
+	} else {
+		task, err = a.Setup.Next(r.Context())
+	}
 	if err != nil {
 		setupAnswer(w, err, false)
 		return
@@ -451,7 +462,7 @@ func (a *Admin) serveSetupToken(w http.ResponseWriter, r *http.Request) {
 		setupAnswer(w, setupError{status: http.StatusBadRequest, code: errorBadRequest}, true)
 		return
 	}
-	result, err := a.Setup.Token(r.Context(), r.PathValue("alias"), query.Get("request_id"), query.Get("run_id"), token)
+	result, err := a.Setup.Token(r.Context(), r.PathValue("alias"), query.Get("request_id"), query.Get("run_id"), query.Get("source_kind"), token)
 	if err != nil {
 		setupAnswer(w, err, true)
 		return

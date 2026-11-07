@@ -15,6 +15,8 @@ import (
 const (
 	setupRequestID = "0123456789abcdef0123456789abcdef"
 	setupRunID     = "20261107T041325123Z"
+	slackThread    = "C0TESTCHAN1/1700000000.000100"
+	slackTS        = "1700000000.000200"
 )
 
 // TestAdminCommandParsing checks which management invocations are accepted and the
@@ -58,11 +60,40 @@ func TestAdminCommandParsing(t *testing.T) {
 		{"machine_limit_zero", []string{"machine", "limit", "client-a", "0", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"machine_unknown_verb", []string{"machine", "drop", "client-a", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"setup_next", []string{"setup", "next", "--admin-socket", "admin.sock"}, "POST", "/setup/next", ""},
-		{"setup_report", []string{"setup", "report", "sample-a", setupRequestID, "--run-id", setupRunID, "--state", "running", "--step", "email_page", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/setup/report",
-			`{"reason":null,"request_id":"` + setupRequestID + `","run_id":"` + setupRunID + `","state":"running","step":"email_page"}`},
-		{"setup_report_with_reason", []string{"setup", "report", "sample-a", setupRequestID, "--admin-socket", "admin.sock", "--run-id", setupRunID, "--state", "failed", "--step", "cli", "--reason", "cli_login_failed"}, "POST", "/accounts/sample-a/setup/report",
-			`{"reason":"cli_login_failed","request_id":"` + setupRequestID + `","run_id":"` + setupRunID + `","state":"failed","step":"cli"}`},
-		{"setup_token", []string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/setup/token?request_id=" + setupRequestID + "&run_id=" + setupRunID, ""},
+		{"setup_report", []string{"setup", "report", "sample-a", setupRequestID, "--run-id", setupRunID, "--source-kind", "dashboard", "--state", "running", "--step", "email_page", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/setup/report",
+			`{"reason":null,"request_id":"` + setupRequestID + `","run_id":"` + setupRunID + `","source_kind":"dashboard","state":"running","step":"email_page"}`},
+		{"setup_report_with_reason", []string{"setup", "report", "sample-a", setupRequestID, "--admin-socket", "admin.sock", "--run-id", setupRunID, "--source-kind", "slack", "--state", "failed", "--step", "cli", "--reason", "cli_login_failed"}, "POST", "/accounts/sample-a/setup/report",
+			`{"reason":"cli_login_failed","request_id":"` + setupRequestID + `","run_id":"` + setupRunID + `","source_kind":"slack","state":"failed","step":"cli"}`},
+		{"setup_report_wait", []string{"setup", "report", "sample-a", setupRequestID, "--run-id", setupRunID, "--source-kind", "slack", "--state", "running", "--step", "awaiting_captcha", "--wait-until", "2026-11-07T04:30:00Z", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/setup/report",
+			`{"reason":null,"request_id":"` + setupRequestID + `","run_id":"` + setupRunID + `","source_kind":"slack","state":"running","step":"awaiting_captcha","wait_until":"2026-11-07T04:30:00Z"}`},
+		{"setup_report_without_source_kind", []string{"setup", "report", "sample-a", setupRequestID, "--run-id", setupRunID, "--state", "running", "--step", "cli", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_token_without_source_kind", []string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_token_with_wait_until", []string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--source-kind", "slack", "--wait-until", "2026-11-07T04:30:00Z", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_next_by_id", []string{"setup", "next", "--request-id", setupRequestID, "--admin-socket", "admin.sock"}, "POST", "/setup/next?request_id=" + setupRequestID, ""},
+		{"setup_next_with_source_kind", []string{"setup", "next", "--source-kind", "slack", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_request", []string{"setup", "request", "sample-a", "--rev", "3", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/setup/request",
+			`{"rev":3,"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
+		{"setup_request_without_rev", []string{"setup", "request", "sample-a", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_request_without_source", []string{"setup", "request", "sample-a", "--rev", "3", "--source-thread", slackThread, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_request_with_run_id", []string{"setup", "request", "sample-a", "--rev", "3", "--run-id", setupRunID, "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"account_create", append([]string{"account", "create", "sample-new"}, accountCreateFlags...), "POST", "/accounts",
+			`{"alias":"sample-new","email":"new@example.test","plan":"max-20x","proxy":{"expected_egress_ip":"192.0.2.9","host":"proxy.example.test","password_ref":"op://example-proxies/proxy-account/password","port":8080,"username_ref":"op://example-proxies/proxy-account/username"},"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
+		{"account_create_without_plan", withoutFlag(accountCreateFlags, "--plan"), "", "", ""},
+		{"account_create_without_source_ts", withoutFlag(accountCreateFlags, "--source-ts"), "", "", ""},
+		{"account_create_with_rev", append(append([]string{"account", "create", "sample-new"}, accountCreateFlags...), "--rev", "1"), "", "", ""},
+		{"account_show", []string{"account", "show", "sample-a", "--admin-socket", "admin.sock"}, "GET", "/accounts/sample-a", ""},
+		{"account_show_with_source", []string{"account", "show", "sample-a", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"account_verify", []string{"account", "verify", "sample-a", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/verify",
+			`{"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
+		{"account_verify_with_rev", []string{"account", "verify", "sample-a", "--rev", "2", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/verify",
+			`{"rev":2,"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
+		{"account_activate", []string{"account", "activate", "sample-a", "--rev", "2", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/activate",
+			`{"rev":2,"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
+		{"account_activate_without_rev", []string{"account", "activate", "sample-a", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"account_unknown_verb", []string{"account", "retire", "sample-a", "--rev", "2", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "", "", ""},
+		{"account_bad_alias", []string{"account", "show", "Sample A", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"account_with_pause_reason", []string{"account", "show", "sample-a", "--reason", "x", "--admin-socket", "admin.sock"}, "", "", ""},
+		{"setup_token", []string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--source-kind", "dashboard", "--admin-socket", "admin.sock"}, "POST", "/accounts/sample-a/setup/token?request_id=" + setupRequestID + "&run_id=" + setupRunID + "&source_kind=dashboard", ""},
 		{"setup_without_verb", []string{"setup", "--admin-socket", "admin.sock"}, "", "", ""},
 		{"setup_unknown_verb", []string{"setup", "done", "sample-a", setupRequestID, "--run-id", setupRunID, "--admin-socket", "admin.sock"}, "", "", ""},
 		{"setup_next_with_alias", []string{"setup", "next", "sample-a", "--admin-socket", "admin.sock"}, "", "", ""},
@@ -235,13 +266,13 @@ func TestSetupTokenCommand(t *testing.T) {
 	server.Start()
 	defer server.Close()
 	parse := func() adminCommand {
-		cmd, err := parseAdminCommand([]string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--admin-socket", socket})
+		cmd, err := parseAdminCommand([]string{"setup", "token", "sample-a", setupRequestID, "--run-id", setupRunID, "--source-kind", "dashboard", "--admin-socket", socket})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return cmd
 	}
-	wantPath := "POST /accounts/sample-a/setup/token?request_id=" + setupRequestID + "&run_id=" + setupRunID + " "
+	wantPath := "POST /accounts/sample-a/setup/token?request_id=" + setupRequestID + "&run_id=" + setupRunID + "&source_kind=dashboard "
 	for _, input := range []string{token, token + "\n", token + "\r\n"} {
 		cmd := parse()
 		cmd.input = strings.NewReader(input)
@@ -258,7 +289,7 @@ func TestSetupTokenCommand(t *testing.T) {
 	cmd := parse()
 	cmd.input = strings.NewReader(token)
 	var out bytes.Buffer
-	if err := runAdmin(t.Context(), cmd, &out); err == nil || !strings.Contains(err.Error(), "refused: probe_refused") || strings.Contains(err.Error(), token) || out.Len() != 0 {
+	if err := runAdmin(t.Context(), cmd, &out); err == nil || !strings.HasSuffix(err.Error(), "refused: probe_refused (written: false)") || strings.Contains(err.Error(), token) || out.Len() != 0 {
 		t.Fatalf("refusal: %v %q", err, out.String())
 	}
 	// 4096 bytes go; 4097 do not, and nothing is sent.
@@ -274,4 +305,23 @@ func TestSetupTokenCommand(t *testing.T) {
 	if err := runAdmin(t.Context(), cmd, &out); err == nil || !strings.Contains(err.Error(), "4 KiB") || len(received) != before+1 {
 		t.Fatalf("4097 bytes: %v, requests %d", err, len(received)-before)
 	}
+}
+
+// accountCreateFlags are the flags of a complete `account create` after its alias.
+var accountCreateFlags = []string{"--email", "new@example.test", "--plan", "max-20x", "--proxy-host", "proxy.example.test", "--proxy-port", "8080",
+	"--expected-egress-ip", "192.0.2.9", "--proxy-username-ref", "op://example-proxies/proxy-account/username",
+	"--proxy-password-ref", "op://example-proxies/proxy-account/password", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}
+
+// withoutFlag returns `account create sample-new` with the flags but without the named one
+// and its value.
+func withoutFlag(flags []string, name string) []string {
+	out := []string{"account", "create", "sample-new"}
+	for i := 0; i < len(flags); i++ {
+		if flags[i] == name {
+			i++
+			continue
+		}
+		out = append(out, flags[i])
+	}
+	return out
 }

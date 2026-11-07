@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -61,10 +62,26 @@ func (v Verification) Equal(o Verification) bool {
 	return same(v.TokenOK, o.TokenOK) && same(v.EgressOK, o.EgressOK) && same(v.ProbeOK, o.ProbeOK) && v.At.Equal(o.At)
 }
 
-// AuditEntry says who wrote and what: the source address and the action name.
+// Source says where a request came from when a person did not make it on the dashboard:
+// the kind (SourceSlack) and, for a Slack message, its thread key CHANNEL/TS and its ts.
+// It is a record, never proof that anyone agreed to anything. The zero Source is the
+// dashboard's, whose requests are recorded by their source address.
+type Source struct {
+	Kind, Thread, TS string
+}
+
+// The kinds of Source. A request without a Source is the dashboard's.
+const (
+	SourceDashboard = "dashboard"
+	SourceSlack     = "slack"
+)
+
+// AuditEntry says who wrote and what: the source address, the action name and, for a
+// request through the management socket, its Source.
 type AuditEntry struct {
 	SourceIP string
 	Action   string
+	Source   Source
 }
 
 // AuditRow is one row of the audit table; Changes maps a field name to its old and new
@@ -74,6 +91,7 @@ type AuditRow struct {
 	SourceIP string
 	Action   string
 	Alias    string
+	Source   Source
 	Changes  map[string]FieldChange
 }
 
@@ -255,7 +273,8 @@ func insertAudit(ctx context.Context, tx *sql.Tx, now int64, audit AuditEntry, a
 	if err != nil {
 		return fmt.Errorf("audit: %v", err)
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO account_audit (ts, source_ip, action, alias, changes) VALUES (?, ?, ?, ?, ?)", now, audit.SourceIP, audit.Action, alias, string(data)); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO account_audit (ts, source_ip, action, alias, changes, source_kind, source_thread, source_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		now, audit.SourceIP, audit.Action, alias, string(data), audit.Source.Kind, audit.Source.Thread, audit.Source.TS); err != nil {
 		return fmt.Errorf("audit: %v", err)
 	}
 	return nil
@@ -263,9 +282,17 @@ func insertAudit(ctx context.Context, tx *sql.Tx, now int64, audit AuditEntry, a
 
 // AccountAudit returns the audit rows of account alias, oldest first.
 func (s *Store) AccountAudit(ctx context.Context, alias string) ([]AuditRow, error) {
-	result, err := s.db.QueryContext(ctx, "SELECT ts, source_ip, action, alias, changes FROM account_audit WHERE alias = ? ORDER BY id", alias)
+	rows, _, err := s.AccountAuditLast(ctx, alias, -1)
+	return rows, err
+}
+
+// AccountAuditLast returns the last limit audit rows of account alias, oldest first, and
+// whether older ones were left out; a limit below 0 returns all of them.
+func (s *Store) AccountAuditLast(ctx context.Context, alias string, limit int) ([]AuditRow, bool, error) {
+	result, err := s.db.QueryContext(ctx, `SELECT ts, source_ip, action, alias, changes, source_kind, source_thread, source_ts FROM account_audit
+		WHERE alias = ? ORDER BY id DESC LIMIT ?`, alias, limit+boolToInt(limit >= 0))
 	if err != nil {
-		return nil, fmt.Errorf("read audit: %v", err)
+		return nil, false, fmt.Errorf("read audit: %v", err)
 	}
 	defer func() { _ = result.Close() }()
 	var rows []AuditRow
@@ -273,16 +300,31 @@ func (s *Store) AccountAudit(ctx context.Context, alias string) ([]AuditRow, err
 		var row AuditRow
 		var ts int64
 		var changes string
-		if err := result.Scan(&ts, &row.SourceIP, &row.Action, &row.Alias, &changes); err != nil {
-			return nil, fmt.Errorf("read audit: %v", err)
+		if err := result.Scan(&ts, &row.SourceIP, &row.Action, &row.Alias, &changes, &row.Source.Kind, &row.Source.Thread, &row.Source.TS); err != nil {
+			return nil, false, fmt.Errorf("read audit: %v", err)
 		}
 		row.Time = fromMillis(ts)
 		if err := json.Unmarshal([]byte(changes), &row.Changes); err != nil {
-			return nil, fmt.Errorf("read audit: %v", err)
+			return nil, false, fmt.Errorf("read audit: %v", err)
 		}
 		rows = append(rows, row)
 	}
-	return rows, result.Err()
+	if err := result.Err(); err != nil {
+		return nil, false, fmt.Errorf("read audit: %v", err)
+	}
+	truncated := limit >= 0 && len(rows) > limit
+	if truncated {
+		rows = rows[:limit]
+	}
+	slices.Reverse(rows)
+	return rows, truncated, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // PlanQuotaUnit returns the quota unit of plan at time at, ErrNoPlan when the plan has
@@ -294,6 +336,28 @@ func (s *Store) PlanQuotaUnit(ctx context.Context, plan string, at time.Time) (f
 	}
 	defer func() { _ = tx.Rollback() }()
 	return planUnitAt(ctx, tx, plan, at.UnixMilli())
+}
+
+// AccountCreated returns the audit row that records the creation of account alias, nil
+// for an account that was imported or whose row is gone.
+func (s *Store) AccountCreated(ctx context.Context, alias string) (*AuditRow, error) {
+	var row AuditRow
+	var ts int64
+	var changes string
+	err := s.db.QueryRowContext(ctx, `SELECT ts, source_ip, action, alias, changes, source_kind, source_thread, source_ts FROM account_audit
+		WHERE alias = ? AND action = 'account-create' ORDER BY id LIMIT 1`, alias).
+		Scan(&ts, &row.SourceIP, &row.Action, &row.Alias, &changes, &row.Source.Kind, &row.Source.Thread, &row.Source.TS)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read audit: %v", err)
+	}
+	row.Time = fromMillis(ts)
+	if err := json.Unmarshal([]byte(changes), &row.Changes); err != nil {
+		return nil, fmt.Errorf("read audit: %v", err)
+	}
+	return &row, nil
 }
 
 // RecordAudit writes one audit row for a change made outside the accounts table, such as
