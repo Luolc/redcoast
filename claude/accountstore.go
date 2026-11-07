@@ -12,6 +12,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/Luolc/redcoast/credential"
 	"github.com/Luolc/redcoast/session"
 )
 
@@ -103,20 +104,25 @@ func rowDocument(row session.AccountRow) (inventoryFile, []byte, error) {
 }
 
 // ImportInventory fills the accounts table of store from the inventory directory dir
-// once: it reads every account file, refuses the inventory as readInventory does, and
-// writes all the rows and the marker in one transaction. It reports false, and reads
+// once: it reads every account file, refuses the inventory as readInventory does and
+// also a reference field of a file the gateway does not serve that is not a credential
+// reference, and writes all the rows and the marker in one transaction. It reports false, and reads
 // nothing, when the table was imported before. Files of accounts the gateway does not
 // serve are imported too, with their consumed fields as they are.
 func ImportInventory(ctx context.Context, store *session.Store, dir string, provider Provider) (bool, error) {
 	if _, initialized, err := store.Accounts(ctx); err != nil || initialized {
 		return false, err
 	}
-	// The directory must load as a start from it would: all or nothing.
-	if _, _, err := readInventory(dir, provider); err != nil {
-		return false, err
-	}
+	// The directory must load as a start from it would: all or nothing, validated
+	// on the same bytes that are imported.
 	rows, err := inventoryRows(dir)
 	if err != nil {
+		return false, err
+	}
+	if err := checkRows(rows, provider); err != nil {
+		return false, err
+	}
+	if _, err := readDirectHosts(dir); err != nil {
 		return false, err
 	}
 	imported, err := store.ImportAccounts(ctx, rows)
@@ -124,6 +130,39 @@ func ImportInventory(ctx context.Context, store *session.Store, dir string, prov
 		log.Printf("accounts: imported %d from the inventory directory; the accounts table is the source from now on and the directory's account files are ignored", len(rows))
 	}
 	return imported, err
+}
+
+// checkRows refuses rows that could not be stored or served: a reference field of any
+// row that is not a credential reference, wherever the account is served or not, and
+// whatever refuses a served account. All problems are reported together, by alias and
+// field and never a value.
+func checkRows(rows []session.AccountRow, provider Provider) error {
+	var errs []error
+	for _, row := range rows {
+		if row.Status != "active" || row.Access != "gateway" {
+			// A served row's references are checked, with the rest, by servedRows.
+			errs = append(errs, checkRowRefs(row))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	_, err := servedRows(rows, provider)
+	return err
+}
+
+// checkRowRefs refuses a row whose token or proxy login reference is set but is not a
+// credential reference (op://, env:// or file://), so that a pasted value never reaches
+// the table, its backups, its export or the dashboard. The error names the alias and
+// the field in the inventory's key names, never the value.
+func checkRowRefs(row session.AccountRow) error {
+	var errs []error
+	for _, ref := range []struct{ field, value string }{{"oauth_token", row.TokenRef}, {"proxy.username_ref", row.UsernameRef}, {"proxy.password_ref", row.PasswordRef}} {
+		if ref.value != "" && credential.Check(ref.value) != nil {
+			errs = append(errs, fieldError{row.Alias, ref.field, "not a credential reference"})
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // inventoryRows reads every account file of dir as a row.
@@ -201,6 +240,9 @@ func ExportInventory(dir string, rows []session.AccountRow) error {
 		return fmt.Errorf("export: %v", err)
 	}
 	for _, row := range rows {
+		if !accountAlias.MatchString(row.Alias) {
+			return fieldError{row.Alias, "alias", "not an account alias"}
+		}
 		file := exportFile{Email: row.Email, Access: row.Access, Status: row.Status, OAuthToken: row.TokenRef, DeviceID: row.DeviceID, AccountUUID: row.AccountUUID}
 		if exit := (exportExit{row.Direct, row.ProxyHost, row.ProxyPort, row.ExpectedIP, row.UsernameRef, row.PasswordRef}); exit != (exportExit{}) {
 			file.Proxy = &exit

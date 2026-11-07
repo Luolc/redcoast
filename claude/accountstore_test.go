@@ -160,6 +160,79 @@ func TestImportAllOrNothing(t *testing.T) {
 	importFixture(t, h, dir)
 }
 
+// TestImportRefusesValuesInReferenceFields checks that a first start refuses a directory
+// in which any file, served or not, holds in a reference field something that is not a
+// credential reference, so that a pasted value never reaches the table, and that the
+// error names the alias and the field and never the value. Control arm: the same files
+// with references import, with the shapes the resolver accepts.
+func TestImportRefusesValuesInReferenceFields(t *testing.T) {
+	const pastedToken, pastedPassword, pastedUser = "sk-ant-oat01-PASTED-VALUE", "plain-password-PASTED", "plain-user-PASTED"
+	h := newHarness(t)
+	dir := writeInventory(t, map[string]string{
+		"sample-a.yaml": inventoryYAML("sample-a", "active", "gateway", "op://example-vault/token-sample-a/credential", "8080"),
+		"sample-d.yaml": strings.NewReplacer("oauth_token: null", "oauth_token: "+pastedToken, "op://example-proxies/proxy-account/password", pastedPassword, "op://example-proxies/proxy-account/username", pastedUser).
+			Replace(inventoryYAML("sample-d", "testing", "gateway", "", "8083")),
+	})
+	imported, err := ImportInventory(t.Context(), h.store, dir, Claude)
+	if err == nil || imported {
+		t.Fatalf("import = %v, %v", imported, err)
+	}
+	for _, want := range []string{"sample-d: oauth_token: not a credential reference", "sample-d: proxy.username_ref: not a credential reference", "sample-d: proxy.password_ref: not a credential reference"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q lacks %q", err, want)
+		}
+	}
+	for _, value := range []string{pastedToken, pastedPassword, pastedUser} {
+		if strings.Contains(err.Error(), value) {
+			t.Fatalf("error holds the pasted value %q", value)
+		}
+	}
+	if rows, initialized, err := h.store.Accounts(t.Context()); err != nil || initialized || len(rows) != 0 {
+		t.Fatalf("table after a refused import: %d rows, initialized %v, %v", len(rows), initialized, err)
+	}
+	// A snapshot of the store holds no pasted value either.
+	snapshot := filepath.Join(t.TempDir(), "snapshot.sqlite")
+	if err := h.store.VacuumInto(t.Context(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(snapshot); err != nil || strings.Contains(string(data), pastedToken) || strings.Contains(string(data), pastedPassword) {
+		t.Fatalf("snapshot holds a pasted value: %v", err)
+	}
+	// Control: references of each accepted scheme pass the check, a value does not.
+	for _, reference := range []string{"op://example-vault/item/field", "env://EXAMPLE_NAME", "file:///example/path"} {
+		if err := checkRowRefs(session.AccountRow{Alias: "sample-d", TokenRef: reference, UsernameRef: reference, PasswordRef: reference}); err != nil {
+			t.Fatalf("%s refused: %v", reference, err)
+		}
+	}
+	if err := checkRowRefs(session.AccountRow{Alias: "sample-d", TokenRef: pastedToken}); err == nil {
+		t.Fatal("a pasted value passed")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sample-d.yaml"), []byte(inventoryYAML("sample-d", "testing", "gateway", "op://example-vault/token-sample-d/credential", "8083")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	importFixture(t, h, dir)
+}
+
+// TestExportRefusesAnAliasThatIsNoFileName checks that the export writes no file for a
+// row whose alias could name another path. Control arm: a proper alias is written.
+func TestExportRefusesAnAliasThatIsNoFileName(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "export")
+	row := session.AccountRow{Alias: "../escape", Email: "x@example.test", Access: "direct", Status: "testing"}
+	if err := ExportInventory(out, []session.AccountRow{row}); err == nil {
+		t.Fatal("an alias with a path was exported")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(out), "escape.yaml")); err == nil {
+		t.Fatal("a file was written outside the directory")
+	}
+	row.Alias = "sample-x"
+	if err := ExportInventory(out, []session.AccountRow{row}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "sample-x.yaml")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestImportRefusesAnAccountThatCannotBeStored checks that a row the table refuses
 // leaves no row and no marker behind: the import is one transaction.
 func TestImportRefusesAnAccountThatCannotBeStored(t *testing.T) {
