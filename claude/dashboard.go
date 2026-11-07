@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Luolc/redcoast/backup"
@@ -81,20 +81,13 @@ const snapshotInterval = 30 * time.Second
 // under way.
 type snapshots struct {
 	compute chan struct{}
-	mu      sync.Mutex
-	latest  *computedSnapshot // nil until a computation succeeds
+	latest  atomic.Pointer[computedSnapshot] // nil until a computation succeeds
 }
 
 // computedSnapshot is a snapshot with the set whose candidates it was computed for.
 type computedSnapshot struct {
 	set  *AccountSet
 	snap session.Snapshot
-}
-
-func (s *snapshots) load() *computedSnapshot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.latest
 }
 
 // NewDashboard returns the dashboard over the egress checks' accounts.
@@ -118,7 +111,7 @@ func (d *Dashboard) RunSnapshots(ctx context.Context) error {
 		return nil
 	}
 	for again := false; ; again = true {
-		if _, err := d.refresh(ctx, d.egress.accounts.set.Load(), again); err != nil && ctx.Err() == nil {
+		if _, err := d.refresh(ctx, nil, again); err != nil && ctx.Err() == nil {
 			log.Printf("dashboard: snapshot: %v", err)
 		}
 		select {
@@ -129,9 +122,10 @@ func (d *Dashboard) RunSnapshots(ctx context.Context) error {
 	}
 }
 
-// refresh computes the snapshot for set's candidates and keeps it when it succeeds. It
-// waits for the computation under way first; without again, it then computes only when
-// the latest snapshot is not for set.
+// refresh computes the snapshot for set's candidates, or with a nil set for the set
+// current once the computation under way has ended, and keeps it when it succeeds. It
+// waits for that computation first; without again, it then computes only when the
+// latest snapshot is not for set.
 func (d *Dashboard) refresh(ctx context.Context, set *AccountSet, again bool) (session.Snapshot, error) {
 	s := &d.snaps
 	select {
@@ -140,16 +134,17 @@ func (d *Dashboard) refresh(ctx context.Context, set *AccountSet, again bool) (s
 		return session.Snapshot{}, ctx.Err()
 	}
 	defer func() { <-s.compute }()
-	if latest := s.load(); !again && latest != nil && latest.set == set {
+	if set == nil {
+		set = d.egress.accounts.set.Load()
+	}
+	if latest := s.latest.Load(); !again && latest != nil && latest.set == set {
 		return latest.snap, nil
 	}
 	snap, err := d.snapshot(ctx, set.Candidates())
 	if err != nil {
 		return session.Snapshot{}, err
 	}
-	s.mu.Lock()
-	s.latest = &computedSnapshot{set: set, snap: snap}
-	s.mu.Unlock()
+	s.latest.Store(&computedSnapshot{set: set, snap: snap})
 	return snap, nil
 }
 
@@ -159,12 +154,12 @@ func (d *Dashboard) refresh(ctx context.Context, set *AccountSet, again bool) (s
 // changed shows at once: the one under way, or one it computes itself. If that fails, it
 // returns the latest snapshot for another set, and with none the error.
 func (d *Dashboard) latestSnapshot(ctx context.Context, set *AccountSet) (session.Snapshot, error) {
-	if latest := d.snaps.load(); latest != nil && latest.set == set {
+	if latest := d.snaps.latest.Load(); latest != nil && latest.set == set {
 		return latest.snap, nil
 	}
 	snap, err := d.refresh(ctx, set, false)
 	if err != nil {
-		if latest := d.snaps.load(); latest != nil {
+		if latest := d.snaps.latest.Load(); latest != nil {
 			return latest.snap, nil
 		}
 		return session.Snapshot{}, err

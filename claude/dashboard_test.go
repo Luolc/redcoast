@@ -804,7 +804,7 @@ func TestDashboardSnapshotStops(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunSnapshots did not stop while computing")
 	}
-	if latest := f.d.snaps.load(); latest != nil {
+	if latest := f.d.snaps.latest.Load(); latest != nil {
 		t.Fatalf("a computation stopped short was kept: %v", latest.snap.At)
 	}
 }
