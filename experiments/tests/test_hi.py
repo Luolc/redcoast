@@ -1,5 +1,6 @@
 from pathlib import Path
 import struct
+from types import SimpleNamespace
 
 import hi
 import pytest
@@ -139,3 +140,33 @@ def test_load_account_refuses_a_malformed_field_by_name(
   (tmp_path / "bad.yaml").write_text(GOOD.replace(old, new))
   with pytest.raises(ValueError, match=field):
     hi.load_account(tmp_path, "bad", *vaults)
+
+
+class FakeGateway:
+  returncode = 137
+
+  def poll(self):
+    return None
+
+  def communicate(self, timeout=None):
+    return b"", b""
+
+
+def test_stop_processes_records_a_clear_failure_for_empty_gateway_output(
+  monkeypatch,
+):
+  run = hi.Run(
+    setup=SimpleNamespace(names=["gateway"]),
+    report={"cleanup_failures": []},
+    gateway=FakeGateway(),
+  )
+  monkeypatch.setattr(
+    hi.Run,
+    "docker",
+    lambda self, *args, timeout=10: SimpleNamespace(returncode=0),
+  )
+  run.stop_processes()
+  assert run.report["cleanup_failures"] == [
+    {"operation": "process_stop", "failure_kind": "RuntimeError"}
+  ]
+  assert run.report["gateway_container_exit_code"] == 137
