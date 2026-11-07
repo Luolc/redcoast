@@ -59,6 +59,14 @@ dashboard_write:
 # dashboard_write:
 #   allow_from: ["192.0.2.0/24"]
 #   token_ref_template: "op://example-vault/claude-oauth-token-{alias}/credential"
+# setup lets a login machine, a separate host that reaches the management socket over
+# a restricted ssh key, log an account in and hand its setup token to the gateway, which
+# tries the token with one quota request and writes it to the secret store at the
+# account's token reference (the template above). It needs credentials.onepassword_token
+# and token_ref_template, and the 1Password service account must be allowed to write
+# the vault the template names. Off, the setup routes answer 501.
+setup:
+  enabled: false
 capture_dir: ""
 
 egress_interval: 15m

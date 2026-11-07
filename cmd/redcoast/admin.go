@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,7 +21,7 @@ import (
 )
 
 // adminCommands are the subcommands served over the management socket.
-var adminCommands = map[string]bool{"reload": true, "handoff": true, "status": true, "sessions": true, "pause": true, "resume": true, "refresh": true, "machine": true, "import": true}
+var adminCommands = map[string]bool{"reload": true, "handoff": true, "status": true, "sessions": true, "pause": true, "resume": true, "refresh": true, "machine": true, "import": true, "setup": true}
 
 // adminCommand is a parsed management invocation: the request to send to the socket.
 type adminCommand struct {
@@ -30,6 +31,12 @@ type adminCommand struct {
 	body    any           // nil sends no body
 	input   io.Reader     // sent as the body instead, as it is; nil sends body
 	timeout time.Duration // how long the command waits for the gateway's answer
+	// inputLimit is the most bytes input may hold, maxImportInput when 0; trimLine drops
+	// one line break from its end; inputName and contentType describe it.
+	inputLimit  int
+	trimLine    bool
+	inputName   string
+	contentType string
 	// write writes a success answer to out; nil writes it indented.
 	write func(answer []byte, out io.Writer) error
 }
@@ -46,6 +53,9 @@ var errAdminUsage = errors.New(`usage:
   redcoast claude|codex refresh <alias> --admin-socket <path>
   redcoast claude|codex refresh --all --admin-socket <path>
   redcoast codex import <alias> --admin-socket <path> < auth.json
+  redcoast claude setup next --admin-socket <path>
+  redcoast claude setup report <alias> <request-id> --run-id <id> --state <state> --step <code> [--reason <code>] --admin-socket <path>
+  redcoast claude setup token <alias> <request-id> --run-id <id> --admin-socket <path> < token
   redcoast claude|codex machine add <name> <sha256-of-credential> --admin-socket <path> [--max-sessions <n>]
   redcoast claude|codex machine revoke <name> --admin-socket <path>
   redcoast claude|codex machine limit <name> <n> --admin-socket <path>
@@ -60,7 +70,9 @@ hard threshold; refresh --all does that for every account, one after another, pr
 one line per account and fails when any of them failed (an account skipped for a pause
 other than quota is not a failure); import reads a Codex login in auth.json's format
 from stdin, replaces the account's login with it when it is the account's, and renews
-it at once, so the copy it came from stops working; sessions lists the sessions started in [since,
+it at once, so the copy it came from stops working; the setup commands are for a login machine: next prints
+the next setup task or {"task": null}, report records one step of the task it runs, and token reads the setup token from
+stdin (at most 4 KiB, one line) and hands it over, never printing it; sessions lists the sessions started in [since,
 until), by default the last day, newest first and at most 500, only the ended ones unless --state all; machine add takes the SHA-256 the client machine printed, never the credential itself`)
 
 // handoffCommandTimeout bounds a handoff command: the new process's startup, bounded
@@ -95,6 +107,7 @@ func parseAdminCommand(arguments []string) (adminCommand, error) {
 	until := flags.String("until", "", "End of a pause, RFC 3339; omitted pauses until resume")
 	maxSessions := flags.Int("max-sessions", 0, "Session limit of a machine being added; 0 takes the default")
 	all := flags.Bool("all", false, "Refresh every account")
+	setup := registerSetupFlags(flags, arguments[0])
 	listing := sessionFilters(flags, arguments[0])
 	flagArguments, rest := splitFlags(flags, arguments[1:])
 	if err := flags.Parse(flagArguments); err != nil || flags.NArg() != 0 || *socket == "" || *all && arguments[0] != "refresh" {
@@ -102,6 +115,9 @@ func parseAdminCommand(arguments []string) (adminCommand, error) {
 	}
 	if arguments[0] == "sessions" {
 		return sessionsCommand(*socket, *until, listing, rest)
+	}
+	if arguments[0] == "setup" {
+		return parseSetup(flags, setup, *socket, rest, *reason, *until != "" || *maxSessions != 0)
 	}
 	if arguments[0] != "pause" && *until != "" || arguments[0] != "machine" && *maxSessions != 0 {
 		return adminCommand{}, errAdminUsage
@@ -206,6 +222,87 @@ func machineCommand(cmd adminCommand, rest []string, maxSessions int) (adminComm
 	return cmd, nil
 }
 
+// setupFlags are the flags of the setup commands.
+type setupFlags struct {
+	runID, state, step, reason string
+	reasonGiven                bool
+}
+
+// registerSetupFlags registers the flags of the setup commands on flags when the
+// subcommand is setup, whose --state would otherwise clash with the session filter of
+// the same name; for any other subcommand it registers nothing.
+func registerSetupFlags(flags *flag.FlagSet, subcommand string) *setupFlags {
+	f := &setupFlags{}
+	if subcommand == "setup" {
+		flags.StringVar(&f.runID, "run-id", "", "Run ID of a setup task")
+		flags.StringVar(&f.state, "state", "", "State of a setup report: running, needs_human or failed")
+		flags.StringVar(&f.step, "step", "", "Step of a setup report")
+	}
+	return f
+}
+
+// parseSetup builds a setup command from the parsed flags. otherFlags says that a flag
+// of another subcommand (--until, --max-sessions) was given.
+func parseSetup(flags *flag.FlagSet, setup *setupFlags, socket string, rest []string, reason string, otherFlags bool) (adminCommand, error) {
+	if otherFlags {
+		return adminCommand{}, errAdminUsage
+	}
+	flags.Visit(func(f *flag.Flag) { setup.reasonGiven = setup.reasonGiven || f.Name == "reason" })
+	setup.reason = reason
+	return setupCommand(socket, rest, *setup)
+}
+
+// setupCommandTimeout bounds a setup command: the handover's own work, bounded by the
+// gateway, and the answer.
+const setupCommandTimeout = 5*time.Minute + 30*time.Second
+
+// maxSetupInput bounds the token a handover reads; the gateway takes at most 4 KiB.
+const maxSetupInput = 4 << 10
+
+// setupCommand builds `setup next`, `setup report <alias> <request-id>` or `setup token
+// <alias> <request-id>`. The IDs go into the request as the gateway's shapes only, so a
+// misuse is refused here without a request.
+func setupCommand(socket string, rest []string, f setupFlags) (adminCommand, error) {
+	cmd := adminCommand{socket: socket, method: http.MethodPost, timeout: 30 * time.Second}
+	if len(rest) == 0 {
+		return adminCommand{}, errAdminUsage
+	}
+	switch rest[0] {
+	case "next":
+		if len(rest) != 1 || f.runID != "" || f.state != "" || f.step != "" || f.reasonGiven {
+			return adminCommand{}, errAdminUsage
+		}
+		cmd.path = "/setup/next"
+		return cmd, nil
+	case "report", "token":
+		if len(rest) != 3 || !accountAlias.MatchString(rest[1]) || f.runID == "" {
+			return adminCommand{}, errAdminUsage
+		}
+	default:
+		return adminCommand{}, errAdminUsage
+	}
+	alias, requestID := rest[1], rest[2]
+	if rest[0] == "token" {
+		if f.state != "" || f.step != "" || f.reasonGiven {
+			return adminCommand{}, errAdminUsage
+		}
+		query := url.Values{"request_id": {requestID}, "run_id": {f.runID}}
+		cmd.path = "/accounts/" + alias + "/setup/token?" + query.Encode()
+		cmd.input, cmd.inputLimit, cmd.trimLine, cmd.timeout = os.Stdin, maxSetupInput, true, setupCommandTimeout
+		cmd.inputName, cmd.contentType = "token", "text/plain"
+		return cmd, nil
+	}
+	if f.state == "" || f.step == "" {
+		return adminCommand{}, errAdminUsage
+	}
+	body := map[string]any{"request_id": requestID, "run_id": f.runID, "state": f.state, "step": f.step, "reason": nil}
+	if f.reasonGiven {
+		body["reason"] = f.reason
+	}
+	cmd.path, cmd.body = "/accounts/"+alias+"/setup/report", body
+	return cmd, nil
+}
+
 // accountCommand builds the pause, resume, refresh or import of the one alias in rest.
 func accountCommand(cmd adminCommand, verb string, rest []string, reason, until string) (adminCommand, error) {
 	if len(rest) != 1 || !accountAlias.MatchString(rest[0]) {
@@ -293,9 +390,17 @@ func runAdmin(ctx context.Context, cmd adminCommand, out io.Writer) error {
 	var body io.Reader
 	switch {
 	case cmd.input != nil:
-		login, err := io.ReadAll(io.LimitReader(cmd.input, maxImportInput+1))
-		if err != nil || len(login) > maxImportInput {
-			return errors.New("stdin: cannot read a login of at most 64 KiB")
+		limit, name := cmd.inputLimit, cmd.inputName
+		if limit == 0 {
+			limit, name = maxImportInput, "login"
+		}
+		// Two bytes more than the limit leave room for the line break a trim drops.
+		login, err := io.ReadAll(io.LimitReader(cmd.input, int64(limit)+2))
+		if cmd.trimLine {
+			login = bytes.TrimSuffix(bytes.TrimSuffix(login, []byte("\n")), []byte("\r"))
+		}
+		if err != nil || len(login) > limit {
+			return fmt.Errorf("stdin: cannot read a %s of at most %d KiB", name, limit>>10)
 		}
 		body = bytes.NewReader(login)
 	case cmd.body != nil:
@@ -310,7 +415,7 @@ func runAdmin(ctx context.Context, cmd adminCommand, out io.Writer) error {
 		return err
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", cmp.Or(cmd.contentType, "application/json"))
 	}
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", cmd.socket)

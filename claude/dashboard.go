@@ -107,6 +107,7 @@ type gatewayView struct {
 	OpenTunnels     int                  `json:"open_tunnels"`
 	TunnelLimit     int                  `json:"tunnel_limit"`
 	QuotaRefresh    *QuotaRefreshState   `json:"quota_refresh"` // null when the provider cannot refresh
+	Setup           *setupGateway        `json:"setup"`         // null while setup is off, and at a provider without it
 }
 
 // backupView is the backup's last runs. The error text stays in the log: it comes from
@@ -126,6 +127,8 @@ type dashboardAccount struct {
 	Concurrency int          `json:"concurrency"`
 	// Config is the account's row of the accounts table; absent for a provider without one.
 	Config *accountConfig `json:"config,omitempty"`
+	// Setup is the account's setup state, as in Config; absent while setup is off.
+	Setup *setupBlock `json:"setup,omitempty"`
 }
 
 // accountConfig is one row of the accounts table as the dashboard shows it. The
@@ -143,6 +146,8 @@ type accountConfig struct {
 	Rev         int64                `json:"rev"`
 	CreatedAt   time.Time            `json:"created_at"`
 	UpdatedAt   time.Time            `json:"updated_at"`
+	// Setup is the account's setup state; absent while setup is off.
+	Setup *setupBlock `json:"setup,omitempty"`
 }
 
 // proxyConfig is the exit of an accountConfig.
@@ -270,6 +275,10 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 		}
 	}
 	view.ProxyRefOptions = proxyRefOptions(rows)
+	setupView, err := d.setupView(r.Context(), &view)
+	if err != nil {
+		return dashboardView{}, err
+	}
 	view.AccountsEditable, view.Write = d.cfg.Write.view(r)
 	view.Health = d.egress.judge(statuses, nil)
 	view.Gateway = gatewayView{
@@ -279,6 +288,7 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 		InventoryCommit: commitOf(d.cfg.Inventory),
 		Started:         d.cfg.Started.UTC(),
 		Retention:       d.cfg.Store.LastRetention(),
+		Setup:           setupView,
 	}
 	for _, link := range d.cfg.Links {
 		view.Gateway.Dashboards = append(view.Gateway.Dashboards, DashboardLink{Provider: link.Provider, URL: linkURL(link.URL, r)})
@@ -298,6 +308,30 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 		view.Gateway.QuotaRefresh = &state
 	}
 	return view, nil
+}
+
+// setupView puts each account's setup state into view and returns gateway.setup; both
+// are absent while setup is off.
+func (d *Dashboard) setupView(ctx context.Context, view *dashboardView) (*setupGateway, error) {
+	setup := d.cfg.Write.Setup()
+	if setup == nil {
+		return nil, nil
+	}
+	states, err := d.cfg.Reader.SetupRows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var shown []*accountConfig
+	for i := range view.Unserved {
+		shown = append(shown, &view.Unserved[i])
+	}
+	for i := range view.Accounts {
+		if c := view.Accounts[i].Config; c != nil {
+			shown = append(shown, c)
+		}
+		view.Accounts[i].Setup = blockOf(states[view.Accounts[i].Alias])
+	}
+	return setup.decorate(states, shown), nil
 }
 
 // linkURL returns link as it is, or for ":<port>" the root of r's scheme and Host
@@ -438,6 +472,12 @@ func commitOf(path string) string {
 	return ""
 }
 
+// setupUnavailable is the answer of the setup route while setup is off, given before
+// anything else is read.
+func setupUnavailable(rw http.ResponseWriter, _ *http.Request) {
+	writeJSON(rw, http.StatusNotImplemented, map[string]string{"error": errorSetupUnavailable})
+}
+
 // writeRoutes registers the account write routes. Without a write path they answer 501
 // before anything else is read; with one, each runs the checks of AccountWriter.route.
 func (d *Dashboard) writeRoutes(mux *http.ServeMux) {
@@ -450,7 +490,13 @@ func (d *Dashboard) writeRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("PATCH /accounts/{alias}", unsupported)
 		mux.HandleFunc("POST /accounts/{alias}/verify", unsupported)
 		mux.HandleFunc("POST /accounts/{alias}/activate", unsupported)
+		mux.HandleFunc("POST /accounts/{alias}/setup", setupUnavailable)
 		return
+	}
+	if w.setup == nil {
+		mux.HandleFunc("POST /accounts/{alias}/setup", setupUnavailable)
+	} else {
+		mux.HandleFunc("POST /accounts/{alias}/setup", route(w, actionSetup, w.setupRequest))
 	}
 	mux.HandleFunc("POST /accounts", route(w, actionCreate, w.create))
 	mux.HandleFunc("PATCH /accounts/{alias}", route(w, actionUpdate, w.update))

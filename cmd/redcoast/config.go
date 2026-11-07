@@ -49,6 +49,7 @@ type config struct {
 	credentialsStdin   bool           // test entry: resolve references from a JSON object on stdin
 	writeAllowFrom     []netip.Prefix // peer addresses the dashboard accepts account writes from; empty for none
 	tokenRefTemplate   string         // the token reference of a new account, with {alias}; empty for none
+	setupEnabled       bool           // the setup routes and the commands of a login machine are on
 	retention          session.Retention
 	backup             *backupConfig // nil takes no backups
 	tls                *tls.Config   // every TCP listener's; nil serves plain HTTP
@@ -136,6 +137,10 @@ type fileConfig struct {
 		AllowFrom        []string `yaml:"allow_from"`
 		TokenRefTemplate string   `yaml:"token_ref_template"`
 	} `yaml:"dashboard_write"`
+	// Setup is a pointer so that the Codex gateway can refuse the key itself.
+	Setup *struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"setup"`
 }
 
 // maxConfigFile bounds the configuration file; a real one is about a kilobyte.
@@ -280,13 +285,14 @@ func parseConfig(provider string, data []byte) (config, error) {
 	hostNames := readOnlyHosts(report, f.Listen.Health, f.Listen.Dashboard, serverName, f.Listen.HostNames)
 	links := checkDashboardLinks(report, provider, f.DashboardLinks)
 	allowFrom := checkDashboardWrite(report, provider, f.DashboardWrite.AllowFrom, f.DashboardWrite.TokenRefTemplate)
+	setupEnabled := checkSetup(report, provider, f, token)
 	if len(errs) > 0 {
 		return config{}, errors.Join(errs...)
 	}
 	return config{provider: provider, codex: f.Codex, tls: serverTLS, serverName: serverName, warning: warning, listen: f.Listen.Reverse, forwardListen: f.Listen.Forward, socket: f.SessionSocket, sessionListen: f.Listen.Session, adminSocket: f.AdminSocket,
 		healthListen: f.Listen.Health, dashboardListen: f.Listen.Dashboard, dashboardDir: f.DashboardDir, dashboardLinks: links, hostNames: hostNames, egressInterval: f.EgressInterval, limits: limits,
 		accountConcurrency: f.Limits.AccountConcurrency, upstream: target, sessionDB: f.SessionDB, captureDir: f.CaptureDir, inventory: f.Inventory,
-		tokenRef: token, credentialsStdin: f.Credentials.StdinTestEntry, writeAllowFrom: allowFrom, tokenRefTemplate: f.DashboardWrite.TokenRefTemplate,
+		tokenRef: token, credentialsStdin: f.Credentials.StdinTestEntry, writeAllowFrom: allowFrom, tokenRefTemplate: f.DashboardWrite.TokenRefTemplate, setupEnabled: setupEnabled,
 		retention: session.Retention{Traffic: time.Duration(f.Retention.TrafficDays) * 24 * time.Hour, Sessions: time.Duration(f.Retention.SessionDays) * 24 * time.Hour},
 		backup:    f.Backup}, nil
 }
@@ -327,6 +333,27 @@ func checkDashboardWrite(report func(key, problem string), provider string, allo
 		}
 	}
 	return prefixes
+}
+
+// checkSetup checks the setup section: only the Claude gateway takes it, and turning it
+// on needs the 1Password service account token, which the handover writes with, and the
+// token reference template, which says where a token may be written. It returns whether
+// setup is on.
+func checkSetup(report func(key, problem string), provider string, f fileConfig, token string) bool {
+	enabled := f.Setup != nil && f.Setup.Enabled
+	if provider != "claude" {
+		if f.Setup != nil {
+			report("setup", "only the Claude gateway takes it")
+		}
+		return false
+	}
+	if enabled && token == "" {
+		report("setup.enabled", "needs credentials.onepassword_token")
+	}
+	if enabled && f.DashboardWrite.TokenRefTemplate == "" {
+		report("setup.enabled", "needs dashboard_write.token_ref_template")
+	}
+	return enabled
 }
 
 // readOnlyHosts returns the Host names /health and the dashboard answer: the IPs of

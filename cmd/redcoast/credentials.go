@@ -12,6 +12,7 @@ import (
 	"github.com/1password/onepassword-sdk-go"
 
 	"github.com/Luolc/redcoast/claude"
+	"github.com/Luolc/redcoast/credential"
 )
 
 // maxCredentialsInput bounds the JSON object the test entry reads from stdin.
@@ -25,6 +26,97 @@ func onePasswordResolver(ctx context.Context, token string) (claude.Resolver, er
 		return nil, fmt.Errorf("1Password client: %v", err)
 	}
 	return clientResolver(client), nil
+}
+
+// onePasswordItems is the write path of the official SDK as credential.Store: it lists
+// vaults and items, reads an item's field names, sets one field of an item and creates
+// one item with one concealed field, and calls nothing else of the Items API.
+type onePasswordItems struct{ client *onepassword.Client }
+
+// onePasswordSecretStore returns the secret store over the official SDK with the service
+// account token. The token stays in the client; it is in no error.
+func onePasswordSecretStore(ctx context.Context, token string) (credential.Store, error) {
+	client, err := onepassword.NewClient(ctx, onepassword.WithServiceAccountToken(token), onepassword.WithIntegrationInfo("redcoast", version))
+	if err != nil {
+		return nil, errors.New("1Password client")
+	}
+	return onePasswordItems{client}, nil
+}
+
+func (s onePasswordItems) Vaults(ctx context.Context) ([]credential.Vault, error) {
+	list, err := s.client.Vaults().List(ctx)
+	runtime.KeepAlive(s.client)
+	if err != nil {
+		return nil, err
+	}
+	vaults := make([]credential.Vault, len(list))
+	for i, v := range list {
+		vaults[i] = credential.Vault{ID: v.ID, Title: v.Title}
+	}
+	return vaults, nil
+}
+
+func (s onePasswordItems) Items(ctx context.Context, vaultID string) ([]credential.ItemInfo, error) {
+	both := onepassword.NewItemListFilterTypeVariantByState(&onepassword.ItemListFilterByStateInner{Active: true, Archived: true})
+	list, err := s.client.Items().List(ctx, vaultID, both)
+	runtime.KeepAlive(s.client)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]credential.ItemInfo, len(list))
+	for i, it := range list {
+		items[i] = credential.ItemInfo{ID: it.ID, Title: it.Title, Archived: it.State == onepassword.ItemStateArchived}
+	}
+	return items, nil
+}
+
+func (s onePasswordItems) Item(ctx context.Context, vaultID, itemID string) (credential.Item, error) {
+	item, err := s.client.Items().Get(ctx, vaultID, itemID)
+	runtime.KeepAlive(s.client)
+	if err != nil {
+		return credential.Item{}, err
+	}
+	out := credential.Item{ID: item.ID, Title: item.Title, UpdatedAt: item.UpdatedAt}
+	for _, f := range item.Fields {
+		out.Fields = append(out.Fields, credential.Field{ID: f.ID, Title: f.Title})
+	}
+	return out, nil
+}
+
+// SetField reads the item again and sets the value of its one field with this ID and
+// title, so a field that changed since the caller looked is not written blindly; the
+// rest of the item is put back as it was read.
+func (s onePasswordItems) SetField(ctx context.Context, vaultID, itemID string, field credential.Field, value string) error {
+	item, err := s.client.Items().Get(ctx, vaultID, itemID)
+	runtime.KeepAlive(s.client)
+	if err != nil {
+		return err
+	}
+	at := -1
+	for i, f := range item.Fields {
+		if f.ID == field.ID && f.Title == field.Title {
+			if at >= 0 {
+				return errors.New("field not unique")
+			}
+			at = i
+		}
+	}
+	if at < 0 {
+		return errors.New("field not found")
+	}
+	item.Fields[at].Value = value
+	_, err = s.client.Items().Put(ctx, item)
+	runtime.KeepAlive(s.client)
+	return err
+}
+
+func (s onePasswordItems) Create(ctx context.Context, vaultID, title, fieldTitle, value string) error {
+	_, err := s.client.Items().Create(ctx, onepassword.ItemCreateParams{
+		Category: onepassword.ItemCategoryAPICredentials, VaultID: vaultID, Title: title,
+		Fields: []onepassword.ItemField{{ID: fieldTitle, Title: fieldTitle, FieldType: onepassword.ItemFieldTypeConcealed, Value: value}},
+	})
+	runtime.KeepAlive(s.client)
+	return err
 }
 
 // clientResolver returns a resolver over client that keeps client reachable for as long

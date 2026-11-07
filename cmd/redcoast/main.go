@@ -122,7 +122,9 @@ func main() {
 		log.Fatal(err)
 	}
 	offerAccountActions(admin, gateway, entrypoint)
-	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started, accountWriter(cfg, store, accounts, egress, entrypoint, resolve, reload))
+	writer := accountWriter(cfg, store, accounts, egress, entrypoint, resolve, reload)
+	setup := offerSetup(ctx, admin, egress, writer)
+	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started, writer)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -139,6 +141,7 @@ func main() {
 		func(ctx context.Context) error { return entrypoint.RunRenewals(ctx, renewalSweep) },
 		func(ctx context.Context) error { return entrypoint.RunQuotaRechecks(ctx, quotaRecheck) },
 		func(ctx context.Context) error { return dashboard.RunQuotaRefresh(ctx) },
+		setup.Run,
 		func(ctx context.Context) error {
 			return claude.Serve(ctx, l.health, cfg.hostGuarded(egress.HealthHandler()))
 		},
@@ -170,6 +173,29 @@ func main() {
 	if err := errors.Join(err, dashboard.Close(), store.Close()); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// offerSetup gives the management interface the setup commands and /health the tokens
+// that are due when setup is on, and ends the handovers that were under way when the
+// previous process stopped. It returns the setup, nil when it is off.
+func offerSetup(ctx context.Context, admin *claude.Admin, egress *claude.Egress, writer *claude.AccountWriter) *claude.Setup {
+	setup := writer.Setup()
+	if setup == nil {
+		return nil
+	}
+	if err := setup.Start(ctx); err != nil {
+		log.Fatal(err)
+	}
+	admin.Setup = setup
+	problems := egress.Problems
+	egress.Problems = func() []string {
+		var all []string
+		if problems != nil {
+			all = problems()
+		}
+		return append(all, setup.Problems()...)
+	}
+	return setup
 }
 
 // offerAccountActions gives the management interface the quota refresh and the login
@@ -302,7 +328,24 @@ func accountWriter(cfg config, store *session.Store, accounts *claude.Accounts, 
 			return newResolver(ctx, cfg)
 		},
 		AllowFrom: cfg.writeAllowFrom, TokenRefTemplate: cfg.tokenRefTemplate,
+		SetupEnabled: cfg.setupEnabled,
+		SetupSecrets: func(ctx context.Context) (credential.Store, error) { return newSecretStore(ctx, cfg) },
 	})
+}
+
+// newSecretStore opens the secret store that setup writes to, with the same 1Password
+// service account token the references are read with.
+func newSecretStore(ctx context.Context, cfg config) (credential.Store, error) {
+	if cfg.tokenRef == "" || cfg.credentialsStdin {
+		return nil, errors.New("no 1Password service account token configured")
+	}
+	loadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
+	defer cancel()
+	token, err := credential.New(nil)(loadCtx, cfg.tokenRef)
+	if err != nil {
+		return nil, errors.New("1Password service account token")
+	}
+	return onePasswordSecretStore(loadCtx, token)
 }
 
 // reloader returns the reload the management interface runs. It resolves the token
