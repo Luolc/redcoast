@@ -21,6 +21,15 @@ func history(minutesAgo []int, utilization []float64) []QuotaPoint {
 	return out
 }
 
+// flat returns n readings of utilization u, step minutes apart, the last at burnNow.
+func flat(n, step int, u float64) []QuotaPoint {
+	var out []QuotaPoint
+	for i := n - 1; i >= 0; i-- {
+		out = append(out, QuotaPoint{At: burnNow.Add(-time.Duration(i*step) * time.Minute), Utilization: u})
+	}
+	return out
+}
+
 func TestEstimateBurn(t *testing.T) {
 	reset := burnNow.Add(5 * time.Hour)
 	given := &Quota{Utilization: 0.4, ResetAt: reset, ObservedAt: burnNow}
@@ -51,6 +60,11 @@ func TestEstimateBurn(t *testing.T) {
 			points: 3, span: 20, reason: "span_too_short"},
 		{name: "no reading", quota: given, newest: burnNow, reason: "no_reading"},
 		{name: "flat readings", history: history([]int{90, 60, 30, 0}, []float64{0.4, 0.4, 0.4, 0.4}), quota: given, newest: burnNow,
+			rate: 1e-300, points: 4, span: 90, reason: "flat", usedPoints: 4},
+		{name: "flat at 0.1 every 5 minutes", history: flat(12, 5, 0.1), quota: given, newest: burnNow, rate: 1e-300, points: 12, span: 55, reason: "flat", usedPoints: 12},
+		{name: "flat at 0.3 every 7 minutes", history: flat(10, 7, 0.3), quota: given, newest: burnNow, rate: 1e-300, points: 10, span: 63, reason: "flat", usedPoints: 10},
+		{name: "flat at 0.93 every 13 minutes", history: flat(8, 13, 0.93), quota: given, newest: burnNow, rate: 1e-300, points: 8, span: 91, reason: "flat", usedPoints: 8},
+		{name: "rise under a year's worth of quota", history: history([]int{90, 60, 30, 0}, []float64{0.1, 0.1000000001, 0.1000000002, 0.1000000003}), quota: given, newest: burnNow,
 			rate: 1e-300, points: 4, span: 90, reason: "flat", usedPoints: 4},
 		{name: "window the upstream no longer gives", history: history([]int{90, 60, 30, 0}, []float64{0.1, 0.2, 0.3, 0.4}),
 			quota:  &Quota{Utilization: 0.4, ResetAt: burnNow.Add(-time.Hour), ObservedAt: burnNow.Add(-2 * time.Hour)},

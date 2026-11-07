@@ -13,6 +13,10 @@ import (
 const (
 	burnMinPoints = 3
 	burnMinSpan   = 30 * time.Minute
+
+	// burnMinRate, in utilization per hour, is the rate at which a whole quota lasts a
+	// year. A slower one is rounding or noise, not use, and is reported as none.
+	burnMinRate = 1.0 / (365 * 24)
 )
 
 // Why a window has no rate: the reasons of WindowBurn.
@@ -124,8 +128,11 @@ func estimateBurn(history []QuotaPoint, q *Quota, newest, now time.Time) (Window
 		return out, nil
 	}
 	rate := slope(points)
+	if rate < burnMinRate {
+		rate = 0
+	}
 	out.RatePerHour = &rate
-	if rate <= 0 {
+	if rate == 0 {
 		out.Reason = burnNotRising
 		return out, points
 	}
@@ -145,12 +152,19 @@ func estimateBurn(history []QuotaPoint, q *Quota, newest, now time.Time) (Window
 func slope(points []QuotaPoint) float64 {
 	t0 := points[0].At
 	n := float64(len(points))
-	var sx, sy, sxx, sxy float64
+	var sx, sy float64
 	for _, p := range points {
-		x, y := p.At.Sub(t0).Hours(), p.Utilization
-		sx, sy, sxx, sxy = sx+x, sy+y, sxx+x*x, sxy+x*y
+		sx += p.At.Sub(t0).Hours()
+		sy += p.Utilization
 	}
-	return (n*sxy - sx*sy) / (n*sxx - sx*sx)
+	mx, my := sx/n, sy/n
+	var sxx, sxy float64
+	for _, p := range points {
+		dx := p.At.Sub(t0).Hours() - mx
+		sxx += dx * dx
+		sxy += dx * (p.Utilization - my)
+	}
+	return sxy / sxx
 }
 
 // shares splits rate over the machines by their tokens; a machine with none is left out.
