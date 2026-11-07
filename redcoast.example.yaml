@@ -45,6 +45,20 @@ dashboard_links: []
 # dashboard_links:
 #   - provider: codex
 #     url: ":7807"
+# Account writes from the dashboard (the Claude gateway only): create, edit, verify
+# and activate an account. The Claude accounts live in the database from the first
+# start on (cmd/redcoast/README.md). allow_from lists the TCP peer addresses writes
+# are accepted from, IP addresses or prefixes (never /0); empty accepts none, and
+# the dashboard hides the editing. The peer address is the one the connection comes
+# from; X-Forwarded-For and Forwarded are not read, so a reverse proxy in front of the
+# dashboard shows up as its own address. token_ref_template is the token reference of
+# a new account with {alias} in place of its alias; empty lets no account be created.
+dashboard_write:
+  allow_from: []
+  token_ref_template: ""
+# dashboard_write:
+#   allow_from: ["192.0.2.0/24"]
+#   token_ref_template: "op://example-vault/claude-oauth-token-{alias}/credential"
 capture_dir: ""
 
 egress_interval: 15m

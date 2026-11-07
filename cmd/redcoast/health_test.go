@@ -216,3 +216,57 @@ func TestDashboardLinksConfiguration(t *testing.T) {
 		})
 	}
 }
+
+// TestDashboardWriteConfiguration checks dashboard_write: no key writes from nowhere;
+// allow_from takes IP addresses (an address is a prefix of its own) and prefixes of at
+// least one bit, nothing else; the token reference template holds {alias} once and is a
+// credential reference with an alias in it; the Codex gateway refuses the section.
+func TestDashboardWriteConfiguration(t *testing.T) {
+	const section = "codex: {accounts_dir: /var/lib/redcoast-codex/accounts, session_key: 'env://SESSION_KEY'}\n"
+	for _, test := range []struct {
+		name, provider, yaml string
+		want                 []string // the prefixes, when accepted
+		template             string
+		problem              string // part of the error when refused
+	}{
+		{"none", "claude", "", nil, "", ""},
+		{"empty_list", "claude", "dashboard_write: {allow_from: []}\n", nil, "", ""},
+		{"addresses_and_prefixes", "claude", "dashboard_write: {allow_from: ['192.0.2.7', '198.51.100.0/24', '2001:db8::/32', '2001:db8::1']}\n",
+			[]string{"192.0.2.7/32", "198.51.100.0/24", "2001:db8::/32", "2001:db8::1/128"}, "", ""},
+		{"prefix_is_masked", "claude", "dashboard_write: {allow_from: ['192.0.2.77/24']}\n", []string{"192.0.2.0/24"}, "", ""},
+		{"mapped_address", "claude", "dashboard_write: {allow_from: ['::ffff:192.0.2.7']}\n", []string{"192.0.2.7/32"}, "", ""},
+		{"one_bit", "claude", "dashboard_write: {allow_from: ['128.0.0.0/1']}\n", []string{"128.0.0.0/1"}, "", ""},
+		{"zero_bits_v4", "claude", "dashboard_write: {allow_from: ['0.0.0.0/0']}\n", nil, "", "dashboard_write.allow_from[0]: a prefix of no bit"},
+		{"zero_bits_v6", "claude", "dashboard_write: {allow_from: ['192.0.2.7', '::/0']}\n", nil, "", "dashboard_write.allow_from[1]: a prefix of no bit"},
+		{"not_an_address", "claude", "dashboard_write: {allow_from: ['example.test']}\n", nil, "", "dashboard_write.allow_from[0]: not an IP address or a prefix"},
+		{"zone", "claude", "dashboard_write: {allow_from: ['fe80::1%eth0']}\n", nil, "", "dashboard_write.allow_from[0]: not an IP address or a prefix"},
+		{"unknown_key", "claude", "dashboard_write: {allow_from: [], trusted_proxy: true}\n", nil, "", "field trusted_proxy not found"},
+		{"template", "claude", "dashboard_write: {token_ref_template: 'op://example-vault/claude-oauth-token-{alias}/credential'}\n", nil, "op://example-vault/claude-oauth-token-{alias}/credential", ""},
+		{"template_without_alias", "claude", "dashboard_write: {token_ref_template: 'op://example-vault/token/credential'}\n", nil, "", "must contain {alias} once"},
+		{"template_with_alias_twice", "claude", "dashboard_write: {token_ref_template: 'op://example-vault/{alias}/{alias}'}\n", nil, "", "must contain {alias} once"},
+		{"template_not_a_reference", "claude", "dashboard_write: {token_ref_template: 'sk-ant-{alias}'}\n", nil, "", "must give a credential reference"},
+		{"codex_allow_from", "codex", "dashboard_write: {allow_from: ['192.0.2.7']}\n", nil, "", "dashboard_write: only the Claude gateway takes it"},
+		{"codex_template", "codex", "dashboard_write: {token_ref_template: 'op://example-vault/{alias}/x'}\n", nil, "", "dashboard_write: only the Claude gateway takes it"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			yaml := baseConfig + test.yaml
+			if test.provider == "codex" {
+				yaml += section
+			}
+			cfg, err := parseConfig(test.provider, []byte(yaml))
+			if test.problem != "" {
+				if err == nil || !strings.Contains(err.Error(), test.problem) {
+					t.Fatalf("got %v, want %q", err, test.problem)
+				}
+				return
+			}
+			var got []string
+			for _, prefix := range cfg.writeAllowFrom {
+				got = append(got, prefix.String())
+			}
+			if err != nil || !slices.Equal(got, test.want) || cfg.tokenRefTemplate != test.template {
+				t.Fatalf("got %v %q %v, want %v %q", got, cfg.tokenRefTemplate, err, test.want, test.template)
+			}
+		})
+	}
+}

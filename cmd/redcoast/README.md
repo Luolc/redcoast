@@ -81,6 +81,26 @@ The Claude gateway reads the directory once. At its first start with an `account
 
 `/dashboard.json` gives each account's table row as `config` (references as strings, `rev`), and lists the rows of accounts the gateway does not serve under `unserved_accounts`.
 
+#### Editing the accounts from the dashboard
+
+The Claude gateway's dashboard can create, edit, verify and activate accounts. This replaces the pull request review that an inventory change went through; what stands in its place is below. The Codex gateway answers 501 on these routes and `accounts_editable: false` in `/dashboard.json`.
+
+Writes are off until `dashboard_write.allow_from` lists the TCP peer addresses they may come from (IP addresses or prefixes, never `/0`; see `redcoast.example.yaml`). The check reads the address the connection comes from and nothing in a header, so behind a reverse proxy every request shows the proxy's address. `dashboard_write.token_ref_template` is the token reference of a new account, with `{alias}` in place of its alias; without it no account can be created. A request is accepted only when all of this holds, and refused with 403 (415, 413 or 400 from the body checks) before anything is read or written otherwise:
+
+- its peer address is on `allow_from` (an empty list answers `writes disabled`);
+- its `Host` is a name the dashboard answers, and it carries exactly one `Origin`, the page's own;
+- it carries exactly one `X-Redcoast-Action` with the route's action name: `account-create`, `account-update`, `account-verify` or `account-activate`;
+- its `Content-Type` is `application/json` and its body at most 8 KiB: one JSON object with no unknown key and no key repeated at any depth, and nothing after it.
+
+| Route | What it does |
+| --- | --- |
+| `POST /accounts` | create an account as `testing`: `alias`, `email`, `access`, `plan` and `proxy` (`host`, `port`, `expected_egress_ip`, or `direct: true` with the IP only; `username_ref` and `password_ref` as one pair that accounts use already). The token reference is the template with the alias. It serves nothing yet. The plan is written after the account, so a failure of that step says the account exists |
+| `PATCH /accounts/{alias}` | change `email`, `status` (anything but `active`), `device_id`, `account_uuid`, `proxy` fields or `plan`, at the `rev` the page read; another revision answers 409. The plan goes through the plan schedule as `redcoast claude plan schedule` does, and a raised quota unit reads the quota of a served account once. A change that can alter the served set reloads, after the references of the changed account were resolved without writing; a change of the exit, the expected IP or a reference voids the checks below |
+| `POST /accounts/{alias}/verify` | run three checks on the account in memory, one at a time per account: `token_ok` (its token reference resolves to a usable token), `egress_ok` (its own exit reads the expected IP and reaches the upstream) and `probe_ok` (the quota probe of `refresh` gets a 2xx through that exit, with the account's own token; it waits for a quota round in progress). Each result and the time are stored, never a value |
+| `POST /accounts/{alias}/activate` | at the `rev` given: the account has a plan, no other served account has its exit, and the three checks, run again now, pass; only then it is stored as `active` and the set reloaded. Anything else is a 409 naming the check |
+
+An answer is `{account, reload?, verify?}` or `{error, field?, check?}`; an error never repeats what the request held. Every write that lands is one row of `account_audit` (time, source address, action, alias, and the old and new value of each changed field, references and settings only) and one log line with the field names; a refused one is logged with a fixed reason. `/dashboard.json` says `write: {enabled, reason, can_create}` for the request's source, `accounts_editable` and `proxy_ref_options`, the proxy logins in use, as reference strings. No route has a field for a credential value, and the token of an account is changed in the secret store, followed by `verify`.
+
 ## Run under systemd
 
 An example unit, `/etc/systemd/system/redcoast.service`, for a service user `redcoast`:
