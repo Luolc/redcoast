@@ -114,14 +114,15 @@ func main() {
 	if err := egress.Sweep(ctx); err != nil {
 		log.Fatal(err)
 	}
-	admin := claude.NewAdmin(accounts, store, reloader(cfg, store, accounts, resolve, egress))
+	reload := reloader(cfg, store, accounts, resolve, egress)
+	admin := claude.NewAdmin(accounts, store, reload)
 	admin.Handoff = upg.Upgrade
 	entrypoint, err := claude.NewHandler(cfg.upstream, gateway, cfg.captureDir, store, accounts, cfg.limits)
 	if err != nil {
 		log.Fatal(err)
 	}
 	offerAccountActions(admin, gateway, entrypoint)
-	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started)
+	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started, accountWriter(cfg, store, accounts, egress, entrypoint, resolve, reload))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -243,12 +244,12 @@ func (d dashboard) Close() error {
 
 // newDashboard opens a read-only connection to the store and builds the dashboard over
 // it and this process's state.
-func newDashboard(cfg config, store *session.Store, backups *backup.Backup, egress *claude.Egress, entrypoint *claude.Entrypoint, started time.Time) (dashboard, error) {
+func newDashboard(cfg config, store *session.Store, backups *backup.Backup, egress *claude.Egress, entrypoint *claude.Entrypoint, started time.Time, writer *claude.AccountWriter) (dashboard, error) {
 	reader, err := session.OpenReadOnly(cfg.sessionDB, session.Config{}, cfg.limits.MaxTunnel)
 	if err != nil {
 		return dashboard{}, err
 	}
-	dc := claude.DashboardConfig{Provider: cfg.provider, Links: cfg.dashboardLinks, Reader: reader, Store: store, DBPath: cfg.sessionDB, Version: version, Inventory: cfg.inventory, Started: started, Tunnels: entrypoint.Tunnels, Dir: cfg.dashboardDir, QuotaRefresh: claude.NewQuotaRefresh(entrypoint)}
+	dc := claude.DashboardConfig{Provider: cfg.provider, Links: cfg.dashboardLinks, Reader: reader, Store: store, DBPath: cfg.sessionDB, Version: version, Inventory: cfg.inventory, Started: started, Tunnels: entrypoint.Tunnels, Dir: cfg.dashboardDir, QuotaRefresh: claude.NewQuotaRefresh(entrypoint), Write: writer}
 	if cfg.dashboardDir != "" {
 		if info, err := os.Stat(filepath.Join(cfg.dashboardDir, "index.html")); err != nil || !info.Mode().IsRegular() {
 			log.Printf("dashboard: %s has no index.html; / answers 404, /dashboard.json is served", cfg.dashboardDir)
@@ -284,6 +285,24 @@ func newBackup(ctx context.Context, cfg config, store *session.Store, resolve cl
 		Credentials: backup.Credentials{AccessKeyID: keyID, SecretAccessKey: secret},
 		Dir:         backupDir(cfg.sessionDB),
 	}), nil
+}
+
+// accountWriter returns the dashboard's write path over the accounts table, or nil for
+// the Codex process, whose accounts are files. Its resolver is built as a reload's is.
+func accountWriter(cfg config, store *session.Store, accounts *claude.Accounts, egress *claude.Egress, entrypoint *claude.Entrypoint, startup claude.Resolver, reload func(context.Context) (claude.Reload, error)) *claude.AccountWriter {
+	if cfg.provider == "codex" {
+		return nil
+	}
+	return claude.NewAccountWriter(claude.AccountWriterConfig{
+		Store: store, Accounts: accounts, Egress: egress, Entrypoint: entrypoint, Reload: reload,
+		Resolve: func(ctx context.Context) (claude.Resolver, error) {
+			if cfg.credentialsStdin {
+				return startup, nil
+			}
+			return newResolver(ctx, cfg)
+		},
+		AllowFrom: cfg.writeAllowFrom, TokenRefTemplate: cfg.tokenRefTemplate,
+	})
 }
 
 // reloader returns the reload the management interface runs. It resolves the token

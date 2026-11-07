@@ -38,6 +38,9 @@ type DashboardConfig struct {
 	// QuotaRefresh is the refresh POST /quota/refresh starts; nil when the provider
 	// cannot refresh, and the endpoint answers 501.
 	QuotaRefresh *QuotaRefresh
+	// Write is the write path of the accounts table; nil when the provider keeps its
+	// accounts elsewhere, and the write routes answer 501.
+	Write *AccountWriter
 }
 
 // DashboardLink is another provider's dashboard, which the page offers as a link: the
@@ -72,7 +75,22 @@ type dashboardView struct {
 	// Unserved are the accounts of the accounts table that the gateway does not serve
 	// (testing, paused, suspended, retired, or not on the gateway path); always a list.
 	Unserved []accountConfig `json:"unserved_accounts"`
+	// AccountsEditable is whether this process keeps its accounts where they can be
+	// edited; Write says whether this request's source may write; ProxyRefOptions are the
+	// proxy logins accounts use, the only ones a write can choose.
+	AccountsEditable bool             `json:"accounts_editable"`
+	Write            writeView        `json:"write"`
+	ProxyRefOptions  []proxyRefOption `json:"proxy_ref_options"`
 	session.Snapshot
+}
+
+// writeView says whether the account writes are on for the request: Reason is empty
+// when they are, and CanCreate when a new account can be created, which needs a token
+// reference template.
+type writeView struct {
+	Enabled   bool   `json:"enabled"`
+	Reason    string `json:"reason,omitempty"`
+	CanCreate bool   `json:"can_create"`
 }
 
 // gatewayView is the overview. Retention, backup, egress and in-flight figures are this
@@ -113,17 +131,18 @@ type dashboardAccount struct {
 // accountConfig is one row of the accounts table as the dashboard shows it. The
 // references are the strings themselves; no credential value is read to build it.
 type accountConfig struct {
-	Alias       string      `json:"alias"`
-	Email       string      `json:"email"`
-	Access      string      `json:"access"`
-	Status      string      `json:"status"`
-	TokenRef    string      `json:"token_ref"`
-	Proxy       proxyConfig `json:"proxy"`
-	DeviceID    string      `json:"device_id"`
-	AccountUUID string      `json:"account_uuid"`
-	Rev         int64       `json:"rev"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	Alias       string               `json:"alias"`
+	Email       string               `json:"email"`
+	Access      string               `json:"access"`
+	Status      string               `json:"status"`
+	TokenRef    string               `json:"token_ref"`
+	Proxy       proxyConfig          `json:"proxy"`
+	DeviceID    string               `json:"device_id"`
+	AccountUUID string               `json:"account_uuid"`
+	Verify      session.Verification `json:"verify"`
+	Rev         int64                `json:"rev"`
+	CreatedAt   time.Time            `json:"created_at"`
+	UpdatedAt   time.Time            `json:"updated_at"`
 }
 
 // proxyConfig is the exit of an accountConfig.
@@ -141,7 +160,7 @@ func configOf(row session.AccountRow) accountConfig {
 	return accountConfig{
 		Alias: row.Alias, Email: row.Email, Access: row.Access, Status: row.Status, TokenRef: row.TokenRef,
 		Proxy:    proxyConfig{Direct: row.Direct, Host: row.ProxyHost, Port: row.ProxyPort, ExpectedIP: row.ExpectedIP, UsernameRef: row.UsernameRef, PasswordRef: row.PasswordRef},
-		DeviceID: row.DeviceID, AccountUUID: row.AccountUUID, Rev: row.Rev, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+		DeviceID: row.DeviceID, AccountUUID: row.AccountUUID, Verify: row.Verify, Rev: row.Rev, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 	}
 }
 
@@ -158,6 +177,7 @@ func (d *Dashboard) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, view)
 	})
 	mux.HandleFunc("POST /quota/refresh", d.serveQuotaRefresh)
+	d.writeRoutes(mux)
 	if d.cfg.Dir != "" {
 		mux.Handle("GET /{$}", page(d.cfg.Dir))
 	}
@@ -229,10 +249,16 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 		account := dashboardAccount{AccountView: a}
 		if config, ok := configs[a.Alias]; ok {
 			account.Config = &config
+			account.Email = config.Email
 			delete(configs, a.Alias)
 		}
 		if live := set.lookup(a.Alias); live != nil {
 			account.Email, account.ExpectedIP = live.email, live.expectedIP.String()
+			if account.Config != nil {
+				// A reload keeps the object of an account whose served settings are the same, so
+				// the email shown is the table's.
+				account.Email = account.Config.Email
+			}
 			account.Egress = d.egress.lastCheck(live)
 			account.InFlight, account.Concurrency = len(live.slots), cap(live.slots)
 		}
@@ -243,6 +269,8 @@ func (d *Dashboard) view(r *http.Request) (dashboardView, error) {
 			view.Unserved = append(view.Unserved, config)
 		}
 	}
+	view.ProxyRefOptions = proxyRefOptions(rows)
+	view.AccountsEditable, view.Write = d.cfg.Write.view(r)
 	view.Health = d.egress.judge(statuses, nil)
 	view.Gateway = gatewayView{
 		Provider:        d.cfg.Provider,
@@ -408,4 +436,24 @@ func commitOf(path string) string {
 		return name
 	}
 	return ""
+}
+
+// writeRoutes registers the account write routes. Without a write path they answer 501
+// before anything else is read; with one, each runs the checks of AccountWriter.route.
+func (d *Dashboard) writeRoutes(mux *http.ServeMux) {
+	w := d.cfg.Write
+	if w == nil {
+		unsupported := func(rw http.ResponseWriter, _ *http.Request) {
+			writeJSON(rw, http.StatusNotImplemented, map[string]string{"error": "this gateway does not edit accounts"})
+		}
+		mux.HandleFunc("POST /accounts", unsupported)
+		mux.HandleFunc("PATCH /accounts/{alias}", unsupported)
+		mux.HandleFunc("POST /accounts/{alias}/verify", unsupported)
+		mux.HandleFunc("POST /accounts/{alias}/activate", unsupported)
+		return
+	}
+	mux.HandleFunc("POST /accounts", route(w, actionCreate, w.create))
+	mux.HandleFunc("PATCH /accounts/{alias}", route(w, actionUpdate, w.update))
+	mux.HandleFunc("POST /accounts/{alias}/verify", route(w, actionVerify, w.verify))
+	mux.HandleFunc("POST /accounts/{alias}/activate", route(w, actionActivate, w.activate))
 }

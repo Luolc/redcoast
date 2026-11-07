@@ -58,6 +58,54 @@ type AccountRow struct {
 	Rev         int64     `json:"rev"` // starts at 1; the version an edit is made against
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+
+	Verify Verification `json:"verify"` // the last run of the three checks, voided by a change of exit or reference
+}
+
+// accountColumns are the columns of an AccountRow, in the order scanRow reads them.
+const accountColumns = `alias, email, access, status, token_ref, proxy_direct, proxy_host, proxy_port, expected_egress_ip,
+	proxy_username_ref, proxy_password_ref, device_id, account_uuid, rev, created_at, updated_at, token_ok, egress_ok, probe_ok, verified_at`
+
+// scanner is a row of a query, *sql.Row or *sql.Rows.
+type scanner interface{ Scan(dest ...any) error }
+
+// scanRow reads one AccountRow selected by accountColumns.
+func scanRow(r scanner) (AccountRow, error) {
+	var row AccountRow
+	var created, updated int64
+	var tokenOK, egressOK, probeOK sql.NullBool
+	var verified sql.NullInt64
+	if err := r.Scan(&row.Alias, &row.Email, &row.Access, &row.Status, &row.TokenRef, &row.Direct, &row.ProxyHost, &row.ProxyPort,
+		&row.ExpectedIP, &row.UsernameRef, &row.PasswordRef, &row.DeviceID, &row.AccountUUID, &row.Rev, &created, &updated,
+		&tokenOK, &egressOK, &probeOK, &verified); err != nil {
+		return AccountRow{}, err
+	}
+	row.CreatedAt, row.UpdatedAt = fromMillis(created), fromMillis(updated)
+	row.Verify = Verification{TokenOK: boolPointer(tokenOK), EgressOK: boolPointer(egressOK), ProbeOK: boolPointer(probeOK)}
+	if verified.Valid {
+		row.Verify.At = fromMillis(verified.Int64)
+	}
+	return row, nil
+}
+
+// boolPointer returns nil for NULL.
+func boolPointer(b sql.NullBool) *bool {
+	if !b.Valid {
+		return nil
+	}
+	return &b.Bool
+}
+
+// accountRow reads account alias inside tx, ErrAccountNotFound when there is none.
+func accountRow(ctx context.Context, tx *sql.Tx, alias string) (AccountRow, error) {
+	row, err := scanRow(tx.QueryRowContext(ctx, "SELECT "+accountColumns+" FROM accounts WHERE alias = ?", alias))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return AccountRow{}, ErrAccountNotFound
+	case err != nil:
+		return AccountRow{}, fmt.Errorf("read account: %v", err)
+	}
+	return row, nil
 }
 
 // migrateToV9 creates the accounts table. It starts empty and uninitialized: the gateway
@@ -115,21 +163,16 @@ func (s *Store) Accounts(ctx context.Context) (rows []AccountRow, initialized bo
 	case err != nil:
 		return nil, false, fmt.Errorf("read accounts: %v", err)
 	}
-	result, err := s.db.QueryContext(ctx, `SELECT alias, email, access, status, token_ref, proxy_direct, proxy_host, proxy_port,
-		expected_egress_ip, proxy_username_ref, proxy_password_ref, device_id, account_uuid, rev, created_at, updated_at
-		FROM accounts ORDER BY alias`)
+	result, err := s.db.QueryContext(ctx, "SELECT "+accountColumns+" FROM accounts ORDER BY alias")
 	if err != nil {
 		return nil, false, fmt.Errorf("read accounts: %v", err)
 	}
 	defer func() { _ = result.Close() }()
 	for result.Next() {
-		var row AccountRow
-		var created, updated int64
-		if err := result.Scan(&row.Alias, &row.Email, &row.Access, &row.Status, &row.TokenRef, &row.Direct, &row.ProxyHost, &row.ProxyPort,
-			&row.ExpectedIP, &row.UsernameRef, &row.PasswordRef, &row.DeviceID, &row.AccountUUID, &row.Rev, &created, &updated); err != nil {
+		row, err := scanRow(result)
+		if err != nil {
 			return nil, false, fmt.Errorf("read accounts: %v", err)
 		}
-		row.CreatedAt, row.UpdatedAt = fromMillis(created), fromMillis(updated)
 		rows = append(rows, row)
 	}
 	if err := result.Err(); err != nil {
@@ -142,4 +185,16 @@ func (s *Store) Accounts(ctx context.Context) (rows []AccountRow, initialized bo
 // Store.Accounts does.
 func (r *Reader) Accounts(ctx context.Context) ([]AccountRow, bool, error) {
 	return r.store.Accounts(ctx)
+}
+
+// Account returns the row of account alias, ErrAccountNotFound when there is none.
+func (s *Store) Account(ctx context.Context, alias string) (AccountRow, error) {
+	row, err := scanRow(s.db.QueryRowContext(ctx, "SELECT "+accountColumns+" FROM accounts WHERE alias = ?", alias))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return AccountRow{}, ErrAccountNotFound
+	case err != nil:
+		return AccountRow{}, fmt.Errorf("read account: %v", err)
+	}
+	return row, nil
 }

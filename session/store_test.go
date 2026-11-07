@@ -602,3 +602,80 @@ func TestAccountsTableMigration(t *testing.T) {
 		t.Fatalf("row came back as %+v, went in as %+v", got, row)
 	}
 }
+
+// TestAccountWrites checks the store's account writes: a create is revision 1 with an
+// audit row of its fields; an update at a stale revision is refused with nothing
+// written, so of two updates made at one revision only the first lands; a change of the
+// exit voids the checks and an email change does not; a verification keeps the
+// revision, is refused for a stale one, and an update that changes nothing writes
+// nothing.
+func TestAccountWrites(t *testing.T) {
+	store, _ := open(t, newClock())
+	ctx := context.Background()
+	entry := AuditEntry{SourceIP: "192.0.2.50", Action: "account-update"}
+	row := AccountRow{Alias: "sample-a", Email: "a@example.test", Access: "gateway", Status: "testing", ProxyHost: "proxy.example.test", ProxyPort: 8080, ExpectedIP: "192.0.2.1"}
+	created, err := store.CreateAccount(ctx, row, AuditEntry{SourceIP: "192.0.2.50", Action: "account-create"})
+	if err != nil || created.Rev != 1 {
+		t.Fatalf("create = %+v, %v", created, err)
+	}
+	if _, err := store.CreateAccount(ctx, row, entry); !errors.Is(err, ErrAccountExists) {
+		t.Fatalf("second create: %v", err)
+	}
+	set := func(email string) func(*AccountRow) error {
+		return func(r *AccountRow) error { r.Email = email; return nil }
+	}
+	if _, err := store.UpdateAccount(ctx, "sample-a", 7, entry, set("x@example.test")); !errors.Is(err, ErrRevConflict) {
+		t.Fatalf("update at a stale revision: %v", err)
+	}
+	if _, err := store.UpdateAccount(ctx, "sample-none", 1, entry, set("x@example.test")); !errors.Is(err, ErrAccountNotFound) {
+		t.Fatalf("update of no account: %v", err)
+	}
+	// Two updates at revision 1: one lands, the other conflicts and writes nothing.
+	first, err := store.UpdateAccount(ctx, "sample-a", 1, entry, set("first@example.test"))
+	if err != nil || first.Rev != 2 {
+		t.Fatalf("first update = %+v, %v", first, err)
+	}
+	if _, err := store.UpdateAccount(ctx, "sample-a", 1, entry, set("second@example.test")); !errors.Is(err, ErrRevConflict) {
+		t.Fatalf("second update at revision 1: %v", err)
+	}
+	if got, _ := store.Account(ctx, "sample-a"); got.Email != "first@example.test" || got.Rev != 2 {
+		t.Fatalf("account = %+v", got)
+	}
+	// An update that changes nothing writes no revision and no audit row.
+	if same, err := store.UpdateAccount(ctx, "sample-a", 2, entry, set("first@example.test")); err != nil || same.Rev != 2 {
+		t.Fatalf("no-op update = %+v, %v", same, err)
+	}
+	// A verification keeps the revision and is refused for a stale one.
+	yes, no := true, false
+	checked, err := store.SetVerification(ctx, "sample-a", 2, Verification{TokenOK: &yes, EgressOK: &no, At: time.UnixMilli(1000)}, AuditEntry{SourceIP: "192.0.2.50", Action: "account-verify"})
+	if err != nil || checked.Rev != 2 || checked.Verify.TokenOK == nil || !*checked.Verify.TokenOK || *checked.Verify.EgressOK || checked.Verify.ProbeOK != nil {
+		t.Fatalf("verification = %+v, %v", checked, err)
+	}
+	if _, err := store.SetVerification(ctx, "sample-a", 1, Verification{TokenOK: &no}, entry); !errors.Is(err, ErrRevConflict) {
+		t.Fatalf("verification at a stale revision: %v", err)
+	}
+	// An email change keeps the checks; a change of the exit voids them.
+	if kept, err := store.UpdateAccount(ctx, "sample-a", 2, entry, set("kept@example.test")); err != nil || kept.Verify.TokenOK == nil {
+		t.Fatalf("email change = %+v, %v", kept, err)
+	}
+	voided, err := store.UpdateAccount(ctx, "sample-a", 3, entry, func(r *AccountRow) error { r.ProxyPort = 9090; return nil })
+	if err != nil || voided.Verify.TokenOK != nil || voided.Verify.EgressOK != nil || !voided.Verify.At.IsZero() {
+		t.Fatalf("exit change = %+v, %v", voided, err)
+	}
+	// The audit: the create, the first update, the verification, two updates after it.
+	audit, err := store.AccountAudit(ctx, "sample-a")
+	if err != nil || len(audit) != 5 {
+		t.Fatalf("audit = %+v, %v", audit, err)
+	}
+	if audit[1].Changes["email"] != (FieldChange{Old: "a@example.test", New: "first@example.test"}) || audit[2].Changes["token_ok"] != (FieldChange{Old: "", New: "pass"}) || audit[2].Changes["egress_ok"].New != "fail" {
+		t.Fatalf("audit changes = %+v", audit)
+	}
+	if audit[4].Changes["proxy_port"] != (FieldChange{Old: "8080", New: "9090"}) || audit[4].Changes["token_ok"] != (FieldChange{Old: "pass", New: ""}) {
+		t.Fatalf("audit of the exit change = %+v", audit[4].Changes)
+	}
+	// An apply that fails writes nothing.
+	failure := errors.New("refused")
+	if _, err := store.UpdateAccount(ctx, "sample-a", 4, entry, func(*AccountRow) error { return failure }); !errors.Is(err, failure) {
+		t.Fatalf("failing apply: %v", err)
+	}
+}

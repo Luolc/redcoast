@@ -132,3 +132,14 @@ func TestInventoryExport(t *testing.T) {
 		t.Fatal("codex export ran")
 	}
 }
+
+// TestAccountWriterIsClaudeOnly checks that the Claude process gets the dashboard's write
+// path, built with the configured addresses and template, and the Codex process none.
+func TestAccountWriterIsClaudeOnly(t *testing.T) {
+	if writer := accountWriter(config{provider: "codex"}, nil, nil, nil, nil, nil, nil); writer != nil {
+		t.Fatal("the Codex process has a write path")
+	}
+	if writer := accountWriter(config{provider: "claude", tokenRefTemplate: "op://example-vault/token-{alias}/credential"}, nil, nil, nil, nil, syntheticResolve, nil); writer == nil {
+		t.Fatal("the Claude process has no write path")
+	}
+}
