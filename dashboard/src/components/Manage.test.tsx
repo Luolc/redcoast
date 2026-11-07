@@ -159,8 +159,10 @@ it("has no field that takes a credential", () => {
     const out = html(route);
     expect(out).not.toContain('type="password"');
     // The only field named for a token shows its reference and cannot be typed in.
-    for (const input of out.match(/<input[^>]*>/g) ?? [])
-      if (/claude-oauth-token/.test(input)) expect(input).toContain("readOnly");
+    const tokenInputs = (out.match(/<input[^>]*>/g) ?? []).filter((input) =>
+      input.includes("claude-oauth-token"),
+    );
+    expect(tokenInputs.every((input) => input.includes("readOnly"))).toBe(true);
   }
   expect(html({ view: "account", arg: "sample-ab/edit" })).toContain(
     "claude-oauth-token-sample-ab",
