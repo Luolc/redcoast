@@ -84,6 +84,7 @@ function Nav({
 interface Form {
   alias: string;
   email: string;
+  device: string;
   host: string;
   port: string;
   ip: string;
@@ -96,6 +97,7 @@ function FillIn({ data, reload }: { data: Dashboard; reload: () => void }) {
   const [f, setF] = useState<Form>({
     alias: "",
     email: "",
+    device: "",
     host: "",
     port: "",
     ip: "",
@@ -115,6 +117,7 @@ function FillIn({ data, reload }: { data: Dashboard; reload: () => void }) {
         ? "An account has this alias"
         : undefined,
     email: validEmail(f.email) ? undefined : "An email address",
+    device: validDevice(f.device) ? undefined : "64 lowercase hex characters",
     port: validPort(f.port) ? undefined : "A port from 1 to 65535",
     ip: validIp(f.ip) ? undefined : "An IPv4 address, like 192.0.2.10",
     plan: validPlan(f.plan)
@@ -133,6 +136,7 @@ function FillIn({ data, reload }: { data: Dashboard; reload: () => void }) {
     void writeAccount("account-create", "POST", "./accounts", {
       alias: f.alias,
       email: f.email,
+      device_id: f.device,
       access: "gateway",
       plan: f.plan,
       proxy: {
@@ -182,6 +186,14 @@ function FillIn({ data, reload }: { data: Dashboard; reload: () => void }) {
             error={shown("email")}
             hint="Shown only"
             placeholder="name@example.test"
+          />
+          <TextField
+            label="Device ID"
+            mono
+            value={f.device}
+            onChange={set("device")}
+            error={shown("device")}
+            hint="64 hex characters; differs from every other account's"
           />
           <TextField
             label="Proxy host"

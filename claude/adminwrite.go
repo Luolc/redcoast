@@ -56,11 +56,12 @@ type sourceBody struct {
 // adminCreateBody is the body of POST /accounts of the management socket. There is no
 // access and no direct key: such an account is on the gateway path, behind a proxy.
 type adminCreateBody struct {
-	Alias  *string         `json:"alias"`
-	Email  *string         `json:"email"`
-	Plan   *string         `json:"plan"`
-	Proxy  *adminProxyBody `json:"proxy"`
-	Source *sourceBody     `json:"source"`
+	Alias    *string         `json:"alias"`
+	Email    *string         `json:"email"`
+	Plan     *string         `json:"plan"`
+	Proxy    *adminProxyBody `json:"proxy"`
+	DeviceID *string         `json:"device_id"`
+	Source   *sourceBody     `json:"source"`
 }
 
 // adminProxyBody is the proxy of an adminCreateBody.
@@ -121,7 +122,7 @@ func (a *Admin) handleAccountWrites(mux *http.ServeMux) {
 // gateway path behind the proxy b names.
 func (b *adminCreateBody) toCreate() *createBody {
 	access := "gateway"
-	out := &createBody{Alias: b.Alias, Email: b.Email, Plan: b.Plan, Access: &access}
+	out := &createBody{Alias: b.Alias, Email: b.Email, Plan: b.Plan, Access: &access, DeviceID: b.DeviceID}
 	if b.Proxy != nil {
 		direct := false
 		out.Proxy = &proxyBody{Direct: &direct, Host: b.Proxy.Host, Port: b.Proxy.Port, ExpectedIP: b.Proxy.ExpectedIP,

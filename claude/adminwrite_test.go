@@ -47,7 +47,7 @@ func (h *setupHarness) agentCreateBody(alias string) map[string]any {
 	host, port := h.exitAddress()
 	var portNumber int
 	_, _ = fmt.Sscan(port, &portNumber)
-	return map[string]any{"alias": alias, "email": "new@example.test", "plan": "pro", "source": slackSource(),
+	return map[string]any{"alias": alias, "email": "new@example.test", "device_id": testDeviceID, "plan": "pro", "source": slackSource(),
 		"proxy": map[string]any{"host": host, "port": portNumber, "expected_egress_ip": "192.0.2.2",
 			"username_ref": "op://example-proxies/proxy-account/username", "password_ref": "op://example-proxies/proxy-account/password"}}
 }
@@ -343,6 +343,8 @@ func TestAgentCreateRefusals(t *testing.T) {
 		{"port is none", change(func(b map[string]any) { proxy(b)["port"] = 0 }), 400, "field_invalid", "proxy.port"},
 		{"egress IP is none", change(func(b map[string]any) { proxy(b)["expected_egress_ip"] = "x" }), 400, "field_invalid", "proxy.expected_egress_ip"},
 		{"proxy login that no account uses", change(func(b map[string]any) { proxy(b)["username_ref"] = "op://example-proxies/other/username" }), 400, "field_invalid", "proxy.username_ref"},
+		{"device ID is missing", change(func(b map[string]any) { delete(b, "device_id") }), 400, "field_missing", "device_id"},
+		{"device ID is none", change(func(b map[string]any) { b["device_id"] = "nope" }), 400, "field_invalid", "device_id"},
 		{"alias exists", change(func(b map[string]any) { b["alias"] = "sample-a" }), 409, "account_exists", "alias"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
