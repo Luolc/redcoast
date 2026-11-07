@@ -43,32 +43,38 @@ func StoreSource(store *session.Store, dir string) AccountSource {
 		if err != nil {
 			return nil, nil, err
 		}
-		var accounts []inventoryAccount
-		var errs []error
-		for _, row := range rows {
-			if row.Status != "active" || row.Access != "gateway" {
-				continue
-			}
-			file, data, err := rowDocument(row)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			account, err := servedAccount(row.Alias, file, data, provider)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			accounts = append(accounts, account)
-		}
-		if len(errs) > 0 {
-			return nil, nil, errors.Join(errs...)
-		}
-		if err := checkServed(accounts); err != nil {
+		accounts, err := servedRows(rows, provider)
+		if err != nil {
 			return nil, nil, err
 		}
 		return accounts, directHosts, nil
 	}
+}
+
+// servedRows builds the accounts the gateway serves from rows, the others left out.
+// Every refused row is reported, and so is a set with no account or two direct ones.
+func servedRows(rows []session.AccountRow, provider Provider) ([]inventoryAccount, error) {
+	var accounts []inventoryAccount
+	var errs []error
+	for _, row := range rows {
+		if row.Status != "active" || row.Access != "gateway" {
+			continue
+		}
+		file, data, err := rowDocument(row)
+		if err == nil {
+			var account inventoryAccount
+			if account, err = servedAccount(row.Alias, file, data, provider); err == nil {
+				accounts = append(accounts, account)
+			}
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	return accounts, checkServed(accounts)
 }
 
 // claudeFields are the keys of an account file that only the Claude provider reads.
