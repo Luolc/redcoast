@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -21,14 +22,118 @@ import (
 // maxCredentialsInput bounds the JSON object the test entry reads from stdin.
 const maxCredentialsInput = 64 << 10
 
-// onePasswordResolver returns a resolver over the official SDK with the service account
-// token. The token stays in the client; it is in no error.
-func onePasswordResolver(ctx context.Context, token string) (claude.Resolver, error) {
+// credentials is where the gateway's references are resolved and its secret store is
+// opened. Values of op:// references are kept in memory by memo, and one SDK client
+// serves every read and write for as long as the service account token is the same, so
+// that a reload or an account write asks 1Password only for what it has not read. Values
+// live in the process and nowhere else.
+type credentials struct {
+	cfg  config
+	memo *credential.Memo
+
+	mu     sync.Mutex
+	stdin  claude.Resolver // the test entry's, read once
+	token  string          // the service account token client was built with
+	client *onepassword.Client
+	sdk    claude.Resolver // resolves with client, retrying a rate limit
+
+	// connect opens the client for a token and the resolver over it; tests replace it.
+	connect func(ctx context.Context, token string) (*onepassword.Client, claude.Resolver, error)
+}
+
+func newCredentials(cfg config) *credentials {
+	return &credentials{cfg: cfg, memo: credential.NewMemo(), connect: connectOnePassword}
+}
+
+// resolver builds the resolver the configuration asks for: the stdin test entry, or
+// env:// and file:// references with op:// ones through the 1Password SDK when a
+// service account token is configured. The token reference is read each time, so a
+// rotated service account token is picked up. The resolver answers an op:// reference it
+// has read before from memory; with fresh it reads from 1Password and keeps the value, for
+// a write that must see the store as it is now.
+func (c *credentials) resolver(ctx context.Context, fresh bool) (claude.Resolver, error) {
+	loadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
+	defer cancel()
+	if c.cfg.credentialsStdin {
+		return c.stdinResolver(loadCtx)
+	}
+	resolve := credential.New(nil)
+	if c.cfg.tokenRef == "" {
+		return resolve, nil
+	}
+	token, err := resolve(loadCtx, c.cfg.tokenRef)
+	if err != nil {
+		return nil, fmt.Errorf("1Password service account token: %v", err)
+	}
+	_, sdk, err := c.sdkFor(loadCtx, token)
+	if err != nil {
+		return nil, err
+	}
+	if fresh {
+		return credential.New(c.memo.Fresh(sdk)), nil
+	}
+	return credential.New(c.memo.Cached(sdk)), nil
+}
+
+// stdinResolver reads the test entry's credentials once and returns that resolver after.
+func (c *credentials) stdinResolver(ctx context.Context) (claude.Resolver, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stdin == nil {
+		inputCtx, cancel := context.WithTimeout(ctx, credentialsInputTimeout)
+		defer cancel()
+		resolve, err := stdinResolver(inputCtx, os.Stdin)
+		if err != nil {
+			return nil, err
+		}
+		c.stdin = resolve
+	}
+	return c.stdin, nil
+}
+
+// secretStore opens the secret store that setup writes to, over the same client the
+// references are read with.
+func (c *credentials) secretStore(ctx context.Context) (credential.Store, error) {
+	if c.cfg.tokenRef == "" || c.cfg.credentialsStdin {
+		return nil, errors.New("no 1Password service account token configured")
+	}
+	loadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
+	defer cancel()
+	token, err := credential.New(nil)(loadCtx, c.cfg.tokenRef)
+	if err != nil {
+		return nil, errors.New("1Password service account token")
+	}
+	client, _, err := c.sdkFor(loadCtx, token)
+	if err != nil {
+		return nil, errors.New("1Password client")
+	}
+	return onePasswordItems{client}, nil
+}
+
+// sdkFor returns the SDK client for token and the resolver over it, building them only
+// when token is not the one they were built with. The token stays in the client; it is
+// in no error.
+func (c *credentials) sdkFor(ctx context.Context, token string) (*onepassword.Client, claude.Resolver, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sdk != nil && c.token == token {
+		return c.client, c.sdk, nil
+	}
+	client, sdk, err := c.connect(ctx, token)
+	if err != nil {
+		return nil, nil, err
+	}
+	c.token, c.client, c.sdk = token, client, sdk
+	return client, sdk, nil
+}
+
+// connectOnePassword opens the SDK client for token and the resolver over it.
+func connectOnePassword(ctx context.Context, token string) (*onepassword.Client, claude.Resolver, error) {
 	client, err := onepassword.NewClient(ctx, onepassword.WithServiceAccountToken(token), onepassword.WithIntegrationInfo("redcoast", version))
 	if err != nil {
-		return nil, fmt.Errorf("1Password client: %v", err)
+		return nil, nil, fmt.Errorf("1Password client: %v", err)
 	}
-	return clientResolver(client), nil
+	return client, clientResolver(client), nil
 }
 
 // onePasswordItems is the write path of the official SDK as credential.Store: it lists
@@ -36,16 +141,6 @@ func onePasswordResolver(ctx context.Context, token string) (claude.Resolver, er
 // item and the date of its expiry field and creates one item with one concealed field and
 // an expiry date, and calls nothing else of the Items API.
 type onePasswordItems struct{ client *onepassword.Client }
-
-// onePasswordSecretStore returns the secret store over the official SDK with the service
-// account token. The token stays in the client; it is in no error.
-func onePasswordSecretStore(ctx context.Context, token string) (credential.Store, error) {
-	client, err := onepassword.NewClient(ctx, onepassword.WithServiceAccountToken(token), onepassword.WithIntegrationInfo("redcoast", version))
-	if err != nil {
-		return nil, errors.New("1Password client")
-	}
-	return onePasswordItems{client}, nil
-}
 
 // readError is err, or credential.ErrRateLimited when the SDK says the account was asked
 // too often, so the credential package can tell it without knowing the SDK.

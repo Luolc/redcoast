@@ -139,7 +139,7 @@ func TestAccountWriterIsClaudeOnly(t *testing.T) {
 	if writer := accountWriter(config{provider: "codex"}, nil, nil, nil, nil, nil, nil); writer != nil {
 		t.Fatal("the Codex process has a write path")
 	}
-	if writer := accountWriter(config{provider: "claude", tokenRefTemplate: "op://example-vault/token-{alias}/credential"}, nil, nil, nil, nil, syntheticResolve, nil); writer == nil {
+	if writer := accountWriter(config{provider: "claude", tokenRefTemplate: "op://example-vault/token-{alias}/credential"}, nil, nil, nil, nil, newCredentials(config{}), nil); writer == nil {
 		t.Fatal("the Claude process has no write path")
 	}
 }

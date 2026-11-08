@@ -151,7 +151,7 @@ func loadAccount(ctx context.Context, entry inventoryAccount, resolve Resolver, 
 		}
 		value, err := resolve(ctx, ref.reference)
 		if err != nil {
-			errs = append(errs, fieldError{entry.alias, ref.field, "cannot resolve: " + err.Error()})
+			errs = append(errs, cannotResolve{fieldError{entry.alias, ref.field, "cannot resolve: " + err.Error()}, err})
 			continue
 		}
 		*ref.value = value

@@ -46,6 +46,27 @@ const accountsLoadTimeout = 60 * time.Second
 // credentialsInputTimeout is how long the test entry waits for the JSON object on stdin.
 const credentialsInputTimeout = 5 * time.Second
 
+// exitOnePasswordQuota is the status "redcoast serve" exits with when it cannot start
+// because 1Password refused the reads of its references for being asked too often, even
+// after the retries. The allowance runs per hour and per day, so starting again at once
+// only spends more of it; a unit lists the status in RestartPreventExitStatus. Every
+// other startup failure exits with 1.
+const exitOnePasswordQuota = 75
+
+// exitStatus is the status a startup failure err exits with.
+func exitStatus(err error) int {
+	if isRateLimited(err) || errors.Is(err, credential.ErrRateLimited) {
+		return exitOnePasswordQuota
+	}
+	return 1
+}
+
+// fatal logs err and exits with its exitStatus.
+func fatal(err error) {
+	log.Print(err)
+	os.Exit(exitStatus(err))
+}
+
 // errUsage is returned when the command line names no provider and command.
 var errUsage = errors.New(`usage:
   redcoast claude|codex serve --config <path>
@@ -85,13 +106,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	resolve, err := newResolver(ctx, cfg)
+	creds := newCredentials(cfg)
+	resolve, err := creds.resolver(ctx, false)
 	if err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 	gateway, form, err := newProvider(ctx, cfg, resolve)
 	if err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 	store, err := openStore(ctx, cfg.sessionDB, form)
 	if err != nil {
@@ -99,12 +121,12 @@ func main() {
 	}
 	set, err := loadAccounts(ctx, cfg, gateway, store, resolve)
 	if err != nil {
-		log.Fatal(errors.Join(err, store.Close()))
+		fatal(errors.Join(err, store.Close()))
 	}
 	log.Printf("accounts: %s", strings.Join(set.Candidates(), " "))
 	backups, err := newBackup(ctx, cfg, store, resolve)
 	if err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 	accounts := claude.NewAccounts(set, store)
 	defer accounts.CloseIdleConnections()
@@ -114,7 +136,7 @@ func main() {
 	if err := egress.Sweep(ctx); err != nil {
 		log.Fatal(err)
 	}
-	reload := reloader(cfg, store, accounts, resolve, egress)
+	reload := reloader(cfg, store, accounts, creds, egress)
 	admin := claude.NewAdmin(accounts, store, reload)
 	admin.Handoff = upg.Upgrade
 	entrypoint, err := claude.NewHandler(cfg.upstream, gateway, cfg.captureDir, store, accounts, cfg.limits)
@@ -122,7 +144,7 @@ func main() {
 		log.Fatal(err)
 	}
 	offerAccountActions(admin, gateway, entrypoint)
-	writer := accountWriter(cfg, store, accounts, egress, entrypoint, resolve, reload)
+	writer := accountWriter(cfg, store, accounts, egress, entrypoint, creds, reload)
 	admin.Writer = writer
 	setup := offerSetup(ctx, admin, writer)
 	dashboard, err := newDashboard(cfg, store, backups, egress, entrypoint, started, writer)
@@ -292,11 +314,11 @@ func newBackup(ctx context.Context, cfg config, store *session.Store, resolve cl
 	defer cancel()
 	keyID, err := resolve(resolveCtx, cfg.backup.AccessKeyID)
 	if err != nil {
-		return nil, fmt.Errorf("backup access key id: %v", err)
+		return nil, fmt.Errorf("backup access key id: %w", err)
 	}
 	secret, err := resolve(resolveCtx, cfg.backup.SecretAccessKey)
 	if err != nil {
-		return nil, fmt.Errorf("backup secret access key: %v", err)
+		return nil, fmt.Errorf("backup secret access key: %w", err)
 	}
 	return backup.New(store, backup.Config{
 		Endpoint:    bucketURL(cfg.backup.Endpoint, cfg.backup.Bucket),
@@ -308,55 +330,41 @@ func newBackup(ctx context.Context, cfg config, store *session.Store, resolve cl
 }
 
 // accountWriter returns the dashboard's write path over the accounts table, or nil for
-// the Codex process, whose accounts are files. Its resolver is built as a reload's is.
-func accountWriter(cfg config, store *session.Store, accounts *claude.Accounts, egress *claude.Egress, entrypoint *claude.Entrypoint, startup claude.Resolver, reload func(context.Context) (claude.Reload, error)) *claude.AccountWriter {
+// the Codex process, whose accounts are files. Its resolvers are a reload's: a write
+// reads the references of the account it writes from 1Password and takes the rest from
+// what the process has read.
+func accountWriter(cfg config, store *session.Store, accounts *claude.Accounts, egress *claude.Egress, entrypoint *claude.Entrypoint, creds *credentials, reload func(context.Context) (claude.Reload, error)) *claude.AccountWriter {
 	if cfg.provider == "codex" {
 		return nil
 	}
 	return claude.NewAccountWriter(claude.AccountWriterConfig{
 		Store: store, Accounts: accounts, Egress: egress, Entrypoint: entrypoint, Reload: reload,
-		Resolve: func(ctx context.Context) (claude.Resolver, error) {
-			if cfg.credentialsStdin {
-				return startup, nil
-			}
-			return newResolver(ctx, cfg)
-		},
-		AllowFrom: cfg.writeAllowFrom, TokenRefTemplate: cfg.tokenRefTemplate,
+		Resolve:      func(ctx context.Context) (claude.Resolver, error) { return creds.resolver(ctx, false) },
+		ResolveFresh: func(ctx context.Context) (claude.Resolver, error) { return creds.resolver(ctx, true) },
+		AllowFrom:    cfg.writeAllowFrom, TokenRefTemplate: cfg.tokenRefTemplate,
 		SetupEnabled: cfg.setupEnabled, AdminWrite: cfg.adminWrite,
-		SetupSecrets: func(ctx context.Context) (credential.Store, error) { return newSecretStore(ctx, cfg) },
+		SetupSecrets: creds.secretStore,
 	})
 }
 
-// newSecretStore opens the secret store that setup writes to, with the same 1Password
-// service account token the references are read with.
-func newSecretStore(ctx context.Context, cfg config) (credential.Store, error) {
-	if cfg.tokenRef == "" || cfg.credentialsStdin {
-		return nil, errors.New("no 1Password service account token configured")
-	}
-	loadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
-	defer cancel()
-	token, err := credential.New(nil)(loadCtx, cfg.tokenRef)
-	if err != nil {
-		return nil, errors.New("1Password service account token")
-	}
-	return onePasswordSecretStore(loadCtx, token)
-}
-
 // reloader returns the reload the management interface runs. It resolves the token
-// reference again, so a rotated service account token is picked up; the stdin test entry keeps
-// the one object it read at startup.
-func reloader(cfg config, store *session.Store, accounts *claude.Accounts, startup claude.Resolver, egress *claude.Egress) func(context.Context) (claude.Reload, error) {
+// reference again, so a rotated service account token is picked up, but reads from
+// 1Password only the references it has not read: an account whose references are the
+// ones already loaded keeps their values. The values of references that no account names
+// any more are forgotten after a reload that took.
+func reloader(cfg config, store *session.Store, accounts *claude.Accounts, creds *credentials, egress *claude.Egress) func(context.Context) (claude.Reload, error) {
 	return func(ctx context.Context) (claude.Reload, error) {
 		reloadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
 		defer cancel()
-		resolve := startup
-		if !cfg.credentialsStdin {
-			var err error
-			if resolve, err = newResolver(reloadCtx, cfg); err != nil {
-				return claude.Reload{}, err
-			}
+		resolve, err := creds.resolver(reloadCtx, false)
+		if err != nil {
+			return claude.Reload{}, err
 		}
-		return accounts.ReloadFrom(reloadCtx, accountSource(cfg, store), resolve, egress.Check)
+		report, err := accounts.ReloadFrom(reloadCtx, accountSource(cfg, store), resolve, egress.Check)
+		if err == nil {
+			creds.memo.Prune()
+		}
+		return report, err
 	}
 }
 
@@ -380,7 +388,7 @@ func newProvider(ctx context.Context, cfg config, resolve claude.Resolver) (clau
 	defer cancel()
 	key, err := resolve(resolveCtx, cfg.codex.SessionKey)
 	if err != nil {
-		return claude.Provider{}, nil, fmt.Errorf("codex.session_key: %v", err)
+		return claude.Provider{}, nil, fmt.Errorf("codex.session_key: %w", err)
 	}
 	form, err := codex.NewSessionForm([]byte(key))
 	if err != nil {
@@ -416,32 +424,6 @@ func runSubcommand(ctx context.Context, provider string, arguments []string) err
 		return err
 	}
 	return runAdmin(ctx, cmd, os.Stdout)
-}
-
-// newResolver builds the resolver the configuration asks for: the stdin test entry, or
-// env:// and file:// references with op:// ones through the 1Password SDK when a
-// service account token is configured.
-func newResolver(ctx context.Context, cfg config) (claude.Resolver, error) {
-	loadCtx, cancel := context.WithTimeout(ctx, accountsLoadTimeout)
-	defer cancel()
-	if cfg.credentialsStdin {
-		inputCtx, cancelInput := context.WithTimeout(loadCtx, credentialsInputTimeout)
-		defer cancelInput()
-		return stdinResolver(inputCtx, os.Stdin)
-	}
-	resolve := credential.New(nil)
-	if cfg.tokenRef == "" {
-		return resolve, nil
-	}
-	token, err := resolve(loadCtx, cfg.tokenRef)
-	if err != nil {
-		return nil, fmt.Errorf("1Password service account token: %v", err)
-	}
-	onePassword, err := onePasswordResolver(loadCtx, token)
-	if err != nil {
-		return nil, err
-	}
-	return credential.New(onePassword), nil
 }
 
 // accountSource is where the accounts of cfg's provider are read: the Claude process

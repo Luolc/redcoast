@@ -68,6 +68,17 @@ func (e fieldError) Error() string {
 	return e.alias + ": " + e.field + ": " + e.problem
 }
 
+// cannotResolve is a fieldError for a reference the resolver failed on. It also unwraps to
+// the resolver's error, which never holds a value, so that a caller can tell a rate limit
+// from a missing item.
+type cannotResolve struct {
+	fieldError
+	cause error
+}
+
+// Unwrap gives the field report, which fieldsOf looks for, and the resolver's error.
+func (e cannotResolve) Unwrap() []error { return []error{e.fieldError, e.cause} }
+
 // readInventory reads every *.yaml in dir and returns the accounts the gateway serves
 // (status active and access gateway, sorted by alias), with the provider's own fields
 // read by provider, and the targets of direct-hosts.yaml. Every file whose name is not an alias, every consumed field that

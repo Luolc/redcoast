@@ -67,7 +67,11 @@ With `direct: true`, `host`, `port`, `username_ref` and `password_ref` must be l
 
 `device_id` and `account_uuid` are the identity the gateway puts into `metadata.user_id` of the account's requests in place of the client's; a missing or empty one is sent as an empty string. A malformed one is refused, naming the account and the field, never the value. Changing either counts as changing the account on a reload.
 
-All of an active account's references must resolve, or the gateway does not start (and a reload changes nothing). An optional `direct-hosts.yaml` in the same directory lists the exact `host:port` CONNECT targets the gateway dials itself instead of through an account's exit:
+All of an active account's references must resolve, or the gateway does not start (and a reload changes nothing).
+
+1Password counts every read against the whole account's allowance for the day, so the gateway reads as little as it can. It keeps the value of each `op://` reference it has read in memory only, and one 1Password client for as long as the service account token is the same. A start reads every reference of the served accounts once (a reference shared by several accounts once for all). A reload, and the reload that ends a write, read only the references that no earlier load read: an account whose references are unchanged keeps its values, and the value of a reference that no served account names any more is forgotten. A write to an account (an edit, `verify`, `activate`, a token handover) reads that one account's references again, up to three, and nothing else. So a value changed in 1Password behind an unchanged reference is not picked up by `reload` alone. To rotate a token or a proxy login in place, change it in 1Password, run `redcoast claude account verify <alias>` for an account that uses it (it reads that account's references again and keeps what it read, but does not reload), then `redcoast claude reload` (which reads nothing); or restart the gateway. The memo is keyed by the reference text only, so it also survives a change of the service account token: a token that can no longer read a vault shows that at the next write or start, not at a reload. `env://` and `file://` references cost no read and are read each time.
+
+When the start fails because 1Password still refuses a read for being asked too often after the gateway's retries, the process exits with status 75 and no other failure does (they exit 1). The allowance runs per hour and per day, so a restart at once only spends more of it; the example unit below keeps systemd from restarting on 75. An optional `direct-hosts.yaml` in the same directory lists the exact `host:port` CONNECT targets the gateway dials itself instead of through an account's exit:
 
 ```yaml
 hosts:
@@ -152,6 +156,9 @@ An example unit, `/etc/systemd/system/redcoast.service`, for a service user `red
 Description=redcoast gateway
 Wants=network-online.target
 After=network-online.target
+# At most 5 starts in 10 minutes, then the unit stays failed until someone looks.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
 
 [Service]
 # READY=1 comes after the accounts are loaded, the store is opened and the
@@ -170,6 +177,8 @@ ExecStart=/opt/redcoast/current/redcoast claude serve --config /etc/redcoast/cla
 ExecReload=/opt/redcoast/current/redcoast claude reload --admin-socket /run/redcoast/admin.sock
 Restart=on-failure
 RestartSec=10s
+# Exit status 75: 1Password's allowance is used up; a restart would spend more.
+RestartPreventExitStatus=75
 LimitNOFILE=65536
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -179,6 +188,8 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 ```
+
+`StartLimitIntervalSec` has to be longer than `StartLimitBurst` times `RestartSec`, or the limit is never reached. A unit that stopped on 75, or on the start limit, stays failed until `systemctl reset-failed redcoast` and a start, after the allowance has reset.
 
 With the example configuration the sockets are under `/run/redcoast/` and the database under `/var/lib/redcoast/`. Start it with `sudo systemctl enable --now redcoast`; `curl -s http://127.0.0.1:7804/health` answers `{"status":"ok",...}` once it is ready.
 
@@ -190,7 +201,7 @@ Every command below talks to the running gateway over `--admin-socket` (the `adm
 | --- | --- |
 | `redcoast claude status` | accounts, pauses, quota readings, sessions |
 | `redcoast claude sessions [--since] [--until] [--cwd-prefix] [--machine] [--state ended\|all]` | the session list |
-| `redcoast claude reload` | re-read the accounts (the table; the Codex gateway's directory); all or nothing |
+| `redcoast claude reload` | re-read the accounts (the table; the Codex gateway's directory); all or nothing; reads from 1Password only the references no earlier load read |
 | `redcoast claude inventory export --session-db <path> <dir>` | write the accounts table as inventory files into `<dir>` |
 | `redcoast claude setup next`, `setup report …`, `setup token …` | the commands of a login machine, when `setup.enabled` is on (see "Setting an account's token") |
 | `redcoast claude account create\|show\|verify\|activate`, `setup request`, `setup next --request-id` | an agent adds an account from a Slack message (see "Adding an account from the management socket") |
