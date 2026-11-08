@@ -124,9 +124,7 @@ export function App() {
                 : ` Showing the data of ${formatAgo(data.at, now)}.`}
             </div>
           )}
-          {data !== null &&
-          fetchError === null &&
-          isStale(data.at, now) ? (
+          {data !== null && fetchError === null && isStale(data.at, now) ? (
             <div role="alert" className="alert">
               <Status
                 state={{
