@@ -77,7 +77,7 @@ export function formatMs(ms: number): string {
  * new one every 60 s after the last one ends (about 6 s on a small host), and the
  * page reads every 30 s, so the figures can honestly be about 100 s old.
  */
-export const STALE_MS = 150_000;
+const STALE_MS = 150_000;
 
 /** Whether data computed at iso is too old at now. */
 export function isStale(iso: string, now: Date): boolean {
