@@ -72,6 +72,18 @@ export function formatMs(ms: number): string {
   return `${String(Math.floor(s / 60))}${NB}min ${String(s % 60).padStart(2, "0")}${NB}s`;
 }
 
+/**
+ * How old the snapshot may be before the page calls it old: the gateway computes a
+ * new one every 60 s after the last one ends (about 6 s on a small host), and the
+ * page reads every 30 s, so the figures can honestly be about 100 s old.
+ */
+export const STALE_MS = 150_000;
+
+/** Whether data computed at iso is too old at now. */
+export function isStale(iso: string, now: Date): boolean {
+  return now.getTime() - Date.parse(iso) > STALE_MS;
+}
+
 /** How long ago iso was at now, `7 min ago`. */
 export function formatAgo(iso: string, now: Date): string {
   return `${formatSpan(now.getTime() - Date.parse(iso))} ago`;

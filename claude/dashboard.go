@@ -75,7 +75,7 @@ type Dashboard struct {
 // ends, before the next. Computing a snapshot reads the whole store and takes seconds on
 // a large one, so no request does it: requests read the last one. Nothing else the
 // dashboard shows is cached.
-const snapshotInterval = 20 * time.Second
+const snapshotInterval = 60 * time.Second
 
 // snapshotCache holds the last computed snapshot, written only by the background
 // refresh and read by requests.
