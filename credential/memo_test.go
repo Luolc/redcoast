@@ -70,9 +70,11 @@ func TestMemoKeepsNoFailureAndNoLocalReference(t *testing.T) {
 	}
 	// env:// and file:// cost the secret store nothing, so they are read each time.
 	for _, local := range []string{"env://EXAMPLE", "file:///example/path"} {
-		cached(t.Context(), local)
-		cached(t.Context(), local)
-		fresh(t.Context(), local)
+		for _, resolve := range []Resolver{cached, cached, fresh} {
+			if _, err := resolve(t.Context(), local); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if inner.reads[local] != 3 {
 			t.Fatalf("%s read %d times, want 3", local, inner.reads[local])
 		}
@@ -84,13 +86,22 @@ func TestMemoPrune(t *testing.T) {
 	memo := NewMemo()
 	cached := memo.Cached(inner.resolve)
 	const kept, dropped = "op://example-vault/kept/field", "op://example-vault/dropped/field"
-	cached(t.Context(), kept)
-	cached(t.Context(), dropped)
+	for _, ref := range []string{kept, dropped} {
+		if _, err := cached(t.Context(), ref); err != nil {
+			t.Fatal(err)
+		}
+	}
 	memo.Prune() // both were asked for since the start
-	cached(t.Context(), kept)
+	asks := func(refs ...string) {
+		for _, ref := range refs {
+			if _, err := cached(t.Context(), ref); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	asks(kept)
 	memo.Prune() // only kept was asked for since
-	cached(t.Context(), kept)
-	cached(t.Context(), dropped)
+	asks(kept, dropped)
 	if inner.reads[kept] != 1 || inner.reads[dropped] != 2 {
 		t.Fatalf("reads kept=%d dropped=%d, want 1 and 2", inner.reads[kept], inner.reads[dropped])
 	}
