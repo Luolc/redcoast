@@ -11,15 +11,13 @@ import { Overview } from "./components/Overview";
 import { Sessions } from "./components/Sessions";
 import { Sidebar, Topbar } from "./components/Shell";
 import { Status } from "./components/ui";
-import { formatAgo } from "./lib/format";
+import { formatAgo, isStale } from "./lib/format";
 import { parseClient, routeHref, VIEW_NAMES, type Route } from "./lib/route";
 import type { Dashboard } from "./lib/types";
 import { useData, useNow, useRoute, useTheme } from "./lib/useData";
 import { providerName } from "./lib/words";
 
 const REFRESH_MS = 30_000;
-// Two missed refreshes: the page is showing old data.
-const STALE_MS = 2 * REFRESH_MS + 5_000;
 
 /** The page of route over data. */
 export function Page({
@@ -126,9 +124,7 @@ export function App() {
                 : ` Showing the data of ${formatAgo(data.at, now)}.`}
             </div>
           )}
-          {data !== null &&
-          fetchError === null &&
-          now.getTime() - Date.parse(data.at) > STALE_MS ? (
+          {data !== null && fetchError === null && isStale(data.at, now) ? (
             <div role="alert" className="alert">
               <Status
                 state={{

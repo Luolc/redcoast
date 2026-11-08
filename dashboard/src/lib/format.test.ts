@@ -10,6 +10,7 @@ import {
   formatTime,
   formatTokens,
   formatUntil,
+  isStale,
   LA,
 } from "./format";
 
@@ -76,4 +77,10 @@ it("writes token counts in k, M and B, never 1000 of a unit", () => {
   expect(formatTokens(999_600)).toBe(`1.0${nb}M`);
   expect(formatTokens(217_000_000)).toBe(`217${nb}M`);
   expect(formatTokens(3_400_000_000)).toBe(`3.4${nb}B`);
+});
+
+it("calls data old only past the longest age a healthy gateway shows", () => {
+  const now = new Date("2026-10-07T12:20:00Z");
+  expect(isStale("2026-10-07T12:17:30Z", now)).toBe(false);
+  expect(isStale("2026-10-07T12:17:29Z", now)).toBe(true);
 });
