@@ -22,11 +22,31 @@ var (
 	// ErrUnexpectedFields: an item the write created has fields besides the token's and
 	// the expiry date's; the item is left as it is. ExtraFieldsError names them.
 	ErrUnexpectedFields = errors.New("the created item has other fields")
+	// ErrRateLimited: the secret store refused the read for being asked too often. It is
+	// also an ErrWriteFailed. A store reports it by returning an error that is
+	// ErrRateLimited.
+	ErrRateLimited error = rateLimited{}
 	// ErrExpiresMissing: the item has no expires field, or it is empty.
 	ErrExpiresMissing = errors.New("the item has no expiry date")
 	// ErrExpiresUnreadable: the expires field holds something that is not a date.
 	ErrExpiresUnreadable = errors.New("the expiry date is not readable")
 )
+
+type rateLimited struct{}
+
+func (rateLimited) Error() string { return "the secret store is rate limited" }
+
+// Is makes a rate limit also an ErrWriteFailed, which is how callers have always met it.
+func (rateLimited) Is(target error) bool { return target == ErrWriteFailed }
+
+// failed is the package's error for a store's failure err: ErrRateLimited when the store
+// said it was asked too often, else ErrWriteFailed. Nothing the store said is kept.
+func failed(err error) error {
+	if errors.Is(err, ErrRateLimited) {
+		return ErrRateLimited
+	}
+	return ErrWriteFailed
+}
 
 // ExtraFieldsError is ErrUnexpectedFields with the names (titles, else IDs) of the
 // fields that should not be there; a name is never a value.
@@ -128,7 +148,7 @@ func locate(ctx context.Context, store Store, reference string) (target, error) 
 	}
 	vaults, err := store.Vaults(ctx)
 	if err != nil {
-		return target{}, ErrWriteFailed
+		return target{}, failed(err)
 	}
 	var matched []Vault
 	for _, v := range vaults {
@@ -145,7 +165,7 @@ func locate(ctx context.Context, store Store, reference string) (target, error) 
 	}
 	items, err := store.Items(ctx, matched[0].ID)
 	if err != nil {
-		return target{}, ErrWriteFailed
+		return target{}, failed(err)
 	}
 	var active []ItemInfo
 	for _, item := range items {
@@ -199,35 +219,51 @@ func field(item Item, fieldName string) (Field, error) {
 // missing item when mayCreate is not set. It reports whether it created the item. The
 // errors are the package's own and never hold the value.
 func Write(ctx context.Context, store Store, reference, value string, expires time.Time, mayCreate bool) (created bool, err error) {
+	created, _, err = WriteDated(ctx, store, reference, value, expires, mayCreate)
+	return created, err
+}
+
+// WriteDated is Write that also reports whether the write set the expiry date: a created
+// item always gets it, an existing item only when it has an expiry field. On an error,
+// dated is false.
+func WriteDated(ctx context.Context, store Store, reference, value string, expires time.Time, mayCreate bool) (created, dated bool, err error) {
+	created, dated, err = write(ctx, store, reference, value, expires, mayCreate)
+	if err != nil {
+		dated = false
+	}
+	return created, dated, err
+}
+
+func write(ctx context.Context, store Store, reference, value string, expires time.Time, mayCreate bool) (created, dated bool, err error) {
 	found, err := locate(ctx, store, reference)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	date := expires.UTC().Format(expiresLayout)
 	if found.absent {
 		if !mayCreate {
-			return false, ErrTargetMissing
+			return false, false, ErrTargetMissing
 		}
 		if err := store.Create(ctx, found.vault.ID, found.itemName, found.fieldName, value, date); err != nil {
-			return false, ErrWriteFailed
+			return false, false, ErrWriteFailed
 		}
-		return true, checkCreated(ctx, store, reference)
+		return true, true, checkCreated(ctx, store, reference)
 	}
 	item, err := store.Item(ctx, found.vault.ID, found.item.ID)
 	if err != nil {
-		return false, ErrWriteFailed
+		return false, false, ErrWriteFailed
 	}
 	f, err := field(item, found.fieldName)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if len(item.Expires) > 1 {
-		return false, ErrTargetAmbiguous
+		return false, false, ErrTargetAmbiguous
 	}
 	if err := store.SetFields(ctx, found.vault.ID, found.item.ID, f, value, date); err != nil {
-		return false, ErrWriteFailed
+		return false, false, ErrWriteFailed
 	}
-	return false, nil
+	return false, len(item.Expires) == 1, nil
 }
 
 // isExpiryField reports whether f is an expiry field: its title is ExpiresField, ignoring
@@ -281,7 +317,7 @@ func Expires(ctx context.Context, store Store, reference string) (time.Time, err
 	}
 	item, err := store.Item(ctx, found.vault.ID, found.item.ID)
 	if err != nil {
-		return time.Time{}, ErrWriteFailed
+		return time.Time{}, failed(err)
 	}
 	if _, err := field(item, found.fieldName); err != nil {
 		return time.Time{}, err
@@ -303,4 +339,46 @@ func Expires(ctx context.Context, store Store, reference string) (time.Time, err
 		}
 	}
 	return time.Time{}, ErrExpiresUnreadable
+}
+
+// CachedLists returns a store that asks store for the vault list once and for each
+// vault's item list once, and answers later asks from memory; everything else goes to
+// store. It is for one pass of reads that many references share, such as the expiry date
+// of every account's token, and is dropped after the pass: a list that changes during the
+// pass is read as it was at its first ask, which costs at most a stale date for the pass,
+// and a failed ask is not kept. It is for one goroutine and must not be used for writes,
+// which need the lists as they are.
+func CachedLists(store Store) Store {
+	return &cachedLists{Store: store, items: map[string][]ItemInfo{}}
+}
+
+type cachedLists struct {
+	Store
+	vaults    []Vault
+	haveVault bool
+	items     map[string][]ItemInfo
+}
+
+func (c *cachedLists) Vaults(ctx context.Context) ([]Vault, error) {
+	if c.haveVault {
+		return c.vaults, nil
+	}
+	vaults, err := c.Store.Vaults(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.vaults, c.haveVault = vaults, true
+	return vaults, nil
+}
+
+func (c *cachedLists) Items(ctx context.Context, vaultID string) ([]ItemInfo, error) {
+	if items, ok := c.items[vaultID]; ok {
+		return items, nil
+	}
+	items, err := c.Store.Items(ctx, vaultID)
+	if err != nil {
+		return nil, err
+	}
+	c.items[vaultID] = items
+	return items, nil
 }

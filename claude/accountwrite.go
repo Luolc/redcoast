@@ -104,7 +104,7 @@ type AccountWriter struct {
 func NewAccountWriter(cfg AccountWriterConfig) *AccountWriter {
 	w := &AccountWriter{cfg: cfg, now: time.Now}
 	if cfg.SetupEnabled {
-		w.setup = &Setup{w: w, expiries: map[string]tokenExpiry{}, reread: make(chan struct{}, 1)}
+		w.setup = &Setup{w: w, expiries: map[string]tokenExpiry{}}
 	}
 	return w
 }
@@ -554,7 +554,6 @@ func (w *AccountWriter) afterWrite(ctx context.Context, before, after session.Ac
 			return writeResponse{}, writeError{status: http.StatusBadGateway, message: "the account was saved but the reload failed; the served set is unchanged until a reload succeeds", code: reasonReloadFailed}
 		}
 		answer.Reload = &report
-		w.Setup().RereadExpiries()
 	}
 	return answer, nil
 }

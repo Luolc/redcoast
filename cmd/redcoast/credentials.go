@@ -9,6 +9,8 @@ import (
 	"io"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/1password/onepassword-sdk-go"
 
@@ -45,11 +47,25 @@ func onePasswordSecretStore(ctx context.Context, token string) (credential.Store
 	return onePasswordItems{client}, nil
 }
 
+// readError is err, or credential.ErrRateLimited when the SDK says the account was asked
+// too often, so the credential package can tell it without knowing the SDK.
+func readError(err error) error {
+	if isRateLimited(err) {
+		return credential.ErrRateLimited
+	}
+	return err
+}
+
+func isRateLimited(err error) bool {
+	var limited *onepassword.RateLimitExceededError
+	return errors.As(err, &limited)
+}
+
 func (s onePasswordItems) Vaults(ctx context.Context) ([]credential.Vault, error) {
 	list, err := s.client.Vaults().List(ctx)
 	runtime.KeepAlive(s.client)
 	if err != nil {
-		return nil, err
+		return nil, readError(err)
 	}
 	vaults := make([]credential.Vault, len(list))
 	for i, v := range list {
@@ -63,7 +79,7 @@ func (s onePasswordItems) Items(ctx context.Context, vaultID string) ([]credenti
 	list, err := s.client.Items().List(ctx, vaultID, both)
 	runtime.KeepAlive(s.client)
 	if err != nil {
-		return nil, err
+		return nil, readError(err)
 	}
 	items := make([]credential.ItemInfo, len(list))
 	for i, it := range list {
@@ -76,7 +92,7 @@ func (s onePasswordItems) Item(ctx context.Context, vaultID, itemID string) (cre
 	item, err := s.client.Items().Get(ctx, vaultID, itemID)
 	runtime.KeepAlive(s.client)
 	if err != nil {
-		return credential.Item{}, err
+		return credential.Item{}, readError(err)
 	}
 	out := credential.Item{ID: item.ID, Title: item.Title}
 	for _, f := range item.Fields {
@@ -145,16 +161,57 @@ func (s onePasswordItems) Create(ctx context.Context, vaultID, title, fieldTitle
 	return err
 }
 
+// rateLimitBackoff is how long retryRateLimited waits before each of its retries. It
+// only rides out a short burst: the service's allowance runs per hour and per day.
+var rateLimitBackoff = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+
 // clientResolver returns a resolver over client that keeps client reachable for as long
 // as the resolver is. The SDK registers a finalizer on the Client that releases the
 // underlying client ID; the method value client.Secrets().Resolve holds only the inner
 // client, so after a collection the ID could be released while the resolver is still
-// in use and every later resolution would fail.
+// in use and every later resolution would fail. It retries a rate limited resolution.
 func clientResolver(client *onepassword.Client) claude.Resolver {
-	return func(ctx context.Context, reference string) (string, error) {
+	return retryRateLimited(func(ctx context.Context, reference string) (string, error) {
 		value, err := client.Secrets().Resolve(ctx, reference)
 		runtime.KeepAlive(client)
 		return value, err
+	}, rateLimitBackoff, accountsLoadTimeout)
+}
+
+// retryRateLimited returns a resolver that resolves with inner and, when inner says the
+// account was asked too often, waits backoff[0], tries again, waits backoff[1], and so
+// on, at most len(backoff) retries. It returns at once when ctx ends, with the rate limit
+// error joined to ctx's error, and when the retries run out with inner's last error,
+// unchanged. Any other error is returned at once. Once the retries have run out for one
+// reference, the references asked for during the next cool are tried once and not
+// retried, so a load of many accounts under a lasting limit fails fast instead of
+// spending its whole timeout in waits.
+func retryRateLimited(inner claude.Resolver, backoff []time.Duration, cool time.Duration) claude.Resolver {
+	var mu sync.Mutex
+	var coolUntil time.Time
+	return func(ctx context.Context, reference string) (string, error) {
+		for retry := 0; ; retry++ {
+			value, err := inner(ctx, reference)
+			if err == nil || !isRateLimited(err) {
+				return value, err
+			}
+			mu.Lock()
+			spent := retry == len(backoff) || time.Now().Before(coolUntil)
+			if retry == len(backoff) {
+				coolUntil = time.Now().Add(cool)
+			}
+			mu.Unlock()
+			if spent {
+				return value, err
+			}
+			wait := time.NewTimer(backoff[retry])
+			select {
+			case <-ctx.Done():
+				wait.Stop()
+				return "", errors.Join(err, ctx.Err())
+			case <-wait.C:
+			}
+		}
 	}
 }
 
