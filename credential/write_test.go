@@ -277,3 +277,94 @@ func TestExpires(t *testing.T) {
 		t.Fatalf("missing field: %v", err)
 	}
 }
+
+// limitedStore is a fakeStore whose reads fail as rate limited when limited is set.
+type limitedStore struct {
+	*fakeStore
+	limited bool
+}
+
+func (s limitedStore) Vaults(ctx context.Context) ([]Vault, error) {
+	if s.limited {
+		return nil, ErrRateLimited
+	}
+	return s.fakeStore.Vaults(ctx)
+}
+
+// TestExpiresRateLimited: a rate limit from the store is ErrRateLimited, still an
+// ErrWriteFailed, and a plain failure is not ErrRateLimited.
+func TestExpiresRateLimited(t *testing.T) {
+	base := &fakeStore{vaults: []Vault{{ID: "v1", Title: "example-vault"}}}
+	_, err := Expires(t.Context(), limitedStore{base, true}, "op://example-vault/token-sample-a/credential")
+	if !errors.Is(err, ErrRateLimited) || !errors.Is(err, ErrWriteFailed) {
+		t.Fatalf("rate limited store: %v", err)
+	}
+	base.fail = map[string]bool{"Vaults": true}
+	if _, err := Expires(t.Context(), base, "op://example-vault/token-sample-a/credential"); errors.Is(err, ErrRateLimited) || !errors.Is(err, ErrWriteFailed) {
+		t.Fatalf("failing store: %v", err)
+	}
+}
+
+// countingStore counts the listings asked of a fakeStore.
+type countingStore struct {
+	*fakeStore
+	vaults, lists int
+}
+
+func (s *countingStore) Vaults(ctx context.Context) ([]Vault, error) {
+	s.vaults++
+	return s.fakeStore.Vaults(ctx)
+}
+
+func (s *countingStore) Items(ctx context.Context, id string) ([]ItemInfo, error) {
+	s.lists++
+	return s.fakeStore.Items(ctx, id)
+}
+
+// TestCachedLists: reads of many references through CachedLists ask for each listing
+// once; a failed listing is asked again.
+func TestCachedLists(t *testing.T) {
+	base := &countingStore{fakeStore: &fakeStore{
+		vaults: []Vault{{ID: "v1", Title: "example-vault"}},
+		items: map[string][]fakeItem{"v1": {
+			{info: ItemInfo{ID: "i1", Title: "token-sample-a"}, fields: []Field{{ID: "credential", Title: "credential"}}, expires: []string{"2027-01-02"}},
+			{info: ItemInfo{ID: "i2", Title: "token-sample-b"}, fields: []Field{{ID: "credential", Title: "credential"}}, expires: []string{"2027-01-03"}},
+		}},
+	}}
+	store := CachedLists(base)
+	for _, name := range []string{"token-sample-a", "token-sample-b", "token-sample-a"} {
+		if _, err := Expires(t.Context(), store, "op://example-vault/"+name+"/credential"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if base.vaults != 1 || base.lists != 1 {
+		t.Fatalf("listings asked: vaults %d, items %d; want 1, 1", base.vaults, base.lists)
+	}
+	failing := &countingStore{fakeStore: &fakeStore{fail: map[string]bool{"Vaults": true}}}
+	cached := CachedLists(failing)
+	for range 2 {
+		_, _ = cached.Vaults(t.Context())
+	}
+	if failing.vaults != 2 {
+		t.Fatalf("a failed listing was kept: asked %d times, want 2", failing.vaults)
+	}
+}
+
+// TestWriteDated: the write says whether it set the expiry date: a created item and an
+// existing item with an expiry field yes, an existing item without one no.
+func TestWriteDated(t *testing.T) {
+	ref := "op://example-vault/token-sample-a/credential"
+	f := newFake()
+	if _, dated, err := WriteDated(t.Context(), f, ref, writeValue, writeExpires, false); err != nil || !dated {
+		t.Fatalf("item with an expiry field: dated=%v err=%v", dated, err)
+	}
+	f = newFake()
+	f.items["v1"][0].fields = f.items["v1"][0].fields[:2]
+	f.items["v1"][0].expires = nil
+	if _, dated, err := WriteDated(t.Context(), f, ref, writeValue, writeExpires, false); err != nil || dated {
+		t.Fatalf("item without an expiry field: dated=%v err=%v", dated, err)
+	}
+	if created, dated, err := WriteDated(t.Context(), newFake(), "op://example-vault/token-sample-b/credential", writeValue, writeExpires, true); err != nil || !created || !dated {
+		t.Fatalf("created item: created=%v dated=%v err=%v", created, dated, err)
+	}
+}

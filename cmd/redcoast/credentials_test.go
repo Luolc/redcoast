@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"github.com/1password/onepassword-sdk-go"
 
 	"github.com/Luolc/redcoast/claude"
+	"github.com/Luolc/redcoast/credential"
 )
 
 // TestStdinResolver checks which stdin inputs the test entry accepts and that the
@@ -150,5 +153,79 @@ func TestClientResolverKeepsClientAlive(t *testing.T) {
 			}
 			runtime.KeepAlive(resolve)
 		})
+	}
+}
+
+// sequence returns a resolver that fails with each of errs in turn, then gives "value",
+// and the number of calls it has had.
+func sequence(errs ...error) (claude.Resolver, *int) {
+	calls := new(int)
+	return func(context.Context, string) (string, error) {
+		defer func() { *calls++ }()
+		if *calls < len(errs) {
+			return "", errs[*calls]
+		}
+		return "value", nil
+	}, calls
+}
+
+var testBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+
+// TestRetryRateLimited: a rate limited resolution is retried up to three times and then
+// gives the error as it was; other errors are not retried.
+func TestRetryRateLimited(t *testing.T) {
+	limited := &onepassword.RateLimitExceededError{}
+	t.Run("recovers within the retries", func(t *testing.T) {
+		inner, calls := sequence(limited, limited, limited)
+		got, err := retryRateLimited(inner, testBackoff, 0)(t.Context(), "op://v/i/f")
+		if err != nil || got != "value" || *calls != 4 {
+			t.Fatalf("got %q, %v after %d calls; want value after 4", got, err, *calls)
+		}
+	})
+	t.Run("gives up after three retries", func(t *testing.T) {
+		inner, calls := sequence(limited, limited, limited, limited, limited)
+		_, err := retryRateLimited(inner, testBackoff, 0)(t.Context(), "op://v/i/f")
+		if err != limited || *calls != 4 {
+			t.Fatalf("got %v after %d calls; want the rate limit error after 4", err, *calls)
+		}
+	})
+	t.Run("other errors are not retried", func(t *testing.T) {
+		other := errors.New("no such item")
+		inner, calls := sequence(other)
+		if _, err := retryRateLimited(inner, testBackoff, 0)(t.Context(), "op://v/i/f"); err != other || *calls != 1 {
+			t.Fatalf("got %v after %d calls; want the error after 1", err, *calls)
+		}
+	})
+	t.Run("after the retries ran out, later references are not retried for a while", func(t *testing.T) {
+		inner, calls := sequence(limited, limited, limited, limited, limited, limited)
+		resolve := retryRateLimited(inner, testBackoff, time.Hour)
+		_, _ = resolve(t.Context(), "op://v/i/a")
+		if _, err := resolve(t.Context(), "op://v/i/b"); err != limited || *calls != 5 {
+			t.Fatalf("got %v after %d calls; want the rate limit error after 5 (4 and 1)", err, *calls)
+		}
+	})
+	t.Run("a canceled context ends the wait", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		inner, calls := sequence(limited, limited)
+		cancelling := func(ctx context.Context, ref string) (string, error) {
+			cancel()
+			return inner(ctx, ref)
+		}
+		start := time.Now()
+		_, err := retryRateLimited(cancelling, []time.Duration{time.Hour}, 0)(ctx, "op://v/i/f")
+		if !errors.Is(err, context.Canceled) || !isRateLimited(err) || *calls != 1 || time.Since(start) > time.Minute {
+			t.Fatalf("got %v after %d calls in %v; want a cancel at once after 1", err, *calls, time.Since(start))
+		}
+	})
+}
+
+// TestReadErrorMarksRateLimit: the store's reads tell a rate limit from other failures.
+func TestReadErrorMarksRateLimit(t *testing.T) {
+	if err := readError(fmt.Errorf("wrapped: %w", &onepassword.RateLimitExceededError{})); !errors.Is(err, credential.ErrRateLimited) {
+		t.Fatalf("rate limit: %v", err)
+	}
+	other := errors.New("other")
+	if err := readError(other); err != other {
+		t.Fatalf("other: %v", err)
 	}
 }

@@ -43,6 +43,10 @@ type fakeSecrets struct {
 	createExtra []secretField
 	// readback, when set, is what a reference to a written item resolves to instead.
 	readback string
+	// calls counts the reads asked of the store; limitAfter, when above zero, makes every
+	// Item read after that many of them fail as rate limited.
+	vaultCalls, itemsCalls, itemCalls int
+	limitAfter                        int
 }
 
 type secretItem struct {
@@ -62,11 +66,17 @@ func newFakeSecrets() *fakeSecrets {
 	}
 }
 
-func (f *fakeSecrets) Vaults(context.Context) ([]credential.Vault, error) { return f.vaults, nil }
+func (f *fakeSecrets) Vaults(context.Context) ([]credential.Vault, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.vaultCalls++
+	return f.vaults, nil
+}
 
 func (f *fakeSecrets) Items(context.Context, string) ([]credential.ItemInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.itemsCalls++
 	var out []credential.ItemInfo
 	for _, it := range f.items {
 		out = append(out, it.info)
@@ -77,6 +87,10 @@ func (f *fakeSecrets) Items(context.Context, string) ([]credential.ItemInfo, err
 func (f *fakeSecrets) Item(_ context.Context, _, itemID string) (credential.Item, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.itemCalls++
+	if f.limitAfter > 0 && f.itemCalls > f.limitAfter {
+		return credential.Item{}, credential.ErrRateLimited
+	}
 	for _, it := range f.items {
 		if it.info.ID == itemID {
 			item := credential.Item{ID: it.info.ID, Title: it.info.Title}
@@ -581,7 +595,7 @@ func TestSetupHandoverCreates(t *testing.T) {
 			t.Fatalf("the block still has %s: %v", gone, block)
 		}
 	}
-	// The answer carries the expiry just read back from the item: a year after the write.
+	// The answer carries the expiry the handover computed: a year after the write.
 	if e := block["token_expiry"].(map[string]any); e["state"] != "read" || e["expires_at"] != h.clock.Add(365*24*time.Hour).UTC().Format("2006-01-02")+"T00:00:00Z" {
 		t.Fatalf("token_expiry = %v", e)
 	}
@@ -664,7 +678,7 @@ func TestSetupHandoverSetsExisting(t *testing.T) {
 }
 
 // TestSetupHandoverAddsNoField: an item that has no expiry field gets only the token; its
-// fields are afterwards the same set, and the read says there is no date.
+// fields are afterwards the same set, and the page says there is no date.
 func TestSetupHandoverAddsNoField(t *testing.T) {
 	h := newSetupHarness(t, true)
 	h.secrets.items[0].fields = h.secrets.items[0].fields[:2]
@@ -677,7 +691,7 @@ func TestSetupHandoverAddsNoField(t *testing.T) {
 	if len(fields) != 2 || fields[0].value != setupToken || fields[1].title != "notes" || fields[1].value != "keep me" {
 		t.Fatalf("fields = %+v", fields)
 	}
-	if e := answer["setup"].(map[string]any)["token_expiry"].(map[string]any); e["state"] != "no_field" {
+	if e := answer["setup"].(map[string]any)["token_expiry"].(map[string]any); e["state"] != "no_field" || e["expires_at"] != nil {
 		t.Fatalf("token_expiry = %v", e)
 	}
 }
@@ -1165,40 +1179,23 @@ func TestSetupTokenExpiry(t *testing.T) {
 	}
 }
 
-// TestSetupRunReadsTheExpiries: Run reads the dates when it starts and again when asked,
-// as after a reload.
+// TestSetupRunReadsTheExpiries: Run reads the dates when it starts.
 func TestSetupRunReadsTheExpiries(t *testing.T) {
 	h := newSetupHarness(t, true)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { _ = h.writer.Setup().Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
-	state := func() (string, string) {
+	for i := 0; i < 200; i++ {
 		h.writer.Setup().mu.Lock()
-		defer h.writer.Setup().mu.Unlock()
 		e := h.writer.Setup().expiries["sample-a"]
-		if e.ExpiresAt == nil {
-			return e.State, ""
+		h.writer.Setup().mu.Unlock()
+		if e.State == "read" && e.ExpiresAt != nil && e.ExpiresAt.Format("2006-01-02") == "2027-01-02" {
+			return
 		}
-		return e.State, e.ExpiresAt.Format("2006-01-02")
+		time.Sleep(10 * time.Millisecond)
 	}
-	waitFor := func(wantState, wantDate string) {
-		t.Helper()
-		for i := 0; i < 200; i++ {
-			if st, date := state(); st == wantState && date == wantDate {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		st, date := state()
-		t.Fatalf("expiry = %s %s, want %s %s", st, date, wantState, wantDate)
-	}
-	waitFor("read", "2027-01-02")
-	h.secrets.mu.Lock()
-	h.secrets.items[0].fields[2].value = "2028-05-06"
-	h.secrets.mu.Unlock()
-	h.writer.Setup().RereadExpiries()
-	waitFor("read", "2028-05-06")
+	t.Fatal("the date was not read at start")
 }
 
 // TestSetupStart: a handover that was under way when the process stopped ends as
@@ -1313,5 +1310,101 @@ func TestSetupTaskCarriesReceiverEmail(t *testing.T) {
 	status, _, body = h.dashboardJSON(t)
 	if status != 200 || !strings.Contains(body, `"receiver_email":"receiver@example.test"`) || !strings.Contains(body, `"provider":"example-provider"`) {
 		t.Fatalf("dashboard.json: %d", status)
+	}
+}
+
+// reads is the number of reads the fake secret store has been asked for, by kind.
+func (f *fakeSecrets) reads() (vaults, lists, items int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.vaultCalls, f.itemsCalls, f.itemCalls
+}
+
+// threeAccounts adds items for the other two accounts, so three token items are read.
+func (h *setupHarness) threeAccounts(t *testing.T) {
+	t.Helper()
+	h.created(t)
+	for _, title := range []string{"token-sample-spare", "token-sample-new"} {
+		h.secrets.items = append(h.secrets.items, &secretItem{info: credential.ItemInfo{ID: "i-" + title, Title: title},
+			fields: []secretField{{"credential", "credential", oldToken}, {"expires", "expires", "2027-03-04"}}})
+	}
+	rows, _, err := h.store.Accounts(t.Context())
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("accounts: %d %v", len(rows), err)
+	}
+}
+
+// TestExpiryPassSharesTheListings: one pass over three accounts lists the vaults once and
+// the items of the vault once, and reads each item once; with the old per-account
+// listing the lists were asked for three times each.
+func TestExpiryPassSharesTheListings(t *testing.T) {
+	h := newSetupHarness(t, true)
+	h.threeAccounts(t)
+	h.writer.Setup().readExpiries(t.Context())
+	if vaults, lists, items := h.secrets.reads(); vaults != 1 || lists != 1 || items != 3 {
+		t.Fatalf("reads: vault lists %d, item lists %d, items %d; want 1, 1, 3", vaults, lists, items)
+	}
+	h.writer.Setup().readExpiries(t.Context())
+	if vaults, _, _ := h.secrets.reads(); vaults != 2 {
+		t.Fatalf("a second pass shares the first pass's list: vault lists %d, want 2", vaults)
+	}
+}
+
+// TestExpiryPassStopsAtTheRateLimit: after the store says it is asked too often, the pass
+// reads no more, and the accounts it did not reach keep the date they had.
+func TestExpiryPassStopsAtTheRateLimit(t *testing.T) {
+	h := newSetupHarness(t, true)
+	h.threeAccounts(t)
+	h.writer.Setup().readExpiries(t.Context())
+	h.secrets.mu.Lock()
+	h.secrets.limitAfter = h.secrets.itemCalls + 1
+	h.secrets.mu.Unlock()
+	_, _, before := h.secrets.reads()
+	h.writer.Setup().readExpiries(t.Context())
+	if _, _, items := h.secrets.reads(); items-before != 2 {
+		t.Fatalf("item reads in the limited pass: %d, want 2 (one answered, one limited)", items-before)
+	}
+}
+
+// TestExpiryNoReadsAfterStart: the start reads the vaults once, the items of the vault
+// once and each account's item once. After that, two days of Run's turns, an account
+// write and a handover ask the secret store for no read, and the page shows the date the
+// handover wrote.
+func TestExpiryNoReadsAfterStart(t *testing.T) {
+	h := newSetupHarness(t, true)
+	h.threeAccounts(t)
+	h.writer.Setup().readExpiries(t.Context())
+	if vaults, lists, items := h.secrets.reads(); vaults != 1 || lists != 1 || items != 3 {
+		t.Fatalf("start: vault lists %d, item lists %d, items %d; want 1, 1, 3", vaults, lists, items)
+	}
+	// Turns of Run for two days, which apply the timeouts and read nothing.
+	start := h.clock
+	for m := 0; m <= 2*24*60; m++ {
+		h.clock = start.Add(time.Duration(m) * time.Minute)
+		h.writer.Setup().turn(t.Context())
+	}
+	// An account write that reloads.
+	reloads := h.reloads
+	if status, _, body := h.serve(t, request("PATCH", "/accounts/sample-a", `{"rev":1,"proxy":{"expected_egress_ip":"192.0.2.99"}}`)); status != 200 || h.reloads == reloads {
+		t.Fatalf("write: %d %s, reloads %d -> %d", status, body, reloads, h.reloads)
+	}
+	if vaults, lists, items := h.secrets.reads(); vaults != 1 || lists != 1 || items != 3 {
+		t.Fatalf("after two days and a write: vault lists %d, item lists %d, items %d; want 1, 1, 3", vaults, lists, items)
+	}
+	// A handover.
+	id := h.running(t, "sample-a")
+	status, answer, body := h.token(t, "sample-a", id, setupRun, setupToken)
+	if status != 200 {
+		t.Fatalf("handover: %d %s", status, body)
+	}
+	h.secrets.mu.Lock()
+	vaults, lists, items := h.secrets.vaultCalls, h.secrets.itemsCalls, h.secrets.itemCalls
+	h.secrets.mu.Unlock()
+	if want := h.clock.Add(365*24*time.Hour).UTC().Format("2006-01-02") + "T00:00:00Z"; answer["setup"].(map[string]any)["token_expiry"].(map[string]any)["expires_at"] != want {
+		t.Fatalf("the page does not show the written date: %v", answer["setup"])
+	}
+	// The handover's own write finds and reads the item once; nothing reads the date.
+	if vaults != 2 || lists != 2 || items != 4 {
+		t.Fatalf("after the handover: vault lists %d, item lists %d, items %d; want 2, 2, 4", vaults, lists, items)
 	}
 }

@@ -132,8 +132,6 @@ type Setup struct {
 
 	mu       sync.Mutex
 	expiries map[string]tokenExpiry
-	// reread asks Run to read the expiry dates again.
-	reread chan struct{}
 }
 
 // Setup returns the gateway's setup, nil when it is off or w is nil.
@@ -605,7 +603,8 @@ func (s *Setup) handover(ctx context.Context, task session.SetupTask, token stri
 		return nil, err
 	}
 	expires := w.now().UTC().AddDate(session.SetupTokenYears, 0, 0)
-	if created, err := credential.Write(ctx, secrets, account.TokenRef, token, expires, true); err != nil {
+	created, dated, err := credential.WriteDated(ctx, secrets, account.TokenRef, token, expires, true)
+	if err != nil {
 		var extra credential.ExtraFieldsError
 		switch {
 		case errors.As(err, &extra):
@@ -643,7 +642,7 @@ func (s *Setup) handover(ctx context.Context, task session.SetupTask, token stri
 		return nil, setupError{status: http.StatusConflict, code: errorNoOpenTask, written: true}
 	}
 	s.audit(rec, task, session.SetupDone)
-	s.readExpiry(rec, secrets, task.Alias, account.TokenRef)
+	s.noteExpiry(task.Alias, expires, dated)
 	log.Printf("setup alias=%s request_id=%s step=%s result=done written=true", task.Alias, task.RequestID, stepComplete)
 	return &handoverResult{Setup: s.block(task.Alias, row), Probe: "ok", Written: true, Reload: "ok"}, nil
 }
@@ -701,58 +700,68 @@ func (s *Setup) Start(ctx context.Context) error {
 	return nil
 }
 
-// Run applies the timeouts every minute and reads the expiry dates at start, once an
-// hour and whenever it is asked to, until ctx is canceled. On a nil Setup it only waits
-// for ctx.
+// Run applies the timeouts every minute and reads the expiry dates once, when it starts,
+// until ctx is canceled. The secret store counts reads, so nothing reads the dates again:
+// a handover records the date it wrote (noteExpiry), and a date that could not be read
+// stays unreadable until the next start. On a nil Setup it only waits for ctx.
 func (s *Setup) Run(ctx context.Context) error {
 	if s == nil {
 		<-ctx.Done()
 		return nil
 	}
-	const readEvery = time.Hour
-	last := time.Time{}
+	s.readExpiries(ctx)
 	tick := time.NewTicker(time.Minute)
 	defer tick.Stop()
 	for {
-		if err := s.w.cfg.Store.ExpireSetups(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("setup: timeouts not applied: session store unavailable")
-		}
-		if now := s.w.now(); now.Sub(last) >= readEvery {
-			last = now
-			s.readExpiries(ctx)
-		}
+		s.turn(ctx)
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-tick.C:
-		case <-s.reread:
-			s.readExpiries(ctx)
 		}
 	}
 }
 
-// RereadExpiries asks Run to read the expiry dates again, without waiting for it.
-func (s *Setup) RereadExpiries() {
-	if s == nil {
-		return
-	}
-	select {
-	case s.reread <- struct{}{}:
-	default:
+// turn is one minute of Run: it applies the timeouts.
+func (s *Setup) turn(ctx context.Context) {
+	if err := s.w.cfg.Store.ExpireSetups(ctx); err != nil && ctx.Err() == nil {
+		log.Printf("setup: timeouts not applied: session store unavailable")
 	}
 }
 
+// noteExpiry keeps what a handover has just written as the expiry state of alias's token,
+// without reading the secret store: at, as a date, when the write set the item's expiry
+// field (dated), else that the item has none.
+func (s *Setup) noteExpiry(alias string, at time.Time, dated bool) {
+	now := s.w.now().UTC()
+	e := tokenExpiry{State: expiryNoField, ReadAt: &now}
+	if dated {
+		day := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC) // the item holds a date
+		e.State, e.ExpiresAt = expiryRead, &day
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expiries[alias] = e
+}
+
 // readExpiries reads the expiry date of the item at each account's token reference,
-// whatever the account's status. A failure is noted for that account and changes nothing
-// else.
+// whatever the account's status, over one listing of vaults and items. A failure is noted
+// for that account and changes nothing else, except that a rate limit ends the pass: the
+// accounts not yet reached keep the date they had, and no more reads are spent.
 func (s *Setup) readExpiries(ctx context.Context) {
 	rows, _, err := s.w.cfg.Store.Accounts(ctx)
 	if err != nil {
 		return
 	}
 	secrets := s.secrets(ctx)
+	if secrets != nil {
+		secrets = credential.CachedLists(secrets)
+	}
 	for _, row := range rows {
-		s.readExpiry(ctx, secrets, row.Alias, row.TokenRef)
+		if s.readExpiry(ctx, secrets, row.Alias, row.TokenRef) {
+			log.Printf("setup: the secret store is rate limited; the rest of the expiry dates are not read now")
+			return
+		}
 	}
 }
 
@@ -769,8 +778,9 @@ func (s *Setup) secrets(ctx context.Context) credential.Store {
 }
 
 // readExpiry reads the expiry date at reference and keeps it for alias. It reads no
-// token, and logs only the alias and the state.
-func (s *Setup) readExpiry(ctx context.Context, secrets credential.Store, alias, reference string) {
+// token, and logs only the alias and the state. It reports whether the secret store
+// refused for being asked too often.
+func (s *Setup) readExpiry(ctx context.Context, secrets credential.Store, alias, reference string) (limited bool) {
 	now := s.w.now().UTC()
 	e := tokenExpiry{State: expiryUnreadable, ReadAt: &now}
 	if secrets != nil {
@@ -780,6 +790,8 @@ func (s *Setup) readExpiry(ctx context.Context, secrets credential.Store, alias,
 			e.State, e.ExpiresAt = expiryRead, &at
 		case errors.Is(err, credential.ErrExpiresMissing):
 			e.State = expiryNoField
+		case errors.Is(err, credential.ErrRateLimited):
+			limited = true
 		}
 	}
 	s.mu.Lock()
@@ -788,4 +800,5 @@ func (s *Setup) readExpiry(ctx context.Context, secrets credential.Store, alias,
 		log.Printf("setup alias=%s token_expiry=%s", alias, e.State)
 	}
 	s.expiries[alias] = e
+	return limited
 }
