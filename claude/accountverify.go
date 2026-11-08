@@ -69,7 +69,7 @@ func (w *AccountWriter) runChecks(ctx context.Context, row session.AccountRow) (
 		v.TokenOK, v.At = &tokenOK, w.now().UTC()
 		return v, report, nil
 	}
-	resolve, err := w.cfg.Resolve(ctx)
+	resolve, err := w.resolveFresh(ctx)
 	if err != nil {
 		return v, report, writeError{status: http.StatusBadGateway, message: "the credential resolver is not available", code: codeResolverUnavailable}
 	}

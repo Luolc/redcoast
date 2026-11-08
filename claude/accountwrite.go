@@ -68,6 +68,11 @@ type AccountWriterConfig struct {
 	Reload func(ctx context.Context) (Reload, error)
 	// Resolve returns the resolver of credential references, as a reload builds it.
 	Resolve func(ctx context.Context) (Resolver, error)
+	// ResolveFresh is Resolve for a write that must see the references of the account it
+	// writes as they are in the secret store now, not as the process read them before: the
+	// resolver it returns reads each reference it is asked for and keeps the value for the
+	// reload that follows. Nil means Resolve.
+	ResolveFresh func(ctx context.Context) (Resolver, error)
 	// AllowFrom are the TCP peer addresses writes are accepted from; empty accepts none.
 	AllowFrom []netip.Prefix
 	// TokenRefTemplate is the token reference of a new account with the alias in place of
@@ -80,7 +85,8 @@ type AccountWriterConfig struct {
 	AdminWrite bool
 	// SetupSecrets opens the secret store that a setup handover writes the token to, with
 	// the credential the gateway reads its references with. It is called when a
-	// handover writes and when tokens are dated, and the store is not kept.
+	// handover writes and when tokens are dated, and the store is not kept; the
+	// gateway's one client behind it is.
 	SetupSecrets func(ctx context.Context) (credential.Store, error)
 }
 
@@ -98,6 +104,14 @@ type AccountWriter struct {
 
 	// setup is the gateway's side of setting tokens; nil while setup is off.
 	setup *Setup
+}
+
+// resolveFresh returns the resolver for the references of the account a write concerns.
+func (w *AccountWriter) resolveFresh(ctx context.Context) (Resolver, error) {
+	if w.cfg.ResolveFresh != nil {
+		return w.cfg.ResolveFresh(ctx)
+	}
+	return w.cfg.Resolve(ctx)
 }
 
 // NewAccountWriter returns the write path for cfg.
@@ -515,7 +529,7 @@ func (w *AccountWriter) dryLoad(ctx context.Context, row session.AccountRow) err
 	if err != nil {
 		return fieldProblem(firstField(err), "not valid for a served account")
 	}
-	resolve, err := w.cfg.Resolve(ctx)
+	resolve, err := w.resolveFresh(ctx)
 	if err != nil {
 		return writeError{status: http.StatusBadGateway, message: "the credential resolver is not available", code: codeResolverUnavailable}
 	}

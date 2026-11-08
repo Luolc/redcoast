@@ -82,14 +82,14 @@ func TestNewResolverToken(t *testing.T) {
 	}
 	for name, path := range map[string]string{"missing": filepath.Join(dir, "missing"), "empty": empty} {
 		t.Run(name, func(t *testing.T) {
-			resolve, err := newResolver(t.Context(), config{tokenRef: "file://" + path})
+			resolve, err := newCredentials(config{tokenRef: "file://" + path}).resolver(t.Context(), false)
 			if resolve != nil || err == nil || !strings.HasPrefix(err.Error(), "1Password service account token: ") {
 				t.Fatalf("got %v, want a token error", err)
 			}
 		})
 	}
 	t.Setenv("GATEWAY_TEST_TOKEN", "synthetic-value")
-	resolve, err := newResolver(t.Context(), config{})
+	resolve, err := newCredentials(config{}).resolver(t.Context(), false)
 	if err != nil {
 		t.Fatal(err)
 	}

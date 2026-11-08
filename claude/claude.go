@@ -66,7 +66,7 @@ func claudeAccount(alias string, document []byte) (CredentialSource, error) {
 	return func(ctx context.Context, resolve Resolver) (Credential, error) {
 		token, err := resolve(ctx, reference)
 		if err != nil {
-			return nil, fieldError{alias, "oauth_token", "cannot resolve: " + err.Error()}
+			return nil, cannotResolve{fieldError{alias, "oauth_token", "cannot resolve: " + err.Error()}, err}
 		}
 		// The token ends up in a header, where a line break would inject another.
 		if token == "" || strings.ContainsAny(token, "\r\n\x00") {

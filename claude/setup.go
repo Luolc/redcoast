@@ -680,7 +680,7 @@ func (s *Setup) probe(ctx context.Context, row session.AccountRow, token string)
 
 // readBack resolves the reference again and reports whether it gives token.
 func (s *Setup) readBack(ctx context.Context, reference, token string) bool {
-	resolve, err := s.w.cfg.Resolve(ctx)
+	resolve, err := s.w.resolveFresh(ctx)
 	if err != nil {
 		return false
 	}
