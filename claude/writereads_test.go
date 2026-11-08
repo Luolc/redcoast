@@ -167,3 +167,46 @@ func TestCannotResolveKeepsTheCause(t *testing.T) {
 		t.Fatalf("token: %v", err)
 	}
 }
+
+// TestRotationNeedsVerifyThenReload checks the way to rotate a token in place: a reload
+// alone does not read the changed value, `verify` reads it again but does not reload, and
+// the reload after it serves it and reads nothing.
+func TestRotationNeedsVerifyThenReload(t *testing.T) {
+	const rotated = "sk-ant-oat01-ROTATED-0123456789-abcdef"
+	h := newSetupHarness(t, true)
+	reads := memoWired(t, h, true)
+	served := func() string {
+		c, _ := h.accounts.set.Load().lookup("sample-a").credential.(claudeCredential)
+		return c.token
+	}
+	before := served()
+	h.secrets.mu.Lock()
+	for _, it := range h.secrets.items {
+		if it.info.Title == "token-sample-a" {
+			for i := range it.fields {
+				if it.fields[i].title == "credential" {
+					it.fields[i].value = rotated
+				}
+			}
+		}
+	}
+	h.secrets.mu.Unlock()
+	if _, err := h.writer.cfg.Reload(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := reads.taken(); len(got) != 0 || served() != before || before == rotated {
+		t.Fatalf("a reload alone read %v and serves the rotated token: %v", got, served() == rotated)
+	}
+	if status, _, body := h.serve(t, request("POST", "/accounts/sample-a/verify", `{"rev":1}`)); status != 200 {
+		t.Fatalf("verify: %d %s", status, body)
+	}
+	if got := reads.taken(); len(got) != 3 || served() != before {
+		t.Fatalf("verify read %v; the served token changed: %v", got, served() != before)
+	}
+	if _, err := h.writer.cfg.Reload(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := reads.taken(); len(got) != 0 || served() != rotated {
+		t.Fatalf("the reload after verify read %v, serves the rotated token: %v", got, served() == rotated)
+	}
+}
