@@ -44,7 +44,7 @@ func TestSelectionOrder(t *testing.T) {
 			read(t, store, "sample-b", Window7d, 0.5, "allowed", resetB)
 		}, map[bool]string{false: "sample-a", true: "sample-b"}},
 		{"larger_plan_first", func(store *Store, now time.Time, control bool) {
-			planA, planB := "max-20x", "pro"
+			planA, planB := "ultra", "pro"
 			if control {
 				planA, planB = planB, planA
 			}
@@ -54,9 +54,9 @@ func TestSelectionOrder(t *testing.T) {
 			read(t, store, "sample-b", Window7d, 0.5, "allowed", now.Add(day))
 		}, map[bool]string{false: "sample-a", true: "sample-b"}},
 		{"tier_before_score", func(store *Store, now time.Time, control bool) {
-			// B scores higher (max-20x, resetting soon) but is over soft; A is under soft
+			// B scores higher (ultra, resetting soon) but is over soft; A is under soft
 			// with a low score. Control: A is over soft too, so the score decides.
-			schedule(t, store, "sample-b", "max-20x")
+			schedule(t, store, "sample-b", "ultra")
 			utilizationA := 0.5
 			if control {
 				utilizationA = 0.92
@@ -66,18 +66,18 @@ func TestSelectionOrder(t *testing.T) {
 		}, map[bool]string{false: "sample-a", true: "sample-b"}},
 		{"no_reading_counts_as_zero_over_a_week", func(store *Store, now time.Time, control bool) {
 			// A has no reading: 1 × 10 ÷ 7 days. B at 50% resetting in a day: 0.5 × unit ÷ 1 day.
-			schedule(t, store, "sample-a", "max-20x")
+			schedule(t, store, "sample-a", "ultra")
 			if control {
-				schedule(t, store, "sample-b", "max-20x")
+				schedule(t, store, "sample-b", "ultra")
 			}
 			read(t, store, "sample-b", Window7d, 0.5, "allowed", now.Add(day))
 		}, map[bool]string{false: "sample-a", true: "sample-b"}},
 		{"soft_threshold_read_per_request", func(store *Store, now time.Time, control bool) {
-			// A scores far higher (max-20x, 60%, resetting in a day) than B (pro, 40%,
+			// A scores far higher (ultra, 60%, resetting in a day) than B (pro, 40%,
 			// six days). Under the default soft of 90% both are open and A wins. The
 			// control arm changes one thing: soft lowered to 50% in the settings, which
 			// puts A in the soft tier, so B wins.
-			schedule(t, store, "sample-a", "max-20x")
+			schedule(t, store, "sample-a", "ultra")
 			read(t, store, "sample-a", Window7d, 0.6, "allowed", now.Add(day))
 			read(t, store, "sample-b", Window7d, 0.4, "allowed", now.Add(6*day))
 			if control {
@@ -278,10 +278,10 @@ func TestNoPlanNoCandidate(t *testing.T) {
 	if err != nil || b.Alias != "sample-b" {
 		t.Fatalf("beside a planned account: %q %v", b.Alias, err)
 	}
-	schedule(t, store, "sample-a", "max-20x")
+	schedule(t, store, "sample-a", "ultra")
 	_, fresh, err := newSession(t, store)
 	if err != nil || fresh.Alias != "sample-a" {
-		t.Fatalf("control arm: planned max-20x not chosen: %q %v", fresh.Alias, err)
+		t.Fatalf("control arm: planned ultra not chosen: %q %v", fresh.Alias, err)
 	}
 }
 

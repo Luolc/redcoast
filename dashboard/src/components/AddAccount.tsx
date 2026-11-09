@@ -270,7 +270,7 @@ function FillIn({ data, reload }: { data: Dashboard; reload: () => void }) {
             value={f.plan}
             onChange={set("plan")}
             error={shown("plan")}
-            hint="A plan the gateway knows, such as max-5x"
+            hint="A plan the gateway knows, such as max"
           />
           <ProxyLoginField
             value={f.login}

@@ -78,7 +78,7 @@ it("makes the PATCH of only what the draft changed", () => {
     status: "paused",
     port: "9000",
     login: "1",
-    plan: "max-5x",
+    plan: "max",
   });
   expect(changes.map((c) => c.label)).toEqual([
     "Status",
@@ -89,7 +89,7 @@ it("makes the PATCH of only what the draft changed", () => {
   expect(patchBody(7, changes, options)).toEqual({
     rev: 7,
     status: "paused",
-    plan: "max-5x",
+    plan: "max",
     proxy: {
       port: 9000,
       username_ref: "op://sample-vault/sample-proxy-b/username",

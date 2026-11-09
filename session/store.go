@@ -169,8 +169,8 @@ CREATE INDEX quota_history_at ON quota_history(at);
 // in as new periods, not edits.
 var seedPlans = []PlanUnit{
 	{Plan: "pro", QuotaUnit: 1, MonthlyUSD: 20, From: time.UnixMilli(0).UTC()},
-	{Plan: "max-5x", QuotaUnit: 5, MonthlyUSD: 100, From: time.UnixMilli(0).UTC()},
-	{Plan: "max-20x", QuotaUnit: 10, MonthlyUSD: 200, From: time.UnixMilli(0).UTC()},
+	{Plan: "max", QuotaUnit: 5, MonthlyUSD: 100, From: time.UnixMilli(0).UTC()},
+	{Plan: "ultra", QuotaUnit: 10, MonthlyUSD: 200, From: time.UnixMilli(0).UTC()},
 }
 
 // Config adjusts the store's durations and clock, and the form of its session

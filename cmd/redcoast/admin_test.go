@@ -77,9 +77,9 @@ func TestAdminCommandParsing(t *testing.T) {
 		{"setup_request_without_source", []string{"setup", "request", "sample-a", "--rev", "3", "--source-thread", slackThread, "--admin-socket", "admin.sock"}, "", "", ""},
 		{"setup_request_with_run_id", []string{"setup", "request", "sample-a", "--rev", "3", "--run-id", setupRunID, "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "", "", ""},
 		{"account_create", append([]string{"account", "create", "sample-new"}, accountCreateFlags...), "POST", "/accounts",
-			`{"alias":"sample-new","device_id":"` + testDeviceID + `","email":"new@example.test","plan":"max-20x","proxy":{"expected_egress_ip":"192.0.2.9","host":"proxy.example.test","password_ref":"op://example-proxies/proxy-account/password","port":8080,"username_ref":"op://example-proxies/proxy-account/username"},"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
+			`{"alias":"sample-new","device_id":"` + testDeviceID + `","email":"new@example.test","plan":"ultra","proxy":{"expected_egress_ip":"192.0.2.9","host":"proxy.example.test","password_ref":"op://example-proxies/proxy-account/password","port":8080,"username_ref":"op://example-proxies/proxy-account/username"},"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
 		{"account_create_with_receiver_and_proxy_kind", append(append([]string{"account", "create", "sample-new"}, accountCreateFlags...), "--receiver-email", "receiver@example.test", "--proxy-provider", "example-provider", "--proxy-type", "dedicated-isp"), "POST", "/accounts",
-			`{"alias":"sample-new","device_id":"` + testDeviceID + `","email":"new@example.test","plan":"max-20x","proxy":{"expected_egress_ip":"192.0.2.9","host":"proxy.example.test","password_ref":"op://example-proxies/proxy-account/password","port":8080,"provider":"example-provider","type":"dedicated-isp","username_ref":"op://example-proxies/proxy-account/username"},"receiver_email":"receiver@example.test","source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
+			`{"alias":"sample-new","device_id":"` + testDeviceID + `","email":"new@example.test","plan":"ultra","proxy":{"expected_egress_ip":"192.0.2.9","host":"proxy.example.test","password_ref":"op://example-proxies/proxy-account/password","port":8080,"provider":"example-provider","type":"dedicated-isp","username_ref":"op://example-proxies/proxy-account/username"},"receiver_email":"receiver@example.test","source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
 		{"account_set", []string{"account", "set", "sample-a", "--rev", "2", "--receiver-email", "", "--proxy-type", "dedicated-isp", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "PATCH", "/accounts/sample-a",
 			`{"proxy":{"type":"dedicated-isp"},"receiver_email":"","rev":2,"source":{"kind":"slack","thread":"` + slackThread + `","ts":"` + slackTS + `"}}`},
 		{"account_set_device_id", []string{"account", "set", "sample-a", "--rev", "2", "--device-id", testDeviceID, "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}, "PATCH", "/accounts/sample-a",
@@ -321,7 +321,7 @@ func TestSetupTokenCommand(t *testing.T) {
 const testDeviceID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // accountCreateFlags are the flags of a complete `account create` after its alias.
-var accountCreateFlags = []string{"--email", "new@example.test", "--device-id", testDeviceID, "--plan", "max-20x", "--proxy-host", "proxy.example.test", "--proxy-port", "8080",
+var accountCreateFlags = []string{"--email", "new@example.test", "--device-id", testDeviceID, "--plan", "ultra", "--proxy-host", "proxy.example.test", "--proxy-port", "8080",
 	"--expected-egress-ip", "192.0.2.9", "--proxy-username-ref", "op://example-proxies/proxy-account/username",
 	"--proxy-password-ref", "op://example-proxies/proxy-account/password", "--source-thread", slackThread, "--source-ts", slackTS, "--admin-socket", "admin.sock"}
 

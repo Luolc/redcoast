@@ -18,10 +18,10 @@ func TestPlanUnitsOverTime(t *testing.T) {
 	t0 := c.Now()
 	for _, control := range []bool{true, false} {
 		store, _ := open(t, c)
-		if err := store.SetPlanSchedule(ctx, PlanPeriod{Alias: "synthetic-a", Plan: "max-5x", From: t0.Add(-time.Hour), Source: "manual"}); err != nil {
+		if err := store.SetPlanSchedule(ctx, PlanPeriod{Alias: "synthetic-a", Plan: "max", From: t0.Add(-time.Hour), Source: "manual"}); err != nil {
 			t.Fatal(err)
 		}
-		for plan, want := range map[string]float64{"pro": 1, "max-5x": 5, "max-20x": 10} {
+		for plan, want := range map[string]float64{"pro": 1, "max": 5, "ultra": 10} {
 			if err := store.SetPlanSchedule(ctx, PlanPeriod{Alias: "seed-" + plan, Plan: plan, From: t0.Add(-time.Hour), Source: "manual"}); err != nil {
 				t.Fatal(err)
 			}
@@ -30,7 +30,7 @@ func TestPlanUnitsOverTime(t *testing.T) {
 			}
 		}
 		if !control {
-			if err := store.SetPlanUnit(ctx, PlanUnit{Plan: "max-5x", QuotaUnit: 7, MonthlyUSD: 100, From: t0.Add(time.Hour)}); err != nil {
+			if err := store.SetPlanUnit(ctx, PlanUnit{Plan: "max", QuotaUnit: 7, MonthlyUSD: 100, From: t0.Add(time.Hour)}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -78,18 +78,18 @@ func TestSetPlanSchedule(t *testing.T) {
 		t.Fatalf("other account: periods=%+v err=%v", others, err)
 	}
 	set("pro", t0.Add(-48*time.Hour), "past")
-	set("max-5x", t0.Add(-24*time.Hour), "current")
+	set("max", t0.Add(-24*time.Hour), "current")
 	set("pro", t0.Add(24*time.Hour), "later")
 	check("each period ends the one before",
 		PlanPeriod{Plan: "pro", From: t0.Add(-48 * time.Hour), To: t0.Add(-24 * time.Hour), Note: "past"},
-		PlanPeriod{Plan: "max-5x", From: t0.Add(-24 * time.Hour), To: t0.Add(24 * time.Hour), Note: "current"},
+		PlanPeriod{Plan: "max", From: t0.Add(-24 * time.Hour), To: t0.Add(24 * time.Hour), Note: "current"},
 		PlanPeriod{Plan: "pro", From: t0.Add(24 * time.Hour), Note: "later"})
 
-	set("max-20x", t0, "upgrade")
+	set("ultra", t0, "upgrade")
 	check("a switch now deletes the later period",
 		PlanPeriod{Plan: "pro", From: t0.Add(-48 * time.Hour), To: t0.Add(-24 * time.Hour), Note: "past"},
-		PlanPeriod{Plan: "max-5x", From: t0.Add(-24 * time.Hour), To: t0, Note: "current"},
-		PlanPeriod{Plan: "max-20x", From: t0, Note: "upgrade"})
+		PlanPeriod{Plan: "max", From: t0.Add(-24 * time.Hour), To: t0, Note: "current"},
+		PlanPeriod{Plan: "ultra", From: t0, Note: "upgrade"})
 	for at, unit := range map[time.Time]float64{t0.Add(-time.Millisecond): 5, t0: 10, t0.Add(48 * time.Hour): 10} {
 		if got, err := store.QuotaUnit(ctx, "synthetic-a", at); err != nil || got != unit {
 			t.Fatalf("unit at %s: %v err=%v, want %v", at, got, err, unit)
@@ -99,17 +99,17 @@ func TestSetPlanSchedule(t *testing.T) {
 	set("pro", t0.Add(12*time.Hour), "downgrade")
 	check("a switch in the future",
 		PlanPeriod{Plan: "pro", From: t0.Add(-48 * time.Hour), To: t0.Add(-24 * time.Hour), Note: "past"},
-		PlanPeriod{Plan: "max-5x", From: t0.Add(-24 * time.Hour), To: t0, Note: "current"},
-		PlanPeriod{Plan: "max-20x", From: t0, To: t0.Add(12 * time.Hour), Note: "upgrade"},
+		PlanPeriod{Plan: "max", From: t0.Add(-24 * time.Hour), To: t0, Note: "current"},
+		PlanPeriod{Plan: "ultra", From: t0, To: t0.Add(12 * time.Hour), Note: "upgrade"},
 		PlanPeriod{Plan: "pro", From: t0.Add(12 * time.Hour), Note: "downgrade"})
 	if got, err := store.QuotaUnit(ctx, "synthetic-a", t0); err != nil || got != 10 {
 		t.Fatalf("unit now after a future switch: %v err=%v", got, err)
 	}
 
-	set("max-5x", t0.Add(-36*time.Hour), "correction")
+	set("max", t0.Add(-36*time.Hour), "correction")
 	check("a switch in the past",
 		PlanPeriod{Plan: "pro", From: t0.Add(-48 * time.Hour), To: t0.Add(-36 * time.Hour), Note: "past"},
-		PlanPeriod{Plan: "max-5x", From: t0.Add(-36 * time.Hour), Note: "correction"})
+		PlanPeriod{Plan: "max", From: t0.Add(-36 * time.Hour), Note: "correction"})
 
 	set("pro", t0.Add(-36*time.Hour), "")
 	check("a switch at a period's start",
@@ -195,7 +195,7 @@ func TestPlanWritesKeepCoverage(t *testing.T) {
 	}
 	err = store.transact(ctx, func(tx *sql.Tx) error {
 		return keepCoverage(ctx, tx, func() error {
-			_, err := tx.ExecContext(ctx, "UPDATE plan_schedule SET plan = 'max-5x' WHERE alias = 'sample-a'")
+			_, err := tx.ExecContext(ctx, "UPDATE plan_schedule SET plan = 'max' WHERE alias = 'sample-a'")
 			return err
 		})
 	})
@@ -226,7 +226,7 @@ func TestEndPlan(t *testing.T) {
 	t0 := c.Now()
 	store, _ := open(t, c)
 	for _, period := range []PlanPeriod{
-		{Alias: "synthetic-a", Plan: "max-5x", From: t0.Add(-24 * time.Hour), Source: "manual"},
+		{Alias: "synthetic-a", Plan: "max", From: t0.Add(-24 * time.Hour), Source: "manual"},
 		{Alias: "synthetic-a", Plan: "pro", From: t0.Add(24 * time.Hour), Source: "manual"},
 	} {
 		if err := store.SetPlanSchedule(ctx, period); err != nil {
@@ -236,7 +236,7 @@ func TestEndPlan(t *testing.T) {
 	if err := store.EndPlan(ctx, "synthetic-a", t0); err != nil {
 		t.Fatal(err)
 	}
-	want := []PlanPeriod{{Alias: "synthetic-a", Plan: "max-5x", From: t0.Add(-24 * time.Hour), To: t0, Source: "manual"}}
+	want := []PlanPeriod{{Alias: "synthetic-a", Plan: "max", From: t0.Add(-24 * time.Hour), To: t0, Source: "manual"}}
 	if periods, err := store.PlanSchedule(ctx, "synthetic-a"); err != nil || !slices.Equal(periods, want) {
 		t.Fatalf("after the end: periods=%+v err=%v", periods, err)
 	}

@@ -18,8 +18,8 @@ func TestStatusShowsThePlanInEffect(t *testing.T) {
 		PlanPeriod
 		end time.Time
 	}{
-		{PlanPeriod{Alias: "sample-b", Plan: "max-20x", From: time.UnixMilli(0), Source: "manual"}, now.Add(-time.Hour)},
-		{PlanPeriod{Alias: "sample-d", Plan: "max-5x", From: now.Add(-24 * time.Hour), Source: "manual"}, now.Add(24 * time.Hour)},
+		{PlanPeriod{Alias: "sample-b", Plan: "ultra", From: time.UnixMilli(0), Source: "manual"}, now.Add(-time.Hour)},
+		{PlanPeriod{Alias: "sample-d", Plan: "max", From: now.Add(-24 * time.Hour), Source: "manual"}, now.Add(24 * time.Hour)},
 	} {
 		if err := store.SetPlanSchedule(ctx, period.PlanPeriod); err != nil {
 			t.Fatal(err)
@@ -44,7 +44,7 @@ func TestStatusShowsThePlanInEffect(t *testing.T) {
 		"sample-a": `{"name":"pro","effective_from":"1970-01-01T00:00:00Z","effective_to":null}`,
 		"sample-b": `null`,
 		"sample-c": `null`,
-		"sample-d": `{"name":"max-5x","effective_from":"2026-10-05T12:00:00Z","effective_to":"2026-10-07T12:00:00Z"}`,
+		"sample-d": `{"name":"max","effective_from":"2026-10-05T12:00:00Z","effective_to":"2026-10-07T12:00:00Z"}`,
 	}
 	for alias, plan := range want {
 		if got[alias] != plan {
