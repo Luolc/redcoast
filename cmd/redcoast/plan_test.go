@@ -25,10 +25,10 @@ func TestPlanCommand(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "gateway.sqlite")
 	ctx := context.Background()
 	for _, arguments := range [][]string{
-		{"--session-db", db, "schedule", "sample-ab", "max-20x", "2026-09-01T00:00:00Z", "--note", "until the downgrade"},
-		{"--session-db", db, "schedule", "sample-ab", "max-5x", "2026-11-15T00:00:00Z"},
+		{"--session-db", db, "schedule", "sample-ab", "ultra", "2026-09-01T00:00:00Z", "--note", "until the downgrade"},
+		{"--session-db", db, "schedule", "sample-ab", "max", "2026-11-15T00:00:00Z"},
 		{"schedule", "sample-ac", "pro", "2026-09-01T00:00:00Z", "--session-db", db},
-		{"--session-db", db, "unit", "max-5x", "6", "120", "2027-01-01T00:00:00Z"},
+		{"--session-db", db, "unit", "max", "6", "120", "2027-01-01T00:00:00Z"},
 	} {
 		cmd, err := parsePlanCommand(arguments)
 		if err != nil {
@@ -138,19 +138,19 @@ func TestPlanRefreshesRaisedAccounts(t *testing.T) {
 		refreshed []string
 	}{
 		{[]string{"schedule", "sample-a", "pro", "2020-01-01T00:00:00Z"}, []string{"sample-a"}},
-		{[]string{"schedule", "sample-b", "max-5x", "2020-01-01T00:00:00Z"}, []string{"sample-b"}},
-		{[]string{"schedule", "sample-a", "max-20x", "2020-01-01T00:00:00Z"}, []string{"sample-a"}},
-		{[]string{"schedule", "sample-a", "max-20x", "2020-01-01T00:00:00Z"}, nil},
+		{[]string{"schedule", "sample-b", "max", "2020-01-01T00:00:00Z"}, []string{"sample-b"}},
+		{[]string{"schedule", "sample-a", "ultra", "2020-01-01T00:00:00Z"}, []string{"sample-a"}},
+		{[]string{"schedule", "sample-a", "ultra", "2020-01-01T00:00:00Z"}, nil},
 		{[]string{"schedule", "sample-a", "pro", "2020-01-01T00:00:00Z"}, nil},
-		{[]string{"unit", "max-5x", "6", "120", "1970-01-01T00:00:00Z"}, []string{"sample-b"}},
-		{[]string{"unit", "max-5x", "6", "120", "1970-01-01T00:00:00Z"}, nil},
-		{[]string{"unit", "max-5x", "4", "80", "1970-01-01T00:00:00Z"}, nil},
-		{[]string{"schedule", "sample-c", "max-20x", "2099-01-01T00:00:00Z"}, nil},
-		{[]string{"schedule", "sample-a", "max-20x"}, []string{"sample-a"}},
+		{[]string{"unit", "max", "6", "120", "1970-01-01T00:00:00Z"}, []string{"sample-b"}},
+		{[]string{"unit", "max", "6", "120", "1970-01-01T00:00:00Z"}, nil},
+		{[]string{"unit", "max", "4", "80", "1970-01-01T00:00:00Z"}, nil},
+		{[]string{"schedule", "sample-c", "ultra", "2099-01-01T00:00:00Z"}, nil},
+		{[]string{"schedule", "sample-a", "ultra"}, []string{"sample-a"}},
 		{[]string{"schedule", "sample-a", "pro", "--note", "downgrade"}, nil},
 		{[]string{"schedule", "sample-c", "pro", "2025-01-01T00:00:00Z"}, []string{"sample-c"}},
-		{[]string{"schedule", "sample-c", "max-20x", "2099-01-01T00:00:00Z"}, nil},
-		{[]string{"unit", "max-5x", "8", "160"}, []string{"sample-b"}},
+		{[]string{"schedule", "sample-c", "ultra", "2099-01-01T00:00:00Z"}, nil},
+		{[]string{"unit", "max", "8", "160"}, []string{"sample-b"}},
 	} {
 		mu.Lock()
 		received = nil
@@ -184,7 +184,7 @@ func TestPlanRefreshesRaisedAccounts(t *testing.T) {
 	mu.Lock()
 	received = nil
 	mu.Unlock()
-	cmd, err = parsePlanCommand([]string{"--session-db", db, "unit", "max-5x", "9", "180"})
+	cmd, err = parsePlanCommand([]string{"--session-db", db, "unit", "max", "9", "180"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestPlanSwitchNow(t *testing.T) {
 		db := filepath.Join(t.TempDir(), "gateway.sqlite")
 		for _, arguments := range [][]string{
 			{"schedule", "sample-a", "pro", "2020-01-01T00:00:00Z"},
-			{"schedule", "sample-a", "max-5x", "2021-01-01T00:00:00Z"},
+			{"schedule", "sample-a", "max", "2021-01-01T00:00:00Z"},
 			{"schedule", "sample-a", "pro", "2099-01-01T00:00:00Z"},
 		} {
 			cmd, err := parsePlanCommand(append([]string{"--session-db", db}, arguments...))
@@ -220,7 +220,7 @@ func TestPlanSwitchNow(t *testing.T) {
 			}
 		}
 		start := time.Now()
-		_, command, err := providerCommand([]string{provider, "plan", "--session-db", db, "schedule", "sample-a", "max-20x", "--note", "upgrade"})
+		_, command, err := providerCommand([]string{provider, "plan", "--session-db", db, "schedule", "sample-a", "ultra", "--note", "upgrade"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -244,8 +244,8 @@ func TestPlanSwitchNow(t *testing.T) {
 		past, ended, current := periods[0], periods[1], periods[2]
 		switched := ended.To
 		if past.Plan != "pro" || !past.To.Equal(time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)) ||
-			ended.Plan != "max-5x" || switched.Before(start.Truncate(time.Millisecond)) || switched.After(end) ||
-			current.Plan != "max-20x" || !current.From.Equal(switched) || !current.To.IsZero() || current.Note != "upgrade" || current.Source != "manual" {
+			ended.Plan != "max" || switched.Before(start.Truncate(time.Millisecond)) || switched.After(end) ||
+			current.Plan != "ultra" || !current.From.Equal(switched) || !current.To.IsZero() || current.Note != "upgrade" || current.Source != "manual" {
 			t.Fatalf("%s: periods=%+v, switched at %s, command ran from %s to %s", provider, periods, switched, start, end)
 		}
 	}
@@ -258,7 +258,7 @@ func TestPlanEnd(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "gateway.sqlite")
 	for _, arguments := range [][]string{
 		{"schedule", "sample-a", "pro", "2020-01-01T00:00:00Z"},
-		{"schedule", "sample-a", "max-5x", "2099-01-01T00:00:00Z"},
+		{"schedule", "sample-a", "max", "2099-01-01T00:00:00Z"},
 		{"end", "sample-a"},
 	} {
 		cmd, err := parsePlanCommand(append([]string{"--session-db", db}, arguments...))
@@ -307,7 +307,7 @@ func TestPlanRefreshNotImplemented(t *testing.T) {
 	server.Listener = listener
 	server.Start()
 	defer server.Close()
-	_, command, err := providerCommand([]string{"codex", "plan", "--session-db", db, "--admin-socket", socket, "schedule", "sample-a", "max-20x"})
+	_, command, err := providerCommand([]string{"codex", "plan", "--session-db", db, "--admin-socket", socket, "schedule", "sample-a", "ultra"})
 	if err != nil {
 		t.Fatal(err)
 	}

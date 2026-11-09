@@ -55,7 +55,7 @@ it("renders each page of the sample", () => {
       ["P3ZT8WQN", "Account over its hard limit", "Quiet"],
     ],
     [{ view: "sessions", arg: "machine-b" }, ["W8MN4TQC", "on machine-b"]],
-    [{ view: "accounts" }, ["ab@example.test", "max-20x from"]],
+    [{ view: "accounts" }, ["ab@example.test", "ultra from"]],
     [{ view: "exits" }, ["IP not read", "registry.npmjs.org:443", "Direct"]],
     [
       { view: "monitor" },

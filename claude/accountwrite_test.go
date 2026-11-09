@@ -887,13 +887,13 @@ func TestUpdatePlan(t *testing.T) {
 	}
 	probes := func() int { w.mu.Lock(); defer w.mu.Unlock(); return len(w.probeTokens) }
 
-	// Raised: pro to max-5x on a served account reads its quota once.
-	status, answer, body := patch("sample-a", `{"rev":1,"plan":"max-5x"}`)
-	if status != 200 || answer["plan_refresh"] != "refreshed" || plan("sample-a") != "max-5x" || probes() != 1 {
+	// Raised: pro to max on a served account reads its quota once.
+	status, answer, body := patch("sample-a", `{"rev":1,"plan":"max"}`)
+	if status != 200 || answer["plan_refresh"] != "refreshed" || plan("sample-a") != "max" || probes() != 1 {
 		t.Fatalf("raise: %d %s, plan %q, probes %d", status, body, plan("sample-a"), probes())
 	}
 	audit, _ := w.store.AccountAudit(t.Context(), "sample-a")
-	if len(audit) != 1 || audit[0].Changes["plan"] != (session.FieldChange{Old: "pro", New: "max-5x"}) || audit[0].Action != actionUpdate {
+	if len(audit) != 1 || audit[0].Changes["plan"] != (session.FieldChange{Old: "pro", New: "max"}) || audit[0].Action != actionUpdate {
 		t.Fatalf("audit = %+v", audit)
 	}
 	// The account row is untouched by a plan-only edit.
@@ -921,11 +921,11 @@ func TestUpdatePlan(t *testing.T) {
 		t.Fatal("a refused plan edit wrote")
 	}
 	// An account that is not served, with no plan yet, gets one and no refresh.
-	status, answer, body = patch("sample-spare", `{"rev":1,"plan":"max-20x"}`)
-	if status != 200 || answer["plan_refresh"] != nil || plan("sample-spare") != "max-20x" || probes() != 1 {
+	status, answer, body = patch("sample-spare", `{"rev":1,"plan":"ultra"}`)
+	if status != 200 || answer["plan_refresh"] != nil || plan("sample-spare") != "ultra" || probes() != 1 {
 		t.Fatalf("spare: %d %s", status, body)
 	}
-	if audit, _ := w.store.AccountAudit(t.Context(), "sample-spare"); len(audit) != 1 || audit[0].Changes["plan"] != (session.FieldChange{Old: "", New: "max-20x"}) {
+	if audit, _ := w.store.AccountAudit(t.Context(), "sample-spare"); len(audit) != 1 || audit[0].Changes["plan"] != (session.FieldChange{Old: "", New: "ultra"}) {
 		t.Fatalf("spare audit = %+v", audit)
 	}
 }

@@ -271,7 +271,7 @@ func TestRestoreDrill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	period := session.PlanPeriod{Alias: "sample-a", Plan: "max-5x", From: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Source: "manual"}
+	period := session.PlanPeriod{Alias: "sample-a", Plan: "max", From: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Source: "manual"}
 	if err := store.SetPlanSchedule(ctx, period); err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestRestoreDrill(t *testing.T) {
 		t.Fatalf("credential issued before the backup: %+v %v", binding, err)
 	}
 	schedule, err := restored.PlanSchedule(ctx, "sample-a")
-	if err != nil || len(schedule) != 1 || schedule[0].Plan != "max-5x" || !schedule[0].From.Equal(period.From) {
+	if err != nil || len(schedule) != 1 || schedule[0].Plan != "max" || !schedule[0].From.Equal(period.From) {
 		t.Fatalf("plan_schedule %+v %v", schedule, err)
 	}
 	if soft, hard, err := restored.Thresholds(ctx); err != nil || soft != 0.7 || hard != 0.95 {

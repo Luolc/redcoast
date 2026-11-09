@@ -175,7 +175,7 @@ export function sampleDashboard(now: Date): Dashboard {
           },
         },
         plan: {
-          name: "max-20x",
+          name: "ultra",
           effective_from: "1970-01-01T00:00:00Z",
           effective_to: null,
         },
@@ -210,12 +210,12 @@ export function sampleDashboard(now: Date): Dashboard {
           },
         },
         plan: {
-          name: "max-5x",
+          name: "max",
           effective_from: "1970-01-01T00:00:00Z",
           effective_to: day(-3),
         },
         next_plan: {
-          name: "max-20x",
+          name: "ultra",
           effective_from: day(-3),
           effective_to: null,
         },
@@ -247,7 +247,7 @@ export function sampleDashboard(now: Date): Dashboard {
           },
         },
         plan: {
-          name: "max-5x",
+          name: "max",
           effective_from: "1970-01-01T00:00:00Z",
           effective_to: null,
         },

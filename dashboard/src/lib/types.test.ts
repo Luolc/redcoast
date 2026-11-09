@@ -6,7 +6,7 @@ it("accepts the endpoint's shape", () => {
   const text = JSON.stringify(
     sampleDashboard(new Date("2026-10-07T12:00:00Z")),
   );
-  expect(parseDashboard(text).accounts[1]?.next_plan?.name).toBe("max-20x");
+  expect(parseDashboard(text).accounts[1]?.next_plan?.name).toBe("ultra");
 });
 
 it("refuses a shape that drifted", () => {

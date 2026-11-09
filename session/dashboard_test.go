@@ -88,7 +88,7 @@ func TestDashboardSnapshot(t *testing.T) {
 	if err := store.Pause(ctx, "sample-a", now.Add(time.Hour), "manual check"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetPlanSchedule(ctx, PlanPeriod{Alias: "sample-b", Plan: "max-5x", From: now.Add(72 * time.Hour), Source: "manual"}); err != nil {
+	if err := store.SetPlanSchedule(ctx, PlanPeriod{Alias: "sample-b", Plan: "max", From: now.Add(72 * time.Hour), Source: "manual"}); err != nil {
 		t.Fatal(err)
 	}
 	tunnel := func(at time.Time, d time.Duration, host, result string) {
@@ -129,7 +129,7 @@ func TestDashboardSnapshot(t *testing.T) {
 	if a := byAlias["sample-a"]; a.PauseReason != "manual check" || a.NextPlan != nil {
 		t.Fatalf("sample-a = %+v", a)
 	}
-	if b := byAlias["sample-b"]; b.NextPlan == nil || b.NextPlan.Name != "max-5x" || b.Plan == nil || b.Plan.Name != "pro" {
+	if b := byAlias["sample-b"]; b.NextPlan == nil || b.NextPlan.Name != "max" || b.Plan == nil || b.Plan.Name != "pro" {
 		t.Fatalf("sample-b = %+v", b)
 	}
 	if len(snap.Machines) != 1 || snap.Machines[0].LiveSessions != 1 || !snap.Machines[0].LastSeen.Equal(c.Now()) {
