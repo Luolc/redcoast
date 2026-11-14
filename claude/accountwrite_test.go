@@ -552,6 +552,45 @@ func TestUpdateAccount(t *testing.T) {
 	}
 }
 
+// TestUpdateAccountKycAndNoExit checks that an edit sets the status kyc, and that an
+// account of access direct with no exit (an inventory file without a proxy block) can be
+// edited, keeping its observation date, while an exit given in part is refused. The
+// dashboard lists the account among the unserved ones, with an empty exit.
+func TestUpdateAccountKycAndNoExit(t *testing.T) {
+	w := newWriteHarness(t)
+	patch := func(alias, body string) (int, map[string]any, string) {
+		return w.serve(t, request("PATCH", "/accounts/"+alias, body))
+	}
+	if status, answer, body := patch("sample-spare", `{"rev":1,"status":"kyc"}`); status != 200 || answer["account"].(map[string]any)["status"] != "kyc" {
+		t.Fatalf("kyc: %d %s", status, body)
+	}
+	plain := session.AccountRow{Alias: "sample-plain", Email: "sample-plain@example.test", Access: "direct", Status: "testing", ObservationSince: "2026-11-13"}
+	if _, err := w.store.CreateAccount(t.Context(), plain, session.AuditEntry{Action: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, body := patch("sample-plain", `{"rev":1,"proxy":{"expected_egress_ip":"192.0.2.5"}}`); status != 400 || !strings.Contains(body, "proxy.host") {
+		t.Fatalf("an exit in part: %d %s", status, body)
+	}
+	if status, _, body := patch("sample-plain", `{"rev":1,"status":"kyc","email":"changed@example.test"}`); status != 200 {
+		t.Fatalf("edit of an account with no exit: %d %s", status, body)
+	}
+	row, err := w.store.Account(t.Context(), "sample-plain")
+	if err != nil || row.Status != "kyc" || row.Email != "changed@example.test" || row.ObservationSince != "2026-11-13" || row.ProxyHost != "" || row.ExpectedIP != "" || row.Rev != 2 {
+		t.Fatalf("row = %+v, %v", row, err)
+	}
+	status, _, body := w.serve(t, request("GET", "/dashboard.json", ""))
+	var view struct {
+		Unserved []accountConfig `json:"unserved_accounts"`
+	}
+	if err := json.Unmarshal([]byte(body), &view); status != 200 || err != nil {
+		t.Fatalf("dashboard: %d %v", status, err)
+	}
+	i := slices.IndexFunc(view.Unserved, func(c accountConfig) bool { return c.Alias == "sample-plain" })
+	if i < 0 || view.Unserved[i].Status != "kyc" || view.Unserved[i].Proxy.Host != "" || view.Unserved[i].Proxy.Direct {
+		t.Fatalf("unserved = %+v", view.Unserved)
+	}
+}
+
 // TestVerify checks the three checks: all pass for a good account, the token check
 // fails for a reference that does not resolve and the other two are skipped without a
 // request, the egress check fails for an exit that reads another IP, the probe for a

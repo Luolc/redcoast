@@ -77,6 +77,8 @@ func TestLoadAccounts(t *testing.T) {
 		{"section_reference", map[string]string{"sample-a.yaml": strings.Replace(a, "op://example-vault/token-sample-a/credential", "op://example-vault/token-shared/section/credential", 1), "sample-b.yaml": b}, []string{"sample-a", "sample-b"}, nil},
 		// Accounts the gateway does not serve are skipped, their references unresolved.
 		{"paused_skipped", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b, "sample-c.yaml": inventoryYAML("sample-c", "paused", "gateway", "op://example-vault/token-missing/credential", "8003")}, []string{"sample-a", "sample-b"}, nil},
+		{"kyc_skipped", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b, "sample-c.yaml": inventoryYAML("sample-c", "kyc", "gateway", "op://example-vault/token-missing/credential", "8003")}, []string{"sample-a", "sample-b"}, nil},
+		{"direct_without_proxy_skipped", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b, "sample-c.yaml": noExitShape}, []string{"sample-a", "sample-b"}, nil},
 		{"direct_skipped", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b, "sample-c.yaml": inventoryYAML("sample-c", "active", "direct", "", "8003")}, []string{"sample-a", "sample-b"}, nil},
 		{"status_defaults_to_testing", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b, "sample-c.yaml": strings.Replace(inventoryYAML("sample-c", "active", "gateway", "", "8003"), "status: active\n", "", 1)}, []string{"sample-a", "sample-b"}, nil},
 		{"other_files_ignored", map[string]string{"sample-a.yaml": a, "sample-b.yaml": b, "README.md": "notes"}, []string{"sample-a", "sample-b"}, nil},

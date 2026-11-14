@@ -188,7 +188,7 @@ function EditForm({
       } else setRefusal(r.refusal);
     });
   };
-  const statuses = ["testing", "paused", "suspended", "retired"];
+  const statuses = ["testing", "paused", "suspended", "retired", "kyc"];
   if (base.was.status === "active") statuses.unshift("active");
   const direct = config.proxy.direct;
   return (

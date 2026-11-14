@@ -53,7 +53,7 @@ var (
 	ErrSetupWaitUntil      = errors.New("wait_until is not allowed")
 	ErrSetupOpen           = errors.New("the account has a requested or running task")
 	ErrSetupStatus         = errors.New("the account is neither testing nor active")
-	ErrSetupDirect         = errors.New("the account has a direct exit")
+	ErrSetupDirect         = errors.New("the account has no proxy exit")
 	ErrSetupNoOpenTask     = errors.New("no running task for the account")
 	ErrSetupIDsMismatch    = errors.New("request_id or run_id does not match the task")
 )
@@ -218,12 +218,13 @@ func readSetups(ctx context.Context, tx *sql.Tx, query string) ([]SetupRow, erro
 
 // ineligible returns why an account cannot have a setup, as the fixed code a task ends
 // with, or "" when it can: a setup is for an account that is testing or active and has a
-// proxy exit, not the gateway's own address.
-func ineligible(status string, direct bool) string {
+// proxy exit, neither the gateway's own address (direct) nor no exit at all (no proxy
+// host).
+func ineligible(status string, direct bool, proxyHost string) string {
 	switch {
 	case status != "testing" && status != "active":
 		return SetupReasonStatus
-	case direct:
+	case direct || proxyHost == "":
 		return SetupReasonDirect
 	}
 	return ""
@@ -256,9 +257,10 @@ func expireSetups(ctx context.Context, tx *sql.Tx, now time.Time) error {
 		why := ""
 		var status string
 		var direct bool
-		switch err := tx.QueryRowContext(ctx, "SELECT status, proxy_direct FROM accounts WHERE alias = ?", row.Alias).Scan(&status, &direct); {
+		var host string
+		switch err := tx.QueryRowContext(ctx, "SELECT status, proxy_direct, proxy_host FROM accounts WHERE alias = ?", row.Alias).Scan(&status, &direct, &host); {
 		case err == nil:
-			why = ineligible(status, direct)
+			why = ineligible(status, direct, host)
 		case !errors.Is(err, sql.ErrNoRows):
 			return fmt.Errorf("read account: %v", err)
 		}
@@ -317,7 +319,7 @@ func (s *Store) RequestSetup(ctx context.Context, alias, action string, rev *int
 		if rev != nil && account.Rev != *rev {
 			return ErrRevConflict
 		}
-		switch ineligible(account.Status, account.Direct) {
+		switch ineligible(account.Status, account.Direct, account.ProxyHost) {
 		case SetupReasonStatus:
 			return ErrSetupStatus
 		case SetupReasonDirect:

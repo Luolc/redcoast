@@ -109,7 +109,7 @@ func fieldValues(row AccountRow) map[string]string {
 		"proxy_direct": strconv.FormatBool(row.Direct), "proxy_host": row.ProxyHost, "proxy_port": strconv.Itoa(row.ProxyPort),
 		"expected_egress_ip": row.ExpectedIP, "proxy_username_ref": row.UsernameRef, "proxy_password_ref": row.PasswordRef,
 		"device_id": row.DeviceID, "account_uuid": row.AccountUUID,
-		"receiver_email": row.ReceiverEmail, "proxy_provider": row.ProxyProvider, "proxy_type": row.ProxyType,
+		"receiver_email": row.ReceiverEmail, "proxy_provider": row.ProxyProvider, "proxy_type": row.ProxyType, "observation_since": row.ObservationSince,
 		"token_ok": checkWord(row.Verify.TokenOK), "egress_ok": checkWord(row.Verify.EgressOK), "probe_ok": checkWord(row.Verify.ProbeOK),
 	}
 }
@@ -159,11 +159,11 @@ func (s *Store) CreateAccount(ctx context.Context, row AccountRow, audit AuditEn
 		}
 		now := s.now()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO accounts (alias, email, access, status, token_ref, proxy_direct, proxy_host, proxy_port,
-			expected_egress_ip, proxy_username_ref, proxy_password_ref, device_id, account_uuid, receiver_email, proxy_provider, proxy_type, rev, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+			expected_egress_ip, proxy_username_ref, proxy_password_ref, device_id, account_uuid, receiver_email, proxy_provider, proxy_type, observation_since, rev, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 			row.Alias, row.Email, row.Access, row.Status, row.TokenRef, row.Direct, row.ProxyHost, row.ProxyPort,
 			row.ExpectedIP, row.UsernameRef, row.PasswordRef, row.DeviceID, row.AccountUUID,
-			row.ReceiverEmail, row.ProxyProvider, row.ProxyType, now, now); err != nil {
+			row.ReceiverEmail, row.ProxyProvider, row.ProxyType, nullableString(row.ObservationSince), now, now); err != nil {
 			return fmt.Errorf("create account: %v", err)
 		}
 		row.CreatedAt, row.UpdatedAt = fromMillis(now), fromMillis(now)
@@ -216,10 +216,10 @@ func (s *Store) UpdateAccount(ctx context.Context, alias string, rev int64, audi
 func writeRow(ctx context.Context, tx *sql.Tx, row AccountRow) error {
 	_, err := tx.ExecContext(ctx, `UPDATE accounts SET email = ?, status = ?, token_ref = ?, proxy_direct = ?, proxy_host = ?, proxy_port = ?,
 		expected_egress_ip = ?, proxy_username_ref = ?, proxy_password_ref = ?, device_id = ?, account_uuid = ?,
-		receiver_email = ?, proxy_provider = ?, proxy_type = ?, token_ok = ?, egress_ok = ?, probe_ok = ?, verified_at = ?, rev = ?, updated_at = ? WHERE alias = ?`,
+		receiver_email = ?, proxy_provider = ?, proxy_type = ?, observation_since = ?, token_ok = ?, egress_ok = ?, probe_ok = ?, verified_at = ?, rev = ?, updated_at = ? WHERE alias = ?`,
 		row.Email, row.Status, row.TokenRef, row.Direct, row.ProxyHost, row.ProxyPort,
 		row.ExpectedIP, row.UsernameRef, row.PasswordRef, row.DeviceID, row.AccountUUID,
-		row.ReceiverEmail, row.ProxyProvider, row.ProxyType,
+		row.ReceiverEmail, row.ProxyProvider, row.ProxyType, nullableString(row.ObservationSince),
 		nullableBool(row.Verify.TokenOK), nullableBool(row.Verify.EgressOK), nullableBool(row.Verify.ProbeOK), nullableTime(row.Verify.At),
 		row.Rev, row.UpdatedAt.UnixMilli(), row.Alias)
 	if err != nil {

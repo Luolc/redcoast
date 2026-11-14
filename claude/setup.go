@@ -279,8 +279,8 @@ type setupBody struct {
 type accepted struct{ body any }
 
 // request records a task for the page's button. The account's setup answers 409 when it
-// has a requested or running task, when rev is not the account's and when the account is
-// retired.
+// has a requested or running task, when rev is not the account's, when the account is
+// neither testing nor active and when it has no proxy exit.
 func (w *AccountWriter) setupRequest(r *http.Request, alias string, body *setupBody, entry session.AuditEntry) (any, error) {
 	if body.Action == nil || *body.Action != actionLoginAndToken {
 		return nil, fieldProblem("action", "must be login_and_token")

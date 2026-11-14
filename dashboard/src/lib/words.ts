@@ -86,6 +86,7 @@ const ACCOUNT_STATUS: Record<string, State> = {
   paused: { tone: "warn", word: "Paused" },
   suspended: { tone: "bad", word: "Suspended" },
   retired: { tone: "off", word: "Retired" },
+  kyc: { tone: "off", word: "KYC" },
 };
 
 /** An account's status as the accounts table keeps it. */
@@ -219,7 +220,7 @@ const SETUP_REASONS: Record<string, string> = {
   readback_mismatch: "The stored token read back different",
   reload_failed: "The gateway could not reload",
   account_status: "The account is no longer testing or active",
-  direct_account: "The account has a direct exit",
+  direct_account: "The account has no proxy exit",
   unexpected_error: "The automation failed unexpectedly",
 };
 
@@ -231,7 +232,7 @@ export function setupReasonWording(reason: string): string {
 const SETUP_REFUSALS: Record<string, string> = {
   setup_open: "A setup is already requested or running for this account.",
   account_status: "Setup is only for accounts that are testing or active.",
-  direct_account: "Setup is not offered for an account with a direct exit.",
+  direct_account: "Setup is only offered for an account with a proxy exit.",
   setup_unavailable: "Setup is off on this gateway.",
   store_unavailable: "The gateway's store did not answer; try again shortly.",
 };

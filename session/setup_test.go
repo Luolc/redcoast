@@ -273,7 +273,11 @@ func TestSetupTimeouts(t *testing.T) {
 	}{
 		{"retired", func(row *AccountRow) { row.Status = "retired" }, "account_status"},
 		{"paused", func(row *AccountRow) { row.Status = "paused" }, "account_status"},
+		{"kyc", func(row *AccountRow) { row.Status = "kyc" }, "account_status"},
 		{"direct", func(row *AccountRow) { row.Direct = true }, "direct_account"},
+		{"no exit", func(row *AccountRow) {
+			row.Access, row.ProxyHost, row.ProxyPort, row.ExpectedIP, row.UsernameRef, row.PasswordRef = "direct", "", 0, "", "", ""
+		}, "direct_account"},
 		{"active", func(row *AccountRow) { row.Status = "active" }, ""},
 	} {
 		t.Run("requested waits, and ends when the account is "+test.name, func(t *testing.T) {

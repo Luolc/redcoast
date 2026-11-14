@@ -104,6 +104,11 @@ it("opens the edit form with the account's values and a save that waits", () => 
   expect(out).toContain('readOnly=""');
 });
 
+it("offers kyc among the statuses an edit can set", () => {
+  const out = html({ view: "account", arg: "sample-ab/edit" });
+  expect(out).toContain('<option value="kyc">KYC</option>');
+});
+
 it("walks the steps of adding an account", () => {
   expect(text(html({ view: "add", arg: "1" }))).toContain(
     "Fill in the account",
@@ -228,7 +233,14 @@ it("says why there is no setup button instead", () => {
       withConfig("sample-ab", (c) => ({
         proxy: { ...c.proxy, direct: true },
       })),
-      "not offered for an account with a direct exit",
+      "only offered for an account with a proxy exit",
+    ],
+    [
+      withConfig("sample-ab", (c) => ({
+        access: "direct",
+        proxy: { ...c.proxy, host: "", port: 0, expected_egress_ip: "" },
+      })),
+      "only offered for an account with a proxy exit",
     ],
   ];
   for (const [d, why] of cases) {

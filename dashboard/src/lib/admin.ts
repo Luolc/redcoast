@@ -308,7 +308,7 @@ export function patchBody(
 /**
  * Why the page offers no setup button for the account; null when it does.
  * The conditions are the gateway's: setup on, a testing or active account,
- * and an exit that is not direct.
+ * and a proxy exit, neither direct nor none.
  */
 export function setupOffReason(d: Dashboard, m: Managed): string | null {
   const c = m.config;
@@ -317,8 +317,8 @@ export function setupOffReason(d: Dashboard, m: Managed): string | null {
   if (!canWrite(d)) return "Writing is off, so setup cannot be requested.";
   if (c.status !== "testing" && c.status !== "active")
     return `Setup is only for accounts that are testing or active; this one is ${c.status}.`;
-  if (c.proxy.direct)
-    return "Setup is not offered for an account with a direct exit.";
+  if (c.proxy.direct || c.proxy.host === "")
+    return "Setup is only offered for an account with a proxy exit.";
   return null;
 }
 

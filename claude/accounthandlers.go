@@ -154,7 +154,7 @@ func patched(before session.AccountRow, body *patchBody) (session.AccountRow, er
 	}
 	if body.Status != nil {
 		switch *body.Status {
-		case "testing", "paused", "suspended", "retired":
+		case "testing", "paused", "suspended", "retired", "kyc":
 			after.Status = *body.Status
 		case "active":
 			return after, fieldProblem("status", "use activate")
