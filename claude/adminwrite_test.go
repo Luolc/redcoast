@@ -477,6 +477,52 @@ func TestAgentShow(t *testing.T) {
 	}
 }
 
+// TestAgentShowPlanSchedule: show gives every segment of the plan schedule of a testing
+// account, earliest first, in UTC with the stored milliseconds and a null end for the open
+// one; an account without a segment gets [], not null.
+func TestAgentShowPlanSchedule(t *testing.T) {
+	h := newSetupHarness(t, true)
+	h.agent(t, "POST", "/accounts", h.agentCreateBody("acct-test-01"))
+	ctx := t.Context()
+	// The plan the creation wrote starts at the creation time; replace the schedule with
+	// a closed segment, then an open one that starts where it ends.
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	switchAt := time.Date(2026, 6, 1, 12, 30, 15, 250*int(time.Millisecond), time.UTC)
+	if err := h.store.EndPlan(ctx, "acct-test-01", time.UnixMilli(0)); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []session.PlanPeriod{
+		{Alias: "acct-test-01", Plan: "max", From: start, Source: "manual"},
+		{Alias: "acct-test-01", Plan: "ultra", From: switchAt, Source: "manual"},
+	} {
+		if err := h.store.SetPlanSchedule(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shown := h.show(t, "acct-test-01")
+	if shown["account"].(map[string]any)["status"] != "testing" {
+		t.Fatalf("status = %v", shown["account"])
+	}
+	want := []any{
+		map[string]any{"plan": "max", "effective_from": "2026-01-01T00:00:00Z", "effective_to": "2026-06-01T12:30:15.25Z"},
+		map[string]any{"plan": "ultra", "effective_from": "2026-06-01T12:30:15.25Z", "effective_to": nil},
+	}
+	if !reflect.DeepEqual(shown["plan_schedule"], want) {
+		t.Fatalf("plan_schedule = %v, want %v", shown["plan_schedule"], want)
+	}
+
+	if _, err := h.store.CreateAccount(ctx, session.AccountRow{Alias: "acct-test-02", Email: "two@example.test", Access: "direct", Status: "testing", TokenRef: "op://example-vault/token-acct-test-02/credential"}, session.AuditEntry{Action: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	none := h.show(t, "acct-test-02")
+	if segments, ok := none["plan_schedule"].([]any); !ok || len(segments) != 0 {
+		t.Fatalf("an account without a segment: %v", none["plan_schedule"])
+	}
+	if status, answer, _ := h.agent(t, "GET", "/accounts/acct-test-99", nil); status != 404 || answer["error"] != "unknown_account" {
+		t.Fatalf("unregistered: %d %v", status, answer)
+	}
+}
+
 // TestSetupNextByID: the agent takes only its own task, and each way it cannot is a code.
 func TestSetupNextByID(t *testing.T) {
 	h := newSetupHarness(t, true)
@@ -714,7 +760,7 @@ func TestDashboardRecord(t *testing.T) {
 		t.Fatalf("record: %d %s", status, body)
 	}
 	shown := h.show(t, "sample-new")
-	for _, key := range []string{"account", "served", "setup", "created", "history", "history_truncated"} {
+	for _, key := range []string{"account", "served", "setup", "created", "history", "history_truncated", "plan_schedule"} {
 		if !reflect.DeepEqual(record[key], shown[key]) {
 			t.Fatalf("%s differs from account show: %v vs %v", key, record[key], shown[key])
 		}
