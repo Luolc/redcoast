@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/Luolc/redcoast/session"
 )
@@ -251,6 +252,16 @@ type accountShow struct {
 	Created          *historyRow   `json:"created"`
 	History          []historyRow  `json:"history"`
 	HistoryTruncated bool          `json:"history_truncated"`
+	PlanSchedule     []planSegment `json:"plan_schedule"`
+}
+
+// planSegment is one row of an account's plan schedule as `account show` gives it. Times
+// are UTC RFC 3339 with the millisecond precision the store keeps; an open-ended segment
+// has a null effective_to.
+type planSegment struct {
+	Plan          string  `json:"plan"`
+	EffectiveFrom string  `json:"effective_from"`
+	EffectiveTo   *string `json:"effective_to"`
 }
 
 // historyRow is one audit row of an account as `account show` gives it. The changes are
@@ -323,6 +334,19 @@ func (w *AccountWriter) record(ctx context.Context, alias string) (*accountShow,
 	if created != nil {
 		h := historyOf(*created)
 		out.Created = &h
+	}
+	periods, err := w.cfg.Store.PlanSchedule(ctx, alias)
+	if err != nil {
+		return nil, errStoreUnavailable
+	}
+	out.PlanSchedule = make([]planSegment, 0, len(periods))
+	for _, p := range periods {
+		segment := planSegment{Plan: p.Plan, EffectiveFrom: p.From.UTC().Format(time.RFC3339Nano)}
+		if !p.To.IsZero() {
+			to := p.To.UTC().Format(time.RFC3339Nano)
+			segment.EffectiveTo = &to
+		}
+		out.PlanSchedule = append(out.PlanSchedule, segment)
 	}
 	return out, nil
 }
