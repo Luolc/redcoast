@@ -554,8 +554,10 @@ func TestUpdateAccount(t *testing.T) {
 
 // TestUpdateAccountKycAndNoExit checks that an edit sets the status kyc, and that an
 // account of access direct with no exit (an inventory file without a proxy block) can be
-// edited, keeping its observation date, while an exit given in part is refused. The
-// dashboard lists the account among the unserved ones, with an empty exit.
+// edited, keeping its observation date, and created with an empty proxy block or none, while an
+// exit given in part is refused, and so is an account of access gateway with no exit,
+// edited or created. The dashboard lists the account among the unserved ones, with an
+// empty exit.
 func TestUpdateAccountKycAndNoExit(t *testing.T) {
 	w := newWriteHarness(t)
 	patch := func(alias, body string) (int, map[string]any, string) {
@@ -577,6 +579,33 @@ func TestUpdateAccountKycAndNoExit(t *testing.T) {
 	row, err := w.store.Account(t.Context(), "sample-plain")
 	if err != nil || row.Status != "kyc" || row.Email != "changed@example.test" || row.ObservationSince != "2026-11-13" || row.ProxyHost != "" || row.ExpectedIP != "" || row.Rev != 2 {
 		t.Fatalf("row = %+v, %v", row, err)
+	}
+	bare := `{"alias":"sample-bare","email":"bare@example.test","access":"direct","device_id":"` + strings.Repeat("b", 64) + `","plan":"pro","proxy":{}}`
+	if status, _, body := w.serve(t, request("POST", "/accounts", bare)); status != 200 {
+		t.Fatalf("create of an account with no exit: %d %s", status, body)
+	}
+	if row, err := w.store.Account(t.Context(), "sample-bare"); err != nil || row.Access != "direct" || row.ProxyHost != "" || row.ExpectedIP != "" {
+		t.Fatalf("created row = %+v, %v", row, err)
+	}
+	withoutProxy := strings.NewReplacer("sample-bare", "sample-bare-two", `,"proxy":{}`, "", strings.Repeat("b", 64), strings.Repeat("d", 64)).Replace(bare)
+	if status, _, body := w.serve(t, request("POST", "/accounts", withoutProxy)); status != 200 {
+		t.Fatalf("create of an account with no proxy key: %d %s", status, body)
+	}
+	// Access gateway needs an exit, edited or created.
+	gateway := session.AccountRow{Alias: "sample-gateway", Email: "sample-gateway@example.test", Access: "gateway", Status: "testing"}
+	if _, err := w.store.CreateAccount(t.Context(), gateway, session.AuditEntry{Action: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if status, answer, body := patch("sample-gateway", `{"rev":1,"email":"changed@example.test"}`); status != 400 || answer["field"] != "proxy.expected_egress_ip" {
+		t.Fatalf("edit of a gateway account with no exit: %d %s", status, body)
+	}
+	noExit := strings.NewReplacer("sample-bare", "sample-gateway-new", `"access":"direct"`, `"access":"gateway"`, strings.Repeat("b", 64), strings.Repeat("c", 64)).Replace(bare)
+	if status, answer, body := w.serve(t, request("POST", "/accounts", noExit)); status != 400 || answer["field"] != "proxy.expected_egress_ip" {
+		t.Fatalf("create of a gateway account with no exit: %d %s", status, body)
+	}
+	noProxy := strings.Replace(noExit, `,"proxy":{}`, "", 1)
+	if status, answer, body := w.serve(t, request("POST", "/accounts", noProxy)); status != 400 || answer["field"] != "proxy" {
+		t.Fatalf("create of a gateway account with no proxy key: %d %s", status, body)
 	}
 	status, _, body := w.serve(t, request("GET", "/dashboard.json", ""))
 	var view struct {
