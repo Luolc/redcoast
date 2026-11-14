@@ -552,6 +552,74 @@ func TestUpdateAccount(t *testing.T) {
 	}
 }
 
+// TestUpdateAccountKycAndNoExit checks that an edit sets the status kyc, and that an
+// account of access direct with no exit (an inventory file without a proxy block) can be
+// edited, keeping its observation date, and created with an empty proxy block or none, while an
+// exit given in part is refused, and so is an account of access gateway with no exit,
+// edited or created. The dashboard lists the account among the unserved ones, with an
+// empty exit.
+func TestUpdateAccountKycAndNoExit(t *testing.T) {
+	w := newWriteHarness(t)
+	patch := func(alias, body string) (int, map[string]any, string) {
+		return w.serve(t, request("PATCH", "/accounts/"+alias, body))
+	}
+	if status, answer, body := patch("sample-spare", `{"rev":1,"status":"kyc"}`); status != 200 || answer["account"].(map[string]any)["status"] != "kyc" {
+		t.Fatalf("kyc: %d %s", status, body)
+	}
+	plain := session.AccountRow{Alias: "sample-plain", Email: "sample-plain@example.test", Access: "direct", Status: "testing", ObservationSince: "2026-11-13"}
+	if _, err := w.store.CreateAccount(t.Context(), plain, session.AuditEntry{Action: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, body := patch("sample-plain", `{"rev":1,"proxy":{"expected_egress_ip":"192.0.2.5"}}`); status != 400 || !strings.Contains(body, "proxy.host") {
+		t.Fatalf("an exit in part: %d %s", status, body)
+	}
+	if status, _, body := patch("sample-plain", `{"rev":1,"status":"kyc","email":"changed@example.test"}`); status != 200 {
+		t.Fatalf("edit of an account with no exit: %d %s", status, body)
+	}
+	row, err := w.store.Account(t.Context(), "sample-plain")
+	if err != nil || row.Status != "kyc" || row.Email != "changed@example.test" || row.ObservationSince != "2026-11-13" || row.ProxyHost != "" || row.ExpectedIP != "" || row.Rev != 2 {
+		t.Fatalf("row = %+v, %v", row, err)
+	}
+	bare := `{"alias":"sample-bare","email":"bare@example.test","access":"direct","device_id":"` + strings.Repeat("b", 64) + `","plan":"pro","proxy":{}}`
+	if status, _, body := w.serve(t, request("POST", "/accounts", bare)); status != 200 {
+		t.Fatalf("create of an account with no exit: %d %s", status, body)
+	}
+	if row, err := w.store.Account(t.Context(), "sample-bare"); err != nil || row.Access != "direct" || row.ProxyHost != "" || row.ExpectedIP != "" {
+		t.Fatalf("created row = %+v, %v", row, err)
+	}
+	withoutProxy := strings.NewReplacer("sample-bare", "sample-bare-two", `,"proxy":{}`, "", strings.Repeat("b", 64), strings.Repeat("d", 64)).Replace(bare)
+	if status, _, body := w.serve(t, request("POST", "/accounts", withoutProxy)); status != 200 {
+		t.Fatalf("create of an account with no proxy key: %d %s", status, body)
+	}
+	// Access gateway needs an exit, edited or created.
+	gateway := session.AccountRow{Alias: "sample-gateway", Email: "sample-gateway@example.test", Access: "gateway", Status: "testing"}
+	if _, err := w.store.CreateAccount(t.Context(), gateway, session.AuditEntry{Action: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if status, answer, body := patch("sample-gateway", `{"rev":1,"email":"changed@example.test"}`); status != 400 || answer["field"] != "proxy.expected_egress_ip" {
+		t.Fatalf("edit of a gateway account with no exit: %d %s", status, body)
+	}
+	noExit := strings.NewReplacer("sample-bare", "sample-gateway-new", `"access":"direct"`, `"access":"gateway"`, strings.Repeat("b", 64), strings.Repeat("c", 64)).Replace(bare)
+	if status, answer, body := w.serve(t, request("POST", "/accounts", noExit)); status != 400 || answer["field"] != "proxy.expected_egress_ip" {
+		t.Fatalf("create of a gateway account with no exit: %d %s", status, body)
+	}
+	noProxy := strings.Replace(noExit, `,"proxy":{}`, "", 1)
+	if status, answer, body := w.serve(t, request("POST", "/accounts", noProxy)); status != 400 || answer["field"] != "proxy" {
+		t.Fatalf("create of a gateway account with no proxy key: %d %s", status, body)
+	}
+	status, _, body := w.serve(t, request("GET", "/dashboard.json", ""))
+	var view struct {
+		Unserved []accountConfig `json:"unserved_accounts"`
+	}
+	if err := json.Unmarshal([]byte(body), &view); status != 200 || err != nil {
+		t.Fatalf("dashboard: %d %v", status, err)
+	}
+	i := slices.IndexFunc(view.Unserved, func(c accountConfig) bool { return c.Alias == "sample-plain" })
+	if i < 0 || view.Unserved[i].Status != "kyc" || view.Unserved[i].Proxy.Host != "" || view.Unserved[i].Proxy.Direct {
+		t.Fatalf("unserved = %+v", view.Unserved)
+	}
+}
+
 // TestVerify checks the three checks: all pass for a good account, the token check
 // fails for a reference that does not resolve and the other two are skipped without a
 // request, the egress check fails for an exit that reads another IP, the probe for a

@@ -462,7 +462,8 @@ func TestSetupRequestRoute(t *testing.T) {
 }
 
 // TestSetupEligibility: a setup is for an account that is testing or active and has a
-// proxy exit; any other status and a direct exit get 409 with their own code, nothing is
+// proxy exit; any other status, kyc among them, gets 409 account_status, and a direct exit
+// or no exit at all (access direct without a proxy block) 409 direct_account; nothing is
 // recorded, and the task `setup next` hands out says the account's status.
 func TestSetupEligibility(t *testing.T) {
 	h := newSetupHarness(t, true)
@@ -478,6 +479,10 @@ func TestSetupEligibility(t *testing.T) {
 		}
 		return saved.Rev
 	}
+	spare, err := h.store.Account(t.Context(), "sample-spare")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name   string
 		apply  func(r *session.AccountRow)
@@ -487,10 +492,16 @@ func TestSetupEligibility(t *testing.T) {
 		{"retired", func(r *session.AccountRow) { r.Status = "retired" }, 409, "account_status"},
 		{"paused", func(r *session.AccountRow) { r.Status = "paused" }, 409, "account_status"},
 		{"suspended", func(r *session.AccountRow) { r.Status = "suspended" }, 409, "account_status"},
+		{"kyc", func(r *session.AccountRow) { r.Status = "kyc" }, 409, "account_status"},
+		{"no exit and testing", func(r *session.AccountRow) {
+			r.Status, r.Access, r.ProxyHost, r.ProxyPort, r.ExpectedIP, r.UsernameRef, r.PasswordRef = "testing", "direct", "", 0, "", "", ""
+		}, 409, "direct_account"},
 		{"direct and testing", func(r *session.AccountRow) { r.Status, r.Direct = "testing", true }, 409, "direct_account"},
 		{"direct and active", func(r *session.AccountRow) { r.Status, r.Direct = "active", true }, 409, "direct_account"},
 		{"direct and retired", func(r *session.AccountRow) { r.Status, r.Direct = "retired", true }, 409, "account_status"},
-		{"testing", func(r *session.AccountRow) { r.Status, r.Direct = "testing", false }, 202, ""},
+		{"testing", func(r *session.AccountRow) {
+			r.Status, r.Access, r.Direct, r.ProxyHost, r.ProxyPort, r.ExpectedIP, r.UsernameRef, r.PasswordRef = "testing", spare.Access, false, spare.ProxyHost, spare.ProxyPort, spare.ExpectedIP, spare.UsernameRef, spare.PasswordRef
+		}, 202, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			rev := setRow("sample-spare", test.apply)

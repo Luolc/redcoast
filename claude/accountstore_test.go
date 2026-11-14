@@ -553,3 +553,73 @@ func TestImportRefusesUnknownKeys(t *testing.T) {
 	}
 	importFixture(t, h, dir)
 }
+
+// noExitShape is an account file of access direct with no proxy block and no token,
+// under observation, in the order the export writes its keys.
+const noExitShape = `email: sample-c@example.test
+receiver_email: receiver-c@example.test
+access: direct
+status: testing
+observation_since: 2026-11-13
+oauth_token: null
+device_id: ` + syntheticDeviceID + `
+`
+
+// TestImportKeepsKycAndObservation checks that an account of status kyc and one of access
+// direct with no proxy block, no token and an observation date import, that the date is
+// kept, that the export writes the files back as they were, the date unquoted, the token
+// null and no proxy block, and that importing the export gives the same rows. None of the
+// two is served.
+func TestImportKeepsKycAndObservation(t *testing.T) {
+	kyc := strings.Replace(realShape, "status: active", "status: kyc", 1)
+	files := map[string]string{"sample-a.yaml": realShape, "sample-b.yaml": strings.ReplaceAll(kyc, "sample-a", "sample-b"), "sample-c.yaml": noExitShape}
+	h := newHarness(t)
+	importFixture(t, h, writeInventory(t, files))
+	rows, _, err := h.store.Accounts(t.Context())
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	if rows[1].Status != "kyc" || rows[2].ObservationSince != "2026-11-13" || rows[2].Access != "direct" || rows[2].ProxyHost != "" || rows[2].ExpectedIP != "" || rows[2].TokenRef != "" || rows[0].ObservationSince != "" {
+		t.Fatalf("rows = %+v", rows)
+	}
+	set, err := LoadAccountsFrom(t.Context(), StoreSource(h.store, t.TempDir()), Claude, storeResolve, DefaultAccountConcurrency)
+	if err != nil || !slices.Equal(set.Candidates(), []string{"sample-a"}) {
+		t.Fatalf("served = %v, %v", set, err)
+	}
+	out := filepath.Join(t.TempDir(), "export")
+	if err := ExportInventory(out, rows); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range files {
+		if data, err := os.ReadFile(filepath.Join(out, name)); err != nil || string(data) != want {
+			t.Fatalf("exported %s:\n%s\nwant:\n%s\n%v", name, data, want, err)
+		}
+	}
+	again := newHarness(t)
+	importFixture(t, again, out)
+	got, _, err := again.store.Accounts(t.Context())
+	if err != nil || !sameRows(rows, got) {
+		t.Fatalf("rows differ after export and import:\n%+v\n%+v\n%v", rows, got, err)
+	}
+}
+
+// TestImportRefusesBadObservationDate checks that an observation_since that is not a date
+// written YYYY-MM-DD refuses the import, naming the file and the key, and that a quoted
+// date imports.
+func TestImportRefusesBadObservationDate(t *testing.T) {
+	for _, value := range []string{"null", "", "2026-1-13", "2026-11-31", "2026-11-13T00:00:00Z", "13/11/2026", "[2026-11-13]", "{day: 2026-11-13}"} {
+		t.Run(value, func(t *testing.T) {
+			h := newHarness(t)
+			file := strings.Replace(noExitShape, "observation_since: 2026-11-13", "observation_since: "+value, 1)
+			imported, err := ImportInventory(t.Context(), h.store, writeInventory(t, map[string]string{"sample-a.yaml": realShape, "sample-c.yaml": file}), Claude)
+			if err == nil || imported || !strings.Contains(err.Error(), "sample-c: observation_since") {
+				t.Fatalf("import = %v, %v", imported, err)
+			}
+		})
+	}
+	h := newHarness(t)
+	importFixture(t, h, writeInventory(t, map[string]string{"sample-a.yaml": realShape, "sample-c.yaml": strings.Replace(noExitShape, "2026-11-13", `"2026-11-13"`, 1)}))
+	if row, err := h.store.Account(t.Context(), "sample-c"); err != nil || row.ObservationSince != "2026-11-13" {
+		t.Fatalf("row = %+v, %v", row, err)
+	}
+}

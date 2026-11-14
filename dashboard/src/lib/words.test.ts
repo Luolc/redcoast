@@ -35,7 +35,7 @@ it("words the setup codes, and leaves an unknown code as it is", () => {
   expect(setupStateWording("needs_human").word).toBe("Needs a person");
   expect(setupStepWording("handover")).toBe("Handing the token to the gateway");
   expect(setupStepWording("new_step")).toBe("new_step");
-  expect(setupReasonWording("direct_account")).toContain("direct exit");
+  expect(setupReasonWording("direct_account")).toContain("no proxy exit");
   expect(setupRefusalWording("account_status")).toContain("testing or active");
   expect(setupRefusalWording("account_retired")).toBe("account_retired");
 });

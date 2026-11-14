@@ -45,7 +45,7 @@ type AccountRow struct {
 	Alias       string `json:"alias"`
 	Email       string `json:"email"`
 	Access      string `json:"access"` // direct or gateway
-	Status      string `json:"status"` // testing, active, paused, suspended or retired
+	Status      string `json:"status"` // testing, active, paused, suspended, retired or kyc
 	TokenRef    string `json:"token_ref"`
 	Direct      bool   `json:"direct"` // the proxy block's direct: the gateway's own address is the exit
 	ProxyHost   string `json:"proxy_host"`
@@ -66,11 +66,15 @@ type AccountRow struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 
 	Verify Verification `json:"verify"` // the last run of the three checks, voided by a change of exit or reference
+
+	// ObservationSince is the inventory's observation_since, YYYY-MM-DD; empty when the
+	// account is not under observation. The gateway keeps it and acts on nothing in it.
+	ObservationSince string `json:"observation_since"`
 }
 
 // accountColumns are the columns of an AccountRow, in the order scanRow reads them.
 const accountColumns = `alias, email, access, status, token_ref, proxy_direct, proxy_host, proxy_port, expected_egress_ip,
-	proxy_username_ref, proxy_password_ref, device_id, account_uuid, receiver_email, proxy_provider, proxy_type, rev, created_at, updated_at, token_ok, egress_ok, probe_ok, verified_at`
+	proxy_username_ref, proxy_password_ref, device_id, account_uuid, receiver_email, proxy_provider, proxy_type, observation_since, rev, created_at, updated_at, token_ok, egress_ok, probe_ok, verified_at`
 
 // scanner is a row of a query, *sql.Row or *sql.Rows.
 type scanner interface{ Scan(dest ...any) error }
@@ -81,12 +85,14 @@ func scanRow(r scanner) (AccountRow, error) {
 	var created, updated int64
 	var tokenOK, egressOK, probeOK sql.NullBool
 	var verified sql.NullInt64
+	var observation sql.NullString
 	if err := r.Scan(&row.Alias, &row.Email, &row.Access, &row.Status, &row.TokenRef, &row.Direct, &row.ProxyHost, &row.ProxyPort,
-		&row.ExpectedIP, &row.UsernameRef, &row.PasswordRef, &row.DeviceID, &row.AccountUUID, &row.ReceiverEmail, &row.ProxyProvider, &row.ProxyType, &row.Rev, &created, &updated,
+		&row.ExpectedIP, &row.UsernameRef, &row.PasswordRef, &row.DeviceID, &row.AccountUUID, &row.ReceiverEmail, &row.ProxyProvider, &row.ProxyType, &observation, &row.Rev, &created, &updated,
 		&tokenOK, &egressOK, &probeOK, &verified); err != nil {
 		return AccountRow{}, err
 	}
 	row.CreatedAt, row.UpdatedAt = fromMillis(created), fromMillis(updated)
+	row.ObservationSince = observation.String
 	row.Verify = Verification{TokenOK: boolPointer(tokenOK), EgressOK: boolPointer(egressOK), ProbeOK: boolPointer(probeOK)}
 	if verified.Valid {
 		row.Verify.At = fromMillis(verified.Int64)
@@ -116,6 +122,62 @@ func migrateToV13(ctx context.Context, tx *sql.Tx) error {
 		return fmt.Errorf("session store migration v13: %v", err)
 	}
 	return nil
+}
+
+// schemaV14 rebuilds the accounts table, since SQLite changes no CHECK in place, to add
+// the status kyc and the column observation_since: the date the account's observation
+// began, the inventory's observation_since as YYYY-MM-DD, NULL when it is not under
+// observation. The gateway only keeps it. No index, trigger or foreign key names the
+// table, so the rebuild has nothing else to carry over.
+const schemaV14 = `
+CREATE TABLE accounts_v14 (
+	alias TEXT PRIMARY KEY,
+	email TEXT NOT NULL,
+	access TEXT NOT NULL CHECK (access IN ('direct', 'gateway')),
+	status TEXT NOT NULL CHECK (status IN ('testing', 'active', 'paused', 'suspended', 'retired', 'kyc')),
+	token_ref TEXT NOT NULL,
+	proxy_direct INTEGER NOT NULL CHECK (proxy_direct IN (0, 1)),
+	proxy_host TEXT NOT NULL,
+	proxy_port INTEGER NOT NULL,
+	expected_egress_ip TEXT NOT NULL,
+	proxy_username_ref TEXT NOT NULL,
+	proxy_password_ref TEXT NOT NULL,
+	device_id TEXT NOT NULL,
+	account_uuid TEXT NOT NULL,
+	rev INTEGER NOT NULL,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	token_ok INTEGER,
+	egress_ok INTEGER,
+	probe_ok INTEGER,
+	verified_at INTEGER,
+	receiver_email TEXT NOT NULL DEFAULT '',
+	proxy_provider TEXT NOT NULL DEFAULT '',
+	proxy_type TEXT NOT NULL DEFAULT '',
+	observation_since TEXT CHECK (observation_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+) STRICT;
+INSERT INTO accounts_v14 (alias, email, access, status, token_ref, proxy_direct, proxy_host, proxy_port, expected_egress_ip,
+	proxy_username_ref, proxy_password_ref, device_id, account_uuid, rev, created_at, updated_at,
+	token_ok, egress_ok, probe_ok, verified_at, receiver_email, proxy_provider, proxy_type)
+SELECT alias, email, access, status, token_ref, proxy_direct, proxy_host, proxy_port, expected_egress_ip,
+	proxy_username_ref, proxy_password_ref, device_id, account_uuid, rev, created_at, updated_at,
+	token_ok, egress_ok, probe_ok, verified_at, receiver_email, proxy_provider, proxy_type FROM accounts;
+DROP TABLE accounts;
+ALTER TABLE accounts_v14 RENAME TO accounts;
+`
+
+// migrateToV14 rebuilds the accounts table as schemaV14 says, inside the migration's
+// transaction; every row keeps its values and has no observation date.
+func migrateToV14(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, schemaV14); err != nil {
+		return fmt.Errorf("session store migration v14: %v", err)
+	}
+	return nil
+}
+
+// nullableString stores "" as NULL.
+func nullableString(s string) sql.NullString {
+	return sql.NullString{String: s, Valid: s != ""}
 }
 
 // accountRow reads account alias inside tx, ErrAccountNotFound when there is none.
@@ -159,11 +221,11 @@ func (s *Store) ImportAccounts(ctx context.Context, rows []AccountRow) (bool, er
 	now := s.now()
 	for _, row := range rows {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO accounts (alias, email, access, status, token_ref, proxy_direct, proxy_host, proxy_port,
-			expected_egress_ip, proxy_username_ref, proxy_password_ref, device_id, account_uuid, receiver_email, proxy_provider, proxy_type, rev, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+			expected_egress_ip, proxy_username_ref, proxy_password_ref, device_id, account_uuid, receiver_email, proxy_provider, proxy_type, observation_since, rev, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 			row.Alias, row.Email, row.Access, row.Status, row.TokenRef, row.Direct, row.ProxyHost, row.ProxyPort,
 			row.ExpectedIP, row.UsernameRef, row.PasswordRef, row.DeviceID, row.AccountUUID,
-			row.ReceiverEmail, row.ProxyProvider, row.ProxyType, now, now); err != nil {
+			row.ReceiverEmail, row.ProxyProvider, row.ProxyType, nullableString(row.ObservationSince), now, now); err != nil {
 			return false, fmt.Errorf("import accounts: %s: %v", row.Alias, err)
 		}
 	}

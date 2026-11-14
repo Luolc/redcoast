@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -226,23 +227,44 @@ func inventoryRow(alias, path string) (session.AccountRow, error) {
 	if row.Status == "" {
 		row.Status = "testing"
 	}
+	if row.ObservationSince, err = observationDate(alias, file.ObservationSince); err != nil {
+		return session.AccountRow{}, err
+	}
 	if fields.OAuthToken != nil {
 		row.TokenRef = *fields.OAuthToken
 	}
 	return row, nil
 }
 
+// observationDate returns the date of an account file's observation_since node, "" when
+// the file has none. The value must be a date written YYYY-MM-DD, quoted or not; null
+// and anything else are refused.
+func observationDate(alias string, node yaml.Node) (string, error) {
+	if node.Kind == 0 {
+		return "", nil
+	}
+	if node.Kind == yaml.ScalarNode && (node.Tag == "!!timestamp" || node.Tag == "!!str") {
+		if _, err := time.Parse(time.DateOnly, node.Value); err == nil {
+			return node.Value, nil
+		}
+	}
+	return "", fieldError{alias, "observation_since", "not a date written YYYY-MM-DD"}
+}
+
 // exportFile is the layout of an exported account file: the keys of the inventory
-// format that the gateway consumes. A key the account does not have is left out.
+// format that the gateway consumes. A key the account does not have is left out, but
+// for oauth_token, which the inventory always has and writes null when there is none.
 type exportFile struct {
-	Email         string      `yaml:"email"`
-	ReceiverEmail string      `yaml:"receiver_email,omitempty"`
-	Access        string      `yaml:"access"`
-	Status        string      `yaml:"status"`
-	OAuthToken    string      `yaml:"oauth_token,omitempty"`
-	DeviceID      string      `yaml:"device_id,omitempty"`
-	AccountUUID   string      `yaml:"account_uuid,omitempty"`
-	Proxy         *exportExit `yaml:"proxy,omitempty"`
+	Email         string `yaml:"email"`
+	ReceiverEmail string `yaml:"receiver_email,omitempty"`
+	Access        string `yaml:"access"`
+	Status        string `yaml:"status"`
+	// ObservationSince is written as a plain YAML date, unquoted, as the inventory has it.
+	ObservationSince *yaml.Node  `yaml:"observation_since,omitempty"`
+	OAuthToken       *string     `yaml:"oauth_token"`
+	DeviceID         string      `yaml:"device_id,omitempty"`
+	AccountUUID      string      `yaml:"account_uuid,omitempty"`
+	Proxy            *exportExit `yaml:"proxy,omitempty"`
 }
 
 // exportExit is the proxy block of an exported file.
@@ -269,9 +291,15 @@ func ExportInventory(dir string, rows []session.AccountRow) error {
 		if !accountAlias.MatchString(row.Alias) {
 			return fieldError{row.Alias, "alias", "not an account alias"}
 		}
-		file := exportFile{Email: row.Email, ReceiverEmail: row.ReceiverEmail, Access: row.Access, Status: row.Status, OAuthToken: row.TokenRef, DeviceID: row.DeviceID, AccountUUID: row.AccountUUID}
+		file := exportFile{Email: row.Email, ReceiverEmail: row.ReceiverEmail, Access: row.Access, Status: row.Status, DeviceID: row.DeviceID, AccountUUID: row.AccountUUID}
+		if row.TokenRef != "" {
+			file.OAuthToken = &row.TokenRef
+		}
 		if exit := (exportExit{row.ProxyProvider, row.ProxyType, row.Direct, row.ProxyHost, row.ProxyPort, row.ExpectedIP, row.UsernameRef, row.PasswordRef}); exit != (exportExit{}) {
 			file.Proxy = &exit
+		}
+		if row.ObservationSince != "" {
+			file.ObservationSince = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!timestamp", Value: row.ObservationSince}
 		}
 		var data bytes.Buffer
 		encoder := yaml.NewEncoder(&data)

@@ -70,7 +70,8 @@ func storeError(err error) error {
 	return errStoreUnavailable
 }
 
-// create stores a new account as testing, with its plan, and serves nothing yet.
+// create stores a new account as testing, with its plan, and serves nothing yet. An
+// account of access direct may leave out proxy, or give an empty one, and has no exit.
 func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entry session.AuditEntry) (any, error) {
 	ctx := r.Context()
 	if w.cfg.TokenRefTemplate == "" {
@@ -79,7 +80,7 @@ func (w *AccountWriter) create(r *http.Request, _ string, body *createBody, entr
 	for _, field := range []struct {
 		name string
 		set  bool
-	}{{"alias", body.Alias != nil}, {"email", body.Email != nil}, {"access", body.Access != nil}, {"plan", body.Plan != nil}, {"proxy", body.Proxy != nil}, {"device_id", body.DeviceID != nil}} {
+	}{{"alias", body.Alias != nil}, {"email", body.Email != nil}, {"access", body.Access != nil}, {"plan", body.Plan != nil}, {"proxy", body.Proxy != nil || body.Access != nil && *body.Access == "direct"}, {"device_id", body.DeviceID != nil}} {
 		if !field.set {
 			return nil, fieldProblem(field.name, "missing")
 		}
@@ -154,7 +155,7 @@ func patched(before session.AccountRow, body *patchBody) (session.AccountRow, er
 	}
 	if body.Status != nil {
 		switch *body.Status {
-		case "testing", "paused", "suspended", "retired":
+		case "testing", "paused", "suspended", "retired", "kyc":
 			after.Status = *body.Status
 		case "active":
 			return after, fieldProblem("status", "use activate")

@@ -3,9 +3,11 @@ package session
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -677,5 +679,125 @@ func TestAccountWrites(t *testing.T) {
 	failure := errors.New("refused")
 	if _, err := store.UpdateAccount(ctx, "sample-a", 4, entry, func(*AccountRow) error { return failure }); !errors.Is(err, failure) {
 		t.Fatalf("failing apply: %v", err)
+	}
+}
+
+// v13Columns are the columns of the accounts table of version 13.
+var v13Columns = strings.Replace(accountColumns, "observation_since, ", "", 1)
+
+// toV13 turns a version-14 file back into a version-13 one: the accounts table as
+// versions 9, 10 and 13 left it, its rows kept, and user_version 13.
+var toV13 = []string{
+	"ALTER TABLE accounts RENAME TO accounts_v14_copy",
+	schemaV9,
+	"ALTER TABLE accounts ADD COLUMN token_ok INTEGER",
+	"ALTER TABLE accounts ADD COLUMN egress_ok INTEGER",
+	"ALTER TABLE accounts ADD COLUMN probe_ok INTEGER",
+	"ALTER TABLE accounts ADD COLUMN verified_at INTEGER",
+	schemaV13,
+	"INSERT INTO accounts (" + v13Columns + ") SELECT " + v13Columns + " FROM accounts_v14_copy",
+	"DROP TABLE accounts_v14_copy",
+	"PRAGMA user_version = 13",
+}
+
+// TestMigrateToV14: a version-13 file gets the status kyc and the column
+// observation_since; every row keeps every value, the checks and the audit included, with
+// no observation date; kyc and a date can then be written, and an unknown status or a
+// date of another shape is still refused. A migration that fails leaves the version-13
+// file as it was. Control arm: the version-13 file refuses kyc and has no such column.
+func TestMigrateToV14(t *testing.T) {
+	ctx := context.Background()
+	c := newClock()
+	store, path := open(t, c)
+	pass := true
+	rows := []AccountRow{
+		{Alias: "sample-a", Email: "a@example.test", Access: "gateway", Status: "active", TokenRef: "op://example-vault/t/credential", ProxyHost: "proxy.example.test", ProxyPort: 8001,
+			ExpectedIP: "192.0.2.1", UsernameRef: "op://p/u/username", PasswordRef: "op://p/u/password", DeviceID: "d", AccountUUID: "u", ReceiverEmail: "r@example.test", ProxyProvider: "example-provider", ProxyType: "residential"},
+		{Alias: "sample-b", Email: "b@example.test", Access: "direct", Status: "retired"},
+	}
+	if _, err := store.ImportAccounts(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetVerification(ctx, "sample-a", 1, Verification{TokenOK: &pass, EgressOK: &pass, At: fromMillis(c.Now().UnixMilli())}, AuditEntry{SourceIP: "192.0.2.50", Action: "account-verify"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := store.Accounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range toV13 {
+		if _, err := store.db.Exec(statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	if _, err := store.db.Exec("UPDATE accounts SET status = 'kyc' WHERE alias = 'sample-b'"); err == nil {
+		t.Fatal("control arm: the version-13 file takes kyc")
+	}
+	if _, err := store.db.Exec("SELECT observation_since FROM accounts"); err == nil {
+		t.Fatal("control arm: the version-13 file has the column")
+	}
+	// A migration that fails on the way rolls back: the name it builds the new table
+	// under is taken.
+	if _, err := store.db.Exec("CREATE TABLE accounts_v14 (x INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if failed, err := Open(ctx, path, Config{Now: c.Now}); err == nil {
+		_ = failed.Close()
+		t.Fatal("the migration did not fail")
+	}
+	old, err := sql.Open("sqlite", fileURI(path, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version, count int
+	if err := old.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 13 {
+		t.Fatalf("after a failed migration: version %d, %v", version, err)
+	}
+	if err := old.QueryRow("SELECT COUNT(*) FROM accounts").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("after a failed migration: %d rows, %v", count, err)
+	}
+	if _, err := old.Exec("DROP TABLE accounts_v14"); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, Config{Now: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = migrated.Close() }()
+	if err := migrated.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 14 {
+		t.Fatalf("version %d, %v", version, err)
+	}
+	after, initialized, err := migrated.Accounts(ctx)
+	if err != nil || !initialized || !reflect.DeepEqual(after, before) {
+		t.Fatalf("rows after the migration:\n%+v\nbefore:\n%+v\n%v", after, before, err)
+	}
+	if audit, err := migrated.AccountAudit(ctx, "sample-a"); err != nil || len(audit) != 1 {
+		t.Fatalf("audit = %+v, %v", audit, err)
+	}
+	var tables int
+	if err := migrated.db.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'accounts%'").Scan(&tables); err != nil || tables != 1 {
+		t.Fatalf("%d tables named accounts*, %v", tables, err)
+	}
+	updated, err := migrated.UpdateAccount(ctx, "sample-b", 1, AuditEntry{SourceIP: "192.0.2.50", Action: "account-update"}, func(r *AccountRow) error {
+		r.Status, r.ObservationSince = "kyc", "2026-11-13"
+		return nil
+	})
+	if err != nil || updated.Status != "kyc" || updated.ObservationSince != "2026-11-13" {
+		t.Fatalf("written row = %+v, %v", updated, err)
+	}
+	if again, err := migrated.Account(ctx, "sample-b"); err != nil || again.Status != "kyc" || again.ObservationSince != "2026-11-13" {
+		t.Fatalf("read back = %+v, %v", again, err)
+	}
+	for _, statement := range []string{"UPDATE accounts SET status = 'gone' WHERE alias = 'sample-b'", "UPDATE accounts SET observation_since = '2026-1-13' WHERE alias = 'sample-b'"} {
+		if _, err := migrated.db.Exec(statement); err == nil {
+			t.Fatalf("%s: taken", statement)
+		}
 	}
 }

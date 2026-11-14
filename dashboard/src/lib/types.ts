@@ -207,7 +207,7 @@ export interface AccountConfig {
   email: string;
   receiver_email: string; // empty when not set
   access: string; // direct or gateway
-  status: string; // testing, active, paused, suspended or retired
+  status: string; // testing, active, paused, suspended, retired or kyc
   token_ref: string;
   proxy: ProxyConfig;
   device_id: string; // empty until set

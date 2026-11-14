@@ -21,7 +21,7 @@ const maxInventoryFile = 64 << 10
 
 // accountStatuses are the values an inventory file's status may take; only active
 // accounts are served.
-var accountStatuses = map[string]bool{"active": true, "paused": true, "suspended": true, "retired": true, "testing": true}
+var accountStatuses = map[string]bool{"active": true, "paused": true, "suspended": true, "retired": true, "kyc": true, "testing": true}
 
 // inventoryFile is the part of one <inventory>/<alias>.yaml the gateway consumes.
 // A start from the directory ignores the other keys, which may belong to other tools;
@@ -41,6 +41,9 @@ type inventoryFile struct {
 		UsernameRef string `yaml:"username_ref"`
 		PasswordRef string `yaml:"password_ref"`
 	} `yaml:"proxy"`
+	// ObservationSince is kept as a node: an unquoted date is a YAML timestamp, and only
+	// the import reads it (see observationDate).
+	ObservationSince yaml.Node `yaml:"observation_since"`
 }
 
 // inventoryAccount is one account the gateway serves, as the inventory describes it: the

@@ -412,8 +412,9 @@ type proxyRefOption struct {
 
 // checkRow refuses a row whose fields have the wrong shape or do not fit together: the
 // exit of a direct account has only an expected IP, any other exit has a host, a port
-// and, when checkLogin is set, one of the proxy logins in options. The error names one
-// field.
+// and, when checkLogin is set, one of the proxy logins in options. An account of access
+// direct may have no exit at all, as an inventory file without a proxy block. The
+// error names one field.
 func checkRow(row session.AccountRow, options []proxyRefOption, checkLogin bool) error {
 	if len(row.Email) > 254 || !emailShape.MatchString(row.Email) {
 		return fieldProblem("email", "not an email address")
@@ -448,6 +449,9 @@ func checkReceiverEmail(value string) error {
 
 // checkExit is checkRow for the exit's fields.
 func checkExit(row session.AccountRow, options []proxyRefOption, checkLogin bool) error {
+	if row.Access == "direct" && noExit(row) {
+		return nil
+	}
 	if row.ProxyProvider != "" && !kindShape.MatchString(row.ProxyProvider) {
 		return fieldProblem("proxy.provider", "not a provider name")
 	}
@@ -480,15 +484,21 @@ func checkExit(row session.AccountRow, options []proxyRefOption, checkLogin bool
 	return nil
 }
 
+// noExit reports whether a row has none of the proxy block's fields.
+func noExit(row session.AccountRow) bool {
+	return !row.Direct && row.ProxyHost == "" && row.ProxyPort == 0 && row.ExpectedIP == "" && row.UsernameRef == "" && row.PasswordRef == "" &&
+		row.ProxyProvider == "" && row.ProxyType == ""
+}
+
 // served reports whether the gateway serves a row.
 func served(row session.AccountRow) bool {
 	return row.Status == "active" && row.Access == "gateway"
 }
 
 // servedSettings is a row without what no served set depends on: the emails, the proxy's provider and type, the
-// revision, the times and the checks.
+// observation date, the revision, the times and the checks.
 func servedSettings(row session.AccountRow) session.AccountRow {
-	row.Email, row.ReceiverEmail, row.ProxyProvider, row.ProxyType = "", "", "", ""
+	row.Email, row.ReceiverEmail, row.ProxyProvider, row.ProxyType, row.ObservationSince = "", "", "", "", ""
 	row.Rev, row.CreatedAt, row.UpdatedAt, row.Verify = 0, time.Time{}, time.Time{}, session.Verification{}
 	return row
 }

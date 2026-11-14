@@ -187,7 +187,7 @@ type dashboardView struct {
 	Gateway  gatewayView        `json:"gateway"`
 	Accounts []dashboardAccount `json:"accounts"`
 	// Unserved are the accounts of the accounts table that the gateway does not serve
-	// (testing, paused, suspended, retired, or not on the gateway path); always a list.
+	// (testing, paused, suspended, retired, kyc, or not on the gateway path); always a list.
 	Unserved []accountConfig `json:"unserved_accounts"`
 	// AccountsEditable is whether this process keeps its accounts where they can be
 	// edited; Write says whether this request's source may write; ProxyRefOptions are the
